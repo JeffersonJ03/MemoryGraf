@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memorygraf"
+version = "1.0.0"
+description = "Grafo de conocimiento local, portable y agnóstico al LLM, para dar contexto de un proyecto a un asistente con recuperación selectiva y bajo consumo de tokens."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Jefferson J. Patiño Ortega" }]
+keywords = ["mcp", "knowledge-graph", "llm", "code-context", "retrieval"]
+# Núcleo sin dependencias: corre solo con stdlib (modo portable de base).
+dependencies = []
+
+[project.scripts]
+memorygraf = "memorygraf.cli:main"
+
+[project.optional-dependencies]
+# Modo POTENCIA (opcional). Cada extra habilita una capacidad; si falta, hay
+# degradación elegante al modo portable. Instalar con: pip install -e ".[full]"
+parsers = ["tree-sitter>=0.23", "tree-sitter-language-pack>=0.9"]  # calls/implements JS/TS
+neural = ["model2vec>=0.6"]                                        # semántica cross-idioma
+watch = ["watchdog>=4"]                                            # watch por eventos nativo
+full = [
+    "tree-sitter>=0.23", "tree-sitter-language-pack>=0.9",
+    "model2vec>=0.6", "watchdog>=4",
+]
+
+[tool.setuptools]
+packages = ["memorygraf", "memorygraf.extractors"]
+
+[tool.setuptools.package-data]
+memorygraf = ["py.typed"]

@@ -1,0 +1,29 @@
+# Entornos y cachés de Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Artefactos regenerables del grafo (NUNCA versionar: contienen estructura del código)
+*.db
+*.db-wal
+*.db-shm
+*.vec
+memorygraf.json
+graph.html
+.memorygraf/
+
+# Configuración local con rutas/dominio específicos (usar los .example)
+memorygraf.config.json
+memorygraf.entities.json
+.mcp.json
+measure.py
+eval_semantic.py
+
+# Editor / SO / Claude Code
+.claude/
+.DS_Store
+*.swp

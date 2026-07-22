@@ -1,0 +1,8 @@
+# MemoryGraf — modo POTENCIA (opcional). El núcleo corre sin nada de esto.
+# Instalar en un venv:  python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements-full.txt
+#
+# Cada dependencia habilita una capacidad; si falta, hay degradación elegante:
+tree-sitter>=0.23                 # parser real JS/TS/TSX -> calls e implements exactos
+tree-sitter-language-pack>=0.9    # grammars precompilados (sin compilar nada)
+model2vec>=0.6                    # embeddings neuronales locales -> semántica cross-idioma
+watchdog>=4                       # watch por eventos nativo (inotify/FSEvents/Windows)

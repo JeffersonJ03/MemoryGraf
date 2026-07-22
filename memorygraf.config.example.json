@@ -1,0 +1,8 @@
+{
+  "_comment": "Copia a memorygraf.config.json (o usa 'memorygraf init'). 'root' relativo al proyecto.",
+  "graph_name": "mi-sistema",
+  "projects": [
+    { "name": "mi-proyecto", "root": "." }
+  ],
+  "excludes": []
+}

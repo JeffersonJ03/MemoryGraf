@@ -1,0 +1,12 @@
+{
+  "_comment": "Ejemplo de registro MCP (Claude Code project scope). Preferible: usar 'memorygraf install claude' o 'memorygraf mcp-config'. Ajusta command/env a tu instalación.",
+  "mcpServers": {
+    "memorygraf": {
+      "command": "memorygraf",
+      "args": ["mcp"],
+      "env": {
+        "MEMORYGRAF_HOME": "/ruta/absoluta/a/tu/proyecto"
+      }
+    }
+  }
+}

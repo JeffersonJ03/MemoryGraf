@@ -1,0 +1,17 @@
+{
+  "_comment": "Glosario de entidades de dominio (opcional). Copia a memorygraf.entities.json y edita. Enlaza cada entidad a los símbolos/archivos cuyo nombre o ruta contenga algún alias.",
+  "entities": {
+    "Usuario": {
+      "description": "Cuenta/usuario del sistema; autenticación y perfil.",
+      "aliases": ["user", "usuario", "auth", "login", "account"]
+    },
+    "Pedido": {
+      "description": "Pedido/orden de negocio.",
+      "aliases": ["order", "pedido", "orden"]
+    },
+    "Producto": {
+      "description": "Producto o servicio del catálogo.",
+      "aliases": ["product", "producto", "item", "servicio"]
+    }
+  }
+}
