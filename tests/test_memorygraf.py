@@ -1118,6 +1118,78 @@ class TestDigestExtraFormats(Base):
         self.assertIn("proj/indexer.py:1", out)
         store.close()
 
+    # --- M5 · formatos agrupados (eslint stylish, jest, go test, tsc) ---
+    def test_digest_tsc_format(self):
+        from memorygraf import context_compiler as cc
+        self.write("app.ts", "export const x: number = 1;\n")
+        store, _ = self.index()
+        log = ("src/app.ts(12,5): error TS2322: Type 'string' is not assignable "
+               "to type 'number'.\n")
+        out = cc.digest_log(store, log, self.config)
+        self.assertIn("TS2322", out)
+        self.assertIn("app.ts:12", out)
+        store.close()
+
+    def test_digest_eslint_stylish_groups_by_file_header(self):
+        from memorygraf import context_compiler as cc
+        self.write("app.js", "var x = 1\n")
+        store, _ = self.index()
+        log = ("/repo/src/app.js\n"
+               "  1:5   error    'x' is assigned a value but never used  no-unused-vars\n"
+               "  2:1   warning  Missing semicolon                       semi\n"
+               "\n"
+               "✖ 2 problems (1 error, 1 warning)\n")
+        out = cc.digest_log(store, log, self.config)
+        self.assertIn("app.js:1", out)                 # línea del encabezado + fila
+        self.assertIn("no-unused-vars", out)
+        store.close()
+
+    def test_digest_go_test_fail_block(self):
+        from memorygraf import context_compiler as cc
+        self.write("calc.go", "package calc\n")
+        store, _ = self.index()
+        log = ("=== RUN   TestSuma\n"
+               "--- FAIL: TestSuma (0.00s)\n"
+               "    calc_test.go:42: expected 3, got 2\n"
+               "FAIL\n"
+               "exit status 1\n")
+        out = cc.digest_log(store, log, self.config)
+        self.assertIn("calc_test.go:42", out)
+        self.assertIn("expected 3, got 2", out)
+        store.close()
+
+    def test_digest_jest_fail_with_stack_frame(self):
+        from memorygraf import context_compiler as cc
+        self.write("sum.js", "module.exports = () => 0\n")
+        store, _ = self.index()
+        log = ("FAIL src/sum.test.js\n"
+               "  ● sum › adds numbers\n"
+               "    expect(received).toBe(expected)\n"
+               "      at Object.<anonymous> (src/sum.test.js:8:19)\n")
+        out = cc.digest_log(store, log, self.config)
+        self.assertIn("sum.test.js:8", out)
+        self.assertIn("jest:", out)
+        store.close()
+
+    def test_grouped_parsers_dont_fire_on_pytest_log(self):
+        # no-regresión: un log de pytest NO debe activar los parsers agrupados
+        from memorygraf import context_compiler as cc
+        self.write("a.py", "def f():\n    return 1\n")
+        store, _ = self.index()
+        log = ("==================== FAILURES ====================\n"
+               "FAILED tests/test_x.py::test_foo - AssertionError: 1 != 2\n"
+               "=========== 1 failed, 3 passed in 0.20s ===========\n")
+        # los parsers agrupados, aislados, no encuentran nada aquí
+        lines = log.splitlines()
+        self.assertEqual(cc._parse_tsc(lines), [])
+        self.assertEqual(cc._parse_go_test(lines), [])
+        self.assertEqual(cc._parse_eslint_stylish(lines), [])
+        self.assertEqual(cc._parse_jest(lines), [])
+        # y el digest sigue extrayendo la aserción de pytest como antes
+        out = cc.digest_log(store, log, self.config)
+        self.assertIn("AssertionError", out)
+        store.close()
+
 
 class TestCochangeTheme(Base):
     """Mejora: el tema del co-cambio ignora palabras de ceremonia (fase/feat/…)."""

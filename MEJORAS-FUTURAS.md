@@ -26,10 +26,11 @@ verificación en vivo antes de dar por buena.
 | ~~M2~~ | ✅ **Implementado** · `tested_by` a nivel **símbolo→test** (contextos de cobertura) | Alto | Medio | Medio |
 | ~~M3~~ | ✅ **Implementado** · Narrar el "por qué" del co-cambio de **símbolos** | Medio | Bajo | Bajo |
 | ~~M4~~ | ✅ **Implementado** (multi-lenguaje TS/JS) · `resolved_type` + params/vars *(params/vars pend.)* | Medio | Medio | Medio |
-| M5 | `digest`: formatos **agrupados** (eslint stylish, jest, go test, tsc) | Medio | Medio | Medio |
+| ~~M5~~ | ✅ **Implementado** · `digest`: formatos **agrupados** (eslint stylish, jest, go test, tsc) | Medio | Medio | Medio |
 | M6 | Escala: `git blame` **paralelo/por lotes** en repos grandes | Medio | Medio | Medio |
 | M7 | Narrativa/rerank con **LLM local por defecto** cuando Ollama está | Bajo | Bajo | Bajo |
 | M8 | Co-cambio **cross-project** por símbolo (hoy dentro de un proyecto) | Bajo | Medio | Medio |
+| M4b | `resolved_type` de **params/variables individuales** (hover por offset) — pendiente de M4 | Bajo | Medio | Medio |
 
 ---
 
@@ -166,10 +167,19 @@ firma de la **definición**. No cubría TS/JS ni resolvía tipos de params/varia
 
 ---
 
-## M5 · `digest`: formatos de log agrupados
+## M5 · `digest`: formatos de log agrupados  ✅ IMPLEMENTADO
 
-**Contexto.** `context_compiler.digest_log` reconoce formatos **lineales** (traceback
-Python, pytest condensado, `path:línea: error:` de mypy/gcc). No parsea formatos
+**Estado (2026-07-23).** Hecho. `context_compiler.digest_log` suma cuatro parsers
+AISLADOS (`_parse_tsc`, `_parse_go_test`, `_parse_eslint_stylish`, `_parse_jest`), cada uno
+con su propio estado, que corren sobre todo el log DESPUÉS de los lineales (así el dedup da
+prioridad a pytest/py). Son estrictos para no cruzar falsos positivos: tsc self-contained
+(`file.ts(l,c): error TSxxxx`), go dentro de bloques `--- FAIL`, eslint por encabezado de
+archivo + filas `l:c sev msg`, jest por `FAIL <path>` + `● título` + frame `at file:line:col`.
+Tests: un fixture por herramienta + no-regresión (un log de pytest no dispara ninguno).
+El resto de esta sección queda como registro del plan original.
+
+**Contexto.** Antes `context_compiler.digest_log` reconocía formatos **lineales** (traceback
+Python, pytest condensado, `path:línea: error:` de mypy/gcc). No parseaba formatos
 **agrupados** (eslint "stylish": encabezado de archivo + `línea:col` debajo; jest;
 `go test`; `tsc` con `archivo(l,c)`).
 
@@ -246,6 +256,34 @@ lógico) no se enlazan por co-cambio.
 - No cruzar proyectos que solo comparten nombres de archivo por casualidad.
 
 **Riesgo.** Medio: falsos positivos entre proyectos; empezar muy conservador.
+
+---
+
+## M4b · `resolved_type` de params/variables individuales  (pendiente de M4)
+
+**Contexto.** M4 dejó el multi-lenguaje. Sigue pendiente el punto 3 de su plan: tipos de
+**parámetros y variables individuales**, no solo la firma de la definición. Hoy
+`_collect_types` hace UN hover por símbolo (en su identificador de definición) y guarda un
+único `resolved_type`. Para código bien tipado la firma YA trae los tipos de params/retorno
+(p.ej. `def suma(a: int, b: int) -> int`), así que el valor NUEVO se concentra en
+**variables locales inferidas** y en **params de código sin anotaciones**.
+
+**Plan de implementación.**
+1. Extractores (`python_ast.py`, `js_ts.py`, `ts_treesitter.py`): capturar y persistir los
+   **offsets** (línea, col) de cada parámetro/variable relevante del símbolo.
+2. Modelo/store: los params/vars NO son nodos; persistir un atributo estructurado en el
+   símbolo, p.ej. `params_types = {"a": "int", "b": "int"}` (JSON, caché regenerable).
+3. `runtime/lsp.py`: un hover por offset (respetando el presupuesto de tiempo del LSP).
+4. `query.py`: renderizar esos tipos en `get`/`neighbors`.
+
+**Pruebas post-implementación.**
+- Función con params anotados vs. inferidos → los tipos por-param quedan poblados.
+- Presupuesto: N hovers extra no revientan `hover_budget`; degradación por-símbolo intacta.
+- Determinismo y anti-staleness (re-sync limpia y repuebla).
+
+**Riesgo.** Medio: toca cada extractor por lenguaje (offsets) y añade peticiones LSP.
+**Recomendación:** hacer solo si aparece necesidad concreta de tipos de locales/vars
+inferidas; el 80% del valor (firma con tipos) ya se entregó en M4.
 
 ---
 

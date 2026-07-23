@@ -109,6 +109,87 @@ _TOOL_DIAG = re.compile(r"^(\S+\.[A-Za-z]\w*):(\d+)(?::\d+)?:\s+error:?\s+(.+)$"
 _GENERIC_ERR = re.compile(r"\b(error|failed|exception|assert\w*)\b", re.IGNORECASE)
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 
+# --- M5 · formatos AGRUPADOS (parsers con estado propio, aislados entre sí) --------- #
+# Cada uno recorre TODAS las líneas con su propio estado y devuelve [(path, line, msg)].
+# Estrictos a propósito: no deben disparar con logs de pytest/traceback (sin cruces).
+_CODE_EXT = r"(?:js|jsx|ts|tsx|mjs|cjs|vue|svelte|go|py)"
+# tsc:  "src/foo.ts(12,5): error TS2322: mensaje"   (LINEAL, self-contained)
+_TSC = re.compile(r"^\s*(\S+\.(?:ts|tsx|js|jsx|mjs|cjs))\((\d+),\d+\):\s+"
+                  r"(error\s+TS\d+:\s+.+)$")
+# eslint "stylish": encabezado con la RUTA, luego filas "  línea:col  sev  msg  rule"
+_ESLINT_HEAD = re.compile(r"^(\S*\.(?:js|jsx|ts|tsx|mjs|cjs|vue|svelte))\s*$")
+_ESLINT_ROW = re.compile(r"^\s+(\d+):(\d+)\s+(error|warning)\s+(.+\S)\s*$")
+# go test:  "--- FAIL: TestX" abre bloque; dentro "    file_test.go:42: mensaje"
+_GO_FAIL = re.compile(r"^(?:=== FAIL|--- FAIL):\s")
+_GO_LOC = re.compile(r"^\s+(\S+\.go):(\d+):(?:\d+:)?\s*(.*)$")
+# jest:  "FAIL src/foo.test.js" abre bloque; "● título" da el mensaje; "at file:line:col"
+_JEST_FAIL = re.compile(r"^\s*FAIL\s+(\S+)")
+_JEST_BULLET = re.compile(r"^\s*[●✕×]\s+(.+\S)\s*$")     # ● ✕ ×
+_JEST_AT = re.compile(r"^\s*at\s+(?:.*\()?([^\s():]+):(\d+):\d+\)?\s*$")
+
+
+def _parse_tsc(lines: list) -> list:
+    out = []
+    for ln in lines:
+        m = _TSC.match(ln)
+        if m:
+            out.append((m.group(1), int(m.group(2)), m.group(3).strip()))
+    return out
+
+
+def _parse_eslint_stylish(lines: list) -> list:
+    out, cur = [], None
+    for ln in lines:
+        h = _ESLINT_HEAD.match(ln)
+        if h:
+            cur = h.group(1)
+            continue
+        if cur:
+            m = _ESLINT_ROW.match(ln)
+            if m:
+                out.append((cur, int(m.group(1)), f"{m.group(3)}: {m.group(4)}"))
+            elif not ln.strip():
+                cur = None          # línea en blanco: fin del bloque de ese archivo
+    return out
+
+
+def _parse_go_test(lines: list) -> list:
+    out, in_fail = [], False
+    for ln in lines:
+        if _GO_FAIL.match(ln):
+            in_fail = True
+            continue
+        if in_fail:
+            m = _GO_LOC.match(ln)
+            if m:
+                out.append((m.group(1), int(m.group(2)),
+                            (m.group(3) or "").strip() or "go test: FAIL"))
+            elif ln.strip() and not ln[:1].isspace():
+                in_fail = False     # línea no indentada: cierra el bloque de fallo
+    return out
+
+
+def _parse_jest(lines: list) -> list:
+    out, cur, bullet = [], None, None
+    for ln in lines:
+        m = _JEST_FAIL.match(ln)
+        if m:
+            cur, bullet = m.group(1), None
+            continue
+        if not cur:
+            continue
+        b = _JEST_BULLET.match(ln)
+        if b:
+            bullet = b.group(1)
+            continue
+        a = _JEST_AT.match(ln)
+        if a and re.search(r"\." + _CODE_EXT + r"$", a.group(1)):
+            out.append((a.group(1), int(a.group(2)), f"jest: {bullet or 'test falló'}"))
+    return out
+
+
+_GROUPED_PARSERS = (_parse_tsc, _parse_go_test, _parse_eslint_stylish, _parse_jest)
+
 
 def _abs_to_node_id(path: str, roots: dict) -> str | None:
     """Mapea una ruta de archivo del log a un file node id (project/relpath)."""
@@ -175,6 +256,11 @@ def digest_log(store, text: str, config: dict | None = None,
         if m:
             findings.append((m.group(1), int(m.group(2)),
                              f"error: {m.group(3).strip()}"))
+
+    # M5 · formatos AGRUPADOS (eslint/jest/go/tsc): parsers con estado propio, sobre TODO
+    # el log. Van DESPUÉS de los lineales -> en dedup, lo lineal (pytest/py) tiene prioridad.
+    for parser in _GROUPED_PARSERS:
+        findings.extend(parser(lines))
 
     # dedup preservando orden; ligar a node ids
     seen, resolved = set(), []
