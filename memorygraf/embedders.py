@@ -153,8 +153,16 @@ class NeuralEmbedder(Embedder):
     descarga una vez y luego funciona offline.
     """
     def __init__(self, model_name: str):
+        import gc
+        import warnings
         from model2vec import StaticModel
-        self.model = StaticModel.from_pretrained(model_name)
+        # model2vec deja sin cerrar el archivo de config al cargar (persistence.py):
+        # forzamos el GC dentro de un filtro ACOTADO para cerrarlo sin ensuciar la
+        # salida ni silenciar warnings de forma global. Ajeno a MemoryGraf.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            self.model = StaticModel.from_pretrained(model_name)
+            gc.collect()
         self.name = f"neural:{model_name.split('/')[-1]}"
 
     def embed_one(self, text: str) -> dict:
