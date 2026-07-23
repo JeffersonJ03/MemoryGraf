@@ -482,6 +482,15 @@ class TestContextCompiler(Base):
         self.assertEqual(ranked[0], "proj/orders.py")
         store.close()
 
+    def test_search_rerank_is_wired(self):
+        # rerank cableado como opt-in en Query.search
+        self.write("orders.py", '"""Órdenes."""\ndef get_order_tracking():\n    return 1\n')
+        self.write("misc.py", "def other():\n    return 2\n")
+        store, _ = self.index()
+        out = Query(store).search("order tracking", rerank=True)
+        self.assertIn("+rerank", out)      # el modo refleja que se aplicó
+        store.close()
+
 
 @unittest.skipUnless(_git_available(), "git no disponible")
 class TestCompilerCochange(_GitRepo, Base):
@@ -504,9 +513,12 @@ class TestCompilerCochange(_GitRepo, Base):
         self.assertEqual(r["backend"], "heuristic")
         note = cc.cochange_note(store, "proj/a.py", "proj/b.py")
         self.assertIsNotNone(note)
-        # la narrativa aparece en impact()
-        out = Query(store).impact("proj/a.py")
-        self.assertIn("↳", out)
+        # la narrativa aparece en impact() Y en history()
+        q = Query(store)
+        self.assertIn("↳", q.impact("proj/a.py"))
+        hist = q.history("proj/a.py")
+        self.assertIn("co-cambia con", hist)
+        self.assertIn("↳", hist)
         store.close()
 
     def test_note_cached_by_hash(self):

@@ -66,10 +66,17 @@ class Query:
         return _budget("\n".join(lines), budget_tokens)
 
     # --- search: nodos relevantes con resumen + ubicacion (híbrido) ---
-    def search(self, query: str, budget_tokens: int = 800, types=None, limit: int = 15) -> str:
+    def search(self, query: str, budget_tokens: int = 800, types=None, limit: int = 15,
+               rerank: bool = False) -> str:
         results, mode = self._hybrid_search(query, types, limit)
         if not results:
             return f"(sin resultados para: {query})"
+        if rerank:   # rerank local determinista (opt-in; no añade latencia por defecto)
+            from . import context_compiler
+            order = context_compiler.rerank(self.store, query, [n["id"] for n in results])
+            by_id = {n["id"]: n for n in results}
+            results = [by_id[i] for i in order if i in by_id]
+            mode += "+rerank"
         lines = [f"# search: {query}  ({len(results)} resultados · {mode})"]
         for n in results:
             loc = _loc(n)
@@ -303,6 +310,17 @@ class Query:
             lines.append("commits (el porqué):")
             for c in commits:
                 lines.append(f"  {c['hash'][:9]} {c['date']} — {c['subject']}")
+        # acoplamiento por co-cambio + su narrativa (compilador local), si existe
+        from . import context_compiler
+        co = self.store.git_cochange_for(node_id)
+        if co:
+            co.sort(key=lambda x: x[1], reverse=True)
+            lines.append("co-cambia con (acoplamiento oculto):")
+            for other, cnt in co[:5]:
+                on = self.store.get_node(other)
+                nm = on["name"] if on else other
+                note = context_compiler.cochange_note(self.store, node_id, other)
+                lines.append(f"  {nm} (×{cnt})" + (f" ↳ {note}" if note else ""))
         return _budget("\n".join(lines), budget_tokens)
 
 

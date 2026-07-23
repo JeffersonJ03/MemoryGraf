@@ -287,9 +287,12 @@ def cochange_note(store, a: str, b: str) -> str | None:
 # C. Rerank local  (reordena candidatos de search sin coste de tokens cloud)
 # --------------------------------------------------------------------------- #
 def rerank(store, query: str, node_ids: list, boost_recency: bool = True) -> list:
-    """Reordena candidatos combinando la señal léxica del query con estructura y
-    'calor' (churn/recencia de la capa Git). Determinista y sin latencia de LLM:
-    mejora el orden base sin depender del modelo (guardarraíl §6.4)."""
+    """Reordena una lista de candidatos combinando señal léxica + estructura + 'calor'
+    (churn de la capa Git). Determinista y sin latencia de LLM (guardarraíl §6.4).
+
+    Se expone como OPT-IN de `Query.search(rerank=True)`: no se aplica en el camino
+    caliente por defecto (para no añadir coste), pero está cableado y disponible. El
+    rerank vía LLM en tiempo de consulta queda diferido (compromiso latencia/calidad)."""
     terms = [t for t in re.findall(r"\w+", query.lower()) if len(t) > 2]
     scored = []
     for rank, nid in enumerate(node_ids):
