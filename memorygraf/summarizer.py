@@ -10,7 +10,9 @@ re-indexado, así no se re-paga la generación (clave si el summarizer es un LLM
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 
+from . import ollama as _ollama
 from .model import content_hash
 from .store import Store
 
@@ -123,11 +125,12 @@ class OllamaSummarizer(Summarizer):
     """
     needs_source = True
 
-    def __init__(self, url: str, model: str):
+    def __init__(self, url: str, model: str, keep_alive=None):
         import json as _json
         import urllib.request
         self.url = url.rstrip("/")
         self.model = model
+        self.keep_alive = keep_alive  # None => default de Ollama (5m); "0" => descarga al terminar
         self.name = f"ollama:{model}"
         # ping: si no hay servidor, falla aquí y get_summarizer cae al heurístico
         with urllib.request.urlopen(self.url + "/api/tags", timeout=5) as r:
@@ -142,9 +145,11 @@ class OllamaSummarizer(Summarizer):
             f"código. Responde solo el resumen.\n"
             f"Nombre: {node['name']} ({node['type']}). Archivo: {node.get('path')}.\n\n"
             f"Código:\n{src}\n")
-        payload = _json.dumps({"model": self.model, "prompt": prompt,
-                               "stream": False,
-                               "options": {"temperature": 0.2, "num_predict": 80}}).encode()
+        body = {"model": self.model, "prompt": prompt, "stream": False,
+                "options": {"temperature": 0.2, "num_predict": 80}}
+        if self.keep_alive is not None:
+            body["keep_alive"] = self.keep_alive
+        payload = _json.dumps(body).encode()
         req = urllib.request.Request(self.url + "/api/generate", data=payload,
                                      headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=120) as r:
@@ -214,8 +219,110 @@ def _build_context(store: Store, node: dict, roots: dict = None,
     return ctx
 
 
-def summarize_all(store: Store, config=None, rebuild=False, only_missing=True) -> dict:
-    summarizer = get_summarizer()
+def _resolve_summary_settings(config: dict | None) -> dict:
+    """Fusiona config (bloque `summary`) con env vars (override para casos puntuales).
+
+    Precedencia: env var > config > default. `backend` ∈ auto|heuristic|ollama|api.
+    """
+    cfg = (config or {}).get("summary") or {}
+    oll = cfg.get("ollama") or {}
+    env = os.environ.get
+    return {
+        "backend": (env("MEMORYGRAF_SUMMARY_BACKEND") or cfg.get("backend") or "auto").lower(),
+        "url": env("MEMORYGRAF_OLLAMA_URL") or oll.get("url") or _ollama.DEFAULT_URL,
+        "model": env("MEMORYGRAF_OLLAMA_MODEL") or oll.get("model") or _ollama.DEFAULT_MODEL,
+        "manage": bool(oll.get("manage", True)),
+        "auto_pull": bool(oll.get("auto_pull", False)),
+        "keep_alive": oll.get("keep_alive"),  # None => default de Ollama
+        "api_url": env("MEMORYGRAF_SUMMARY_URL"),
+        "api_key": env("MEMORYGRAF_SUMMARY_KEY"),
+        "api_model": env("MEMORYGRAF_SUMMARY_MODEL") or "gpt-4o-mini",
+    }
+
+
+@contextmanager
+def _summarizer_ctx(config: dict | None, log=lambda m: None):
+    """Cede el summarizer a usar, gestionando el ciclo de vida de Ollama.
+
+    Siempre cede *algún* summarizer: si el backend rico no está disponible, cae al
+    heurístico (degradación elegante). Si arrancamos un Ollama efímero, se apaga al
+    salir del `with`.
+    """
+    s = _resolve_summary_settings(config)
+    backend = s["backend"]
+
+    # --- API externa (OpenAI-compatible) ---
+    if backend == "api" or (backend == "auto" and s["api_url"] and s["api_key"]):
+        if s["api_url"] and s["api_key"]:
+            yield ApiSummarizer(s["api_url"], s["api_key"], s["api_model"])
+            return
+        if backend == "api":
+            log("summary: backend=api sin URL/KEY; usando heurístico")
+        yield HeuristicSummarizer()
+        return
+
+    # --- Ollama local (auto | ollama) ---
+    if backend in ("auto", "ollama"):
+        binary = _ollama.find_binary()
+        already_up = _ollama.server_up(s["url"])
+        if not binary and not already_up:
+            if backend == "ollama":
+                log("summary: Ollama no encontrado; usando heurístico "
+                    "(instálalo con 'memorygraf setup-ollama')")
+            yield HeuristicSummarizer()
+            return
+        # gestionamos arranque/apagado solo si NO estaba ya vivo y manage=True
+        if already_up or not s["manage"]:
+            server_cm = _ollama.existing_server(s["url"] if already_up else None)
+        else:
+            server_cm = _ollama.ensure_server(binary, s["url"], log=log)
+        with server_cm as url:
+            if not url:
+                yield HeuristicSummarizer()
+                return
+            if not _ollama.model_present(url, s["model"]):
+                if s["auto_pull"] and binary:
+                    _ollama.pull_model(binary, s["model"], log=log)
+                if not _ollama.model_present(url, s["model"]):
+                    log(f"summary: modelo '{s['model']}' no disponible; usando heurístico "
+                        "(descárgalo con 'memorygraf setup-ollama')")
+                    yield HeuristicSummarizer()
+                    return
+            try:
+                yield OllamaSummarizer(url, s["model"], keep_alive=s["keep_alive"])
+            except Exception:
+                log("summary: no se pudo iniciar OllamaSummarizer; usando heurístico")
+                yield HeuristicSummarizer()
+        return
+
+    # --- heurístico explícito ---
+    yield HeuristicSummarizer()
+
+
+def _has_pending(store: Store, rebuild: bool, only_missing: bool) -> bool:
+    """¿Hay algún nodo que resumir? Evita arrancar Ollama para no hacer nada
+    (clave en `watch`, donde el sync corre a cada guardado)."""
+    if rebuild or not only_missing:
+        return True
+    for node in store.all_nodes():
+        if node["type"] in ("external", "entity"):
+            continue
+        if not (node.get("summary") or "").strip():
+            return True
+    return False
+
+
+def summarize_all(store: Store, config=None, rebuild=False, only_missing=True,
+                  log=lambda m: None) -> dict:
+    # Cortocircuito: si no hay nada pendiente, ni tocamos el backend (no arranca Ollama).
+    if not _has_pending(store, rebuild, only_missing):
+        return {"summarizer": store.get_meta("summarizer") or "heuristic-v1",
+                "generated": 0, "from_cache": 0, "skipped": 0}
+    with _summarizer_ctx(config, log) as summarizer:
+        return _run_summaries(store, summarizer, config, rebuild, only_missing)
+
+
+def _run_summaries(store: Store, summarizer, config, rebuild, only_missing) -> dict:
     name = summarizer.name
     roots = {p["name"]: p["root"] for p in (config or {}).get("projects", [])}
     need_source = getattr(summarizer, "needs_source", False)

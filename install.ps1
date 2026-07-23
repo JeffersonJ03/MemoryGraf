@@ -8,18 +8,62 @@ $ErrorActionPreference = "Stop"
 $Src = $PSScriptRoot
 $Extras = if ($Core) { "" } else { "[full]" }
 
+# Compatibilidad: $IsWindows no existe en Windows PowerShell 5.1 (solo en pwsh/Core)
+if (-not (Test-Path variable:IsWindows)) { $IsWindows = $true }
+
 Write-Host "==> Instalando MemoryGraf desde: $Src (extras: $($Extras -eq '' ? 'ninguno' : $Extras))"
+
+# Añade una carpeta al PATH del usuario de forma PERMANENTE (persiste en el
+# registro, sobrevive a reinicios de terminal) sin duplicarla si ya está.
+function Add-ToUserPath {
+    param([string]$DirToAdd)
+
+    $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($null -eq $currentUserPath) { $currentUserPath = "" }
+
+    $alreadyThere = $currentUserPath -split ';' | Where-Object { $_.TrimEnd('\') -eq $DirToAdd.TrimEnd('\') }
+
+    if ($alreadyThere) {
+        Write-Host "==> $DirToAdd ya está en el PATH de usuario (no se duplica)"
+    } else {
+        $newPath = if ($currentUserPath.Trim() -eq "") { $DirToAdd } else { "$currentUserPath;$DirToAdd" }
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+        Write-Host "==> Añadido permanentemente al PATH de usuario: $DirToAdd"
+    }
+
+    # También lo añadimos a la sesión actual para que funcione sin reabrir la terminal
+    if (-not (($env:Path -split ';') -contains $DirToAdd)) {
+        $env:Path = "$env:Path;$DirToAdd"
+    }
+}
 
 if (Get-Command pipx -ErrorAction SilentlyContinue) {
     Write-Host "==> Usando pipx (entorno aislado, comando global)"
     pipx install --force "$Src$Extras"
+    # pipx sabe hacer esto de forma nativa y correcta (detecta ubicación, evita duplicados)
+    pipx ensurepath | Out-Null
 } else {
-    Write-Host "==> pipx no encontrado; creando venv en $Src\.venv"
-    python -m venv "$Src\.venv"
-    & "$Src\.venv\Scripts\pip.exe" install -q --upgrade pip
-    & "$Src\.venv\Scripts\pip.exe" install -q -e "$Src$Extras"
-    Write-Host "==> Comando en: $Src\.venv\Scripts\memorygraf.exe"
-    Write-Host "==> Sugerencia: añade $Src\.venv\Scripts a tu PATH"
+    $venvPath = Join-Path $Src ".venv"
+    Write-Host "==> pipx no encontrado; creando venv en $venvPath"
+    python -m venv $venvPath
+
+    if ($IsWindows) {
+        $pip = Join-Path $venvPath "Scripts\pip.exe"
+        $scriptsDir = Join-Path $venvPath "Scripts"
+        $binName = "memorygraf.exe"
+    } else {
+        $pip = Join-Path $venvPath "bin/pip"
+        $scriptsDir = Join-Path $venvPath "bin"
+        $binName = "memorygraf"
+    }
+
+    & $pip install --upgrade pip
+    & $pip install -e "$Src$Extras"
+
+    $BinPath = Join-Path $scriptsDir $binName
+    Write-Host "==> Comando en: $BinPath"
+
+    Add-ToUserPath -DirToAdd $scriptsDir
 }
 
 Write-Host ""
@@ -28,3 +72,9 @@ Write-Host "  cd C:\ruta\a\tu\proyecto"
 Write-Host "  memorygraf init"
 Write-Host "  memorygraf sync"
 Write-Host "  memorygraf install claude   # o: memorygraf mcp-config"
+Write-Host ""
+Write-Host "Opcional - resumenes en prosa con IA 100% local (Ollama):"
+Write-Host "  memorygraf setup-ollama     # instala Ollama (winget) y el modelo, y configura MemoryGraf"
+Write-Host ""
+Write-Host "NOTA: si 'memorygraf' no se reconoce en una terminal NUEVA que abras,"
+Write-Host "cierra y reabre VS Code / la terminal para que recargue el PATH del sistema."
