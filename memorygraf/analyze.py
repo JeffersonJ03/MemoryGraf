@@ -40,43 +40,45 @@ def analyze(store, limit: int = 10) -> dict:
     edges = store.all_edges()
     fan_in, fan_out = _degrees(edges)
 
-    all_ids = set(nodes)
-    in_vals = [fan_in.get(i, 0) for i in all_ids]
-    out_vals = [fan_out.get(i, 0) for i in all_ids]
-    in_thr = max(3.0, _threshold(in_vals))
-    out_thr = max(3.0, _threshold(out_vals))
-
     # los nodos externos (os, json, __future__…) acumulan fan-in por naturaleza:
-    # no son riesgo arquitectónico de NUESTRO código -> se excluyen como god nodes.
+    # no son riesgo arquitectónico de NUESTRO código. Se excluyen NO SOLO como
+    # candidatos, sino TAMBIÉN del cálculo del umbral (si no, inflarían media+2σ y
+    # enmascararían cuellos de botella internos reales).
     _skip = {"external", "decision", "convention", "entity", "doc"}
+    eligible = [nid for nid, n in nodes.items() if n["type"] not in _skip]
+    in_thr = max(3.0, _threshold([fan_in.get(i, 0) for i in eligible]))
+    out_thr = max(3.0, _threshold([fan_out.get(i, 0) for i in eligible]))
+
     god = []
-    for nid, n in nodes.items():
-        if n["type"] in _skip:
-            continue
+    for nid in eligible:
+        n = nodes[nid]
         fi, fo = fan_in.get(nid, 0), fan_out.get(nid, 0)
         if fi >= in_thr or fo >= out_thr:
             god.append({"id": nid, "name": n["name"], "type": n["type"],
                         "path": n.get("path"), "fan_in": fi, "fan_out": fo,
                         "reason": ("cuello de botella (fan-in alto)" if fi >= in_thr
                                    else "hace demasiado (fan-out alto)")})
-    god.sort(key=lambda x: x["fan_in"] + x["fan_out"], reverse=True)
+    # 2ª clave (id) -> orden determinista ante empates de grado
+    god.sort(key=lambda x: (x["fan_in"] + x["fan_out"], x["id"]), reverse=True)
 
-    # hotspots de fragilidad: riesgo = churn + fix·2, penalizado si sin cobertura
+    # hotspots de fragilidad: exige señal de CAMBIO real (churn≥2 o algún fix); la falta
+    # de cobertura amplifica el riesgo pero no lo dispara sola (evita marcar churn=1).
     hotspots = []
     for nid, n in nodes.items():
         g = store.git_node_get(nid)
         if not g or not g.get("churn"):
             continue
+        churn, fixes = g["churn"], (g.get("fix_touches") or 0)
+        if churn < 2 and fixes == 0:      # sin churn real ni fixes -> no es hotspot
+            continue
         rt = store.runtime_node_get(nid) or {}
-        risk = g["churn"] + 2 * (g.get("fix_touches") or 0)
         uncovered = rt.get("covered") == 0
-        if uncovered:
-            risk += 3
-        if risk >= 3:
+        risk = churn + 2 * fixes + (3 if uncovered else 0)
+        if risk >= 4:
             hotspots.append({"id": nid, "name": n["name"], "path": n.get("path"),
-                             "churn": g["churn"], "fix_touches": g.get("fix_touches") or 0,
+                             "churn": churn, "fix_touches": fixes,
                              "covered": rt.get("covered"), "risk": risk})
-    hotspots.sort(key=lambda x: x["risk"], reverse=True)
+    hotspots.sort(key=lambda x: (x["risk"], x["id"]), reverse=True)
 
     return {
         "totals": {"nodes": len(nodes), "edges": len(edges)},

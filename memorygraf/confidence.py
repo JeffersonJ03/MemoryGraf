@@ -29,10 +29,16 @@ _INFERRED_TYPES = {EDGE_CO_CHANGES, EDGE_TESTED_BY, EDGE_MODELS, EDGE_REFERENCES
                    EDGE_RELATES_TO}
 
 _WEAK = 0.4   # por debajo: una arista INFERRED pasa a AMBIGUOUS ("revisar")
+# provenances que marcan un origen heurístico/dudoso -> AMBIGUOUS (revisar). Permite
+# que un extractor futuro etiquete aristas "a revisar" sin tocar este clasificador.
+_HEURISTIC_PROV = ("heuristic", "guess", "ambiguous", "fuzzy")
 
 
 def classify(edge_type: str, provenance: str = "", confidence=1.0) -> str:
     c = 1.0 if confidence is None else float(confidence)
+    prov = (provenance or "").lower()
+    if any(h in prov for h in _HEURISTIC_PROV):
+        return AMBIGUOUS               # el origen mismo declara incertidumbre
     if edge_type in _INFERRED_TYPES:
         return AMBIGUOUS if c < _WEAK else INFERRED
     if edge_type in _EXTRACTED_TYPES:

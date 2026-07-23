@@ -728,6 +728,9 @@ class TestConfidence(Base):
         self.assertEqual(cf.classify("co_changes_with", "git", 0.8), cf.INFERRED)
         self.assertEqual(cf.classify("tested_by", "test-import", 0.7), cf.INFERRED)
         self.assertEqual(cf.classify("co_changes_with", "git", 0.3), cf.AMBIGUOUS)
+        # provenance heurístico -> AMBIGUOUS aunque el tipo sería EXTRACTED
+        self.assertEqual(cf.classify("calls", "heuristic", 0.9), cf.AMBIGUOUS)
+        self.assertEqual(cf.classify("imports", "fuzzy-guess", 1.0), cf.AMBIGUOUS)
 
     def test_distribution(self):
         from memorygraf import confidence as cf
@@ -758,6 +761,24 @@ class TestAnalyzeReport(Base):
         self.assertIn("proj/mod.py", gods)
         top = next(g for g in r["god_nodes"] if g["id"] == "proj/mod.py")
         self.assertGreaterEqual(top["fan_in"], 4)
+        store.close()
+
+    def test_hotspot_requires_real_churn(self):
+        # churn=1 sin cobertura NO debe marcarse; churn alto o con fix SÍ
+        from memorygraf import analyze as an
+        self.write("weak.py", "def a():\n    return 1\n")
+        self.write("hot.py", "def b():\n    return 2\n")
+        store, _ = self.index()
+        store.git_node_set("proj/weak.py", churn=1, first_changed="2026-01-01",
+                           last_changed="2026-01-01", fix_touches=0, authors={})
+        store.runtime_node_update("proj/weak.py", covered=0)     # sin cobertura pero churn=1
+        store.git_node_set("proj/hot.py", churn=5, first_changed="2026-01-01",
+                           last_changed="2026-01-02", fix_touches=2, authors={})
+        store.runtime_node_update("proj/hot.py", covered=0)
+        store.commit()
+        ids = {h["id"] for h in an.analyze(store)["hotspots"]}
+        self.assertNotIn("proj/weak.py", ids)   # churn=1 no dispara solo por sin-cobertura
+        self.assertIn("proj/hot.py", ids)
         store.close()
 
     def test_report_markdown_sections(self):
