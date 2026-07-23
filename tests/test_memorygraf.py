@@ -902,5 +902,27 @@ class TestSummarizerLabel(Base):
         store.close()
 
 
+class TestExtractorRobustness(Base):
+    """Un archivo con BOM o sintaxis inválida NO debe tumbar el sync entero
+    (la rama de error del extractor debe respetar la aridad de 5)."""
+
+    def test_bom_file_parses_and_extracts_symbol(self):
+        self.write("bom.py", "﻿'''doc.'''\ndef con_bom():\n    return 1\n")
+        store, _ = self.index()                       # no debe crashear
+        ids = store.all_node_ids()
+        self.assertIn("proj/bom.py", ids)
+        self.assertIn("proj/bom.py::con_bom", ids)    # BOM removido -> símbolo extraído
+        store.close()
+
+    def test_unparseable_python_indexes_as_file_without_crash(self):
+        self.write("ok.py", "def fine():\n    return 1\n")
+        self.write("bad.py", "def (((  not python\n")  # sintaxis inválida
+        store, _ = self.index()                        # no debe crashear por bad.py
+        ids = store.all_node_ids()
+        self.assertIn("proj/bad.py", ids)              # se indexa como archivo
+        self.assertIn("proj/ok.py::fine", ids)         # el resto se indexa igual
+        store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

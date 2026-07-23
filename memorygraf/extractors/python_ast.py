@@ -30,16 +30,23 @@ def _signature(node) -> str:
         return node.name
 
 
-def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list]:
+def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list, list, dict]:
     nodes, edges, raw_imports = [], [], []
     fid = file_id(rel_path)
 
+    # Un BOM UTF-8 al inicio hace fallar ast.parse; se elimina para poder parsear
+    # archivos guardados con BOM (común en editores de Windows).
+    if source[:1] == "﻿":
+        source = source[1:]
+
     try:
         tree = ast.parse(source)
-    except SyntaxError:
+    except (SyntaxError, ValueError):
+        # Red de seguridad: archivo no parseable (sintaxis inválida, bytes nulos, etc.).
+        # DEBE devolver la MISMA aridad (5) que el camino normal, o el indexador crashea.
         nodes.append(Node(id=fid, type=NODE_FILE, name=rel_path.split("/")[-1],
                           project=project, path=rel_path, summary="(no parseable)"))
-        return nodes, edges, raw_imports
+        return nodes, edges, raw_imports, [], {}
 
     nodes.append(Node(id=fid, type=NODE_FILE, name=rel_path.split("/")[-1],
                       project=project, path=rel_path, summary=_summary_from_doc(tree),
