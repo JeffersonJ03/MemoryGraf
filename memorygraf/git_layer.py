@@ -86,22 +86,59 @@ def _date(iso_or_epoch: str) -> str:
     return s[:10]
 
 
-def _rename_new_path(path: str) -> str:
-    """numstat de un rename puede venir como 'a/{x => y}/f' o 'old => new'.
+def _rename_paths(path: str):
+    """Devuelve (old, new) de un path de numstat; old=None si no es rename.
 
-    Nota (limitación consciente): el commit del rename SÍ se atribuye al nombre nuevo,
-    pero la historia PREVIA al rename queda bajo la ruta vieja y no se arrastra al nodo
-    nuevo (no usamos `git log --follow`, incompatible con un log de repo completo). En
-    repos con renames frecuentes, el churn del nodo nuevo puede subestimarse; degrada a
-    nivel de archivo con elegancia (PLAN §4.7). Aceptable para v1 de la Capa 1."""
+    numstat de un rename viene como 'a/{x => y}/f' (compacto) o 'old => new' (completo).
+    """
     if "{" in path and " => " in path:
         pre, rest = path.split("{", 1)
         mid, post = rest.split("}", 1)
-        _old, new = mid.split(" => ", 1)
-        return (pre + new + post).replace("//", "/")
+        old, new = mid.split(" => ", 1)
+        mk = lambda p: (pre + p + post).replace("//", "/")  # noqa: E731
+        return mk(old), mk(new)
     if " => " in path:
-        return path.split(" => ", 1)[1]
-    return path
+        old, new = path.split(" => ", 1)
+        return old, new
+    return None, path
+
+
+def _rename_new_path(path: str) -> str:
+    """Solo el nombre nuevo (compat)."""
+    return _rename_paths(path)[1]
+
+
+def _git_path_to_fid(top: str, root: str, project: str, gp: str) -> str | None:
+    """Ruta de git (relativa al toplevel del repo) -> file node id (project/rel)."""
+    abspath = os.path.normpath(os.path.join(top, gp))
+    try:
+        rel = os.path.relpath(abspath, root).replace("\\", "/")
+    except ValueError:
+        return None
+    if rel.startswith(".."):
+        return None
+    return f"{project}/{rel}"
+
+
+def _resolve_current_fid(fid: str | None, rename_map: dict, file_ids: set) -> str | None:
+    """Sigue la cadena de renames (viejo->nuevo) hasta el nombre ACTUAL del grafo.
+
+    Equivalente a `git log --follow` sin romper el walk de repo completo: como los
+    commits se recorren de nuevo->viejo, cuando llegamos a un commit que tocó una ruta
+    ya renombrada, `rename_map` ya conoce su destino actual y redirige la atribución.
+    Devuelve None si la cadena no llega a un file node indexado (guardia de ciclos).
+    """
+    if fid is None:
+        return None
+    if fid in file_ids:
+        return fid
+    cur, seen = fid, set()
+    while cur in rename_map and cur not in seen:
+        seen.add(cur)
+        cur = rename_map[cur]
+        if cur in file_ids:
+            return cur
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -185,10 +222,14 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
 def _walk_commits(store, root, project, file_ids, rng, st, recent, log) -> int:
     """Recorre commits del rango, acumula churn/fechas/fix/autores/co-cambio."""
     fmt = f"{_RS}%H{_US}%an{_US}%aI{_US}%s"
-    out = _git(["log", rng, "--no-merges", "--numstat", f"--format={fmt}"], root)
+    # -M: detección explícita de renames -> historia pre-rename via rename_map.
+    out = _git(["log", rng, "--no-merges", "-M", "--numstat", f"--format={fmt}"], root)
     if out is None:
         return 0
     top = _toplevel(root) or root
+    # old_fid -> new_fid. Se llena al recorrer de nuevo->viejo: cuando aparece un
+    # commit que tocó la ruta VIEJA (más antiguo), ya sabemos su destino actual.
+    rename_map: dict[str, str] = {}
     count = 0
     for chunk in out.split(_RS):
         chunk = chunk.strip("\n")
@@ -201,7 +242,7 @@ def _walk_commits(store, root, project, file_ids, rng, st, recent, log) -> int:
         sha, author, date_iso, subject = parts[0], parts[1], parts[2], parts[3]
         date = _date(date_iso)
         is_fix = bool(_FIX_RE.search(subject))
-        # archivos de este commit -> node ids indexados
+        # archivos de este commit -> node ids ACTUALES (siguiendo renames)
         changed = []
         for line in body:
             line = line.strip()
@@ -210,17 +251,16 @@ def _walk_commits(store, root, project, file_ids, rng, st, recent, log) -> int:
             cols = line.split("\t")
             if len(cols) < 3:
                 continue
-            gp = _rename_new_path(cols[2])
-            abspath = os.path.normpath(os.path.join(top, gp))
-            try:
-                rel = os.path.relpath(abspath, root).replace("\\", "/")
-            except ValueError:
-                continue
-            if rel.startswith(".."):
-                continue
-            fid = f"{project}/{rel}"
-            if fid in file_ids:
-                changed.append(fid)
+            old_gp, new_gp = _rename_paths(cols[2])
+            new_fid = _git_path_to_fid(top, root, project, new_gp)
+            if old_gp is not None:                       # es un rename
+                old_fid = _git_path_to_fid(top, root, project, old_gp)
+                if old_fid and new_fid and old_fid != new_fid:
+                    rename_map.setdefault(old_fid, new_fid)
+            target = _resolve_current_fid(new_fid, rename_map, file_ids)
+            if target:
+                changed.append(target)
+        changed = list(dict.fromkeys(changed))   # 1 bump por archivo/commit (dedup)
         for fid in changed:
             store.git_node_bump(fid, date=date, is_fix=is_fix, author=author)
             recent.setdefault(fid, []).append((sha, date, subject))

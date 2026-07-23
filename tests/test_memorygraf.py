@@ -335,6 +335,27 @@ class TestGitLayer(_GitRepo, Base):
         self.assertIn("Tester", g["authors"])
         store.close()
 
+    def test_history_follows_rename(self):
+        # La historia PREVIA a un `git mv` debe arrastrarse al nodo nuevo (--follow).
+        self._init_repo()
+        self.write("old.py", "def f():\n    return 1\n")
+        self._commit("add old")
+        self.write("old.py", "def f():\n    return 2\n")
+        self._commit("edit old")
+        self._git("mv", "old.py", "new.py")
+        self._commit("rename old to new")
+        store, _ = self.index()
+        self._sync_git(store)
+        g = store.git_node_get("proj/new.py")
+        self.assertIsNotNone(g)
+        # churn abarca crear+editar (bajo old) + el rename = 3 (sin el fix sería 1)
+        self.assertEqual(g["churn"], 3)
+        self.assertIsNone(store.get_node("proj/old.py"))   # old ya no es nodo
+        # el "por qué" incluye commits previos al rename
+        subjects = {c["subject"] for c in store.git_commits_get("proj/new.py")}
+        self.assertIn("add old", subjects)
+        store.close()
+
     def test_cochange_edge(self):
         self._init_repo()
         self.write("a.py", "def a():\n    return 1\n")
