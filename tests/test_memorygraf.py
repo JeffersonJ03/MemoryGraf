@@ -289,6 +289,11 @@ def _git_available() -> bool:
         return False
 
 
+def _lsp_available() -> bool:
+    from memorygraf.runtime import lsp
+    return lsp.find_server() is not None
+
+
 class _GitRepo:
     """Mixin con helpers para crear un repo git real de prueba (sin tests propios)."""
 
@@ -921,6 +926,41 @@ class TestSummarizerLabel(Base):
         self.assertEqual(r["generated"], 0)
         self.assertEqual(r["summarizer"], "heuristic-v1")    # no el 'ollama' obsoleto
         store.close()
+
+
+@unittest.skipUnless(_lsp_available(), "sin language-server (pyright/pylsp)")
+class TestLspResolvedType(Base):
+    """CAPA 2 · Sub-capa A — resolved_type por hover (con un LSP real)."""
+
+    def test_hover_populates_resolved_type(self):
+        from memorygraf.runtime import lsp
+        self.write("typed.py",
+                   "def suma(a: int, b: int) -> int:\n    return a + b\n\n"
+                   "class Caja:\n    def abrir(self) -> bool:\n        return True\n")
+        store, _ = self.index()
+        r = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
+        self.assertTrue(r["enabled"])
+        self.assertGreaterEqual(r["types"], 1)
+        rt = store.runtime_node_get("proj/typed.py::suma")
+        self.assertIsNotNone(rt)
+        self.assertIsNotNone(rt.get("resolved_type"))
+        self.assertIn("int", rt["resolved_type"])          # la firma trae el tipo
+        # anti-staleness: re-correr limpia y repuebla, no acumula basura
+        r2 = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
+        self.assertTrue(r2["enabled"])
+        store.close()
+
+    def test_parse_hover_and_position_are_pure(self):
+        from memorygraf.runtime import lsp
+        self.assertEqual(
+            lsp._parse_hover({"contents": {"kind": "markdown",
+                                           "value": "```python\ndef f() -> int\n```"}}),
+            "def f() -> int")
+        self.assertIsNone(lsp._parse_hover(None))
+        # apunta DENTRO del identificador (no en la frontera previa)
+        line, char = lsp._hover_position(["def suma(a):"], 1, "suma")
+        self.assertEqual(line, 0)
+        self.assertGreater(char, 4)          # > inicio de 'suma' (col 4)
 
 
 class TestExtractorRobustness(Base):
