@@ -188,7 +188,117 @@ class Query:
             lines.append(f"tags: {', '.join(n['tags'])}")
         if n.get("summary"):
             lines.append(f"resumen: {n['summary']}")
+        g = self.store.git_node_get(node_id)
+        if g and g.get("churn"):
+            from . import git_layer
+            age = git_layer.age_days(g.get("first_changed"))
+            frag = f", {g['fix_touches']} de tipo fix" if g.get("fix_touches") else ""
+            lines.append(f"git: {g['churn']} cambios{frag}"
+                         + (f", edad {age}d" if age is not None else "")
+                         + (f", últ. {g['last_changed']}" if g.get("last_changed") else ""))
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------ #
+    # CAPA 1 · Temporal/Git (PLAN-CAPAS-CONTEXTUALES §4.4)
+    # ------------------------------------------------------------------ #
+    # --- working_set: "¿en qué estamos?" (sin explorar a ciegas) ---
+    def working_set(self, budget_tokens: int = 800, limit: int = 20) -> str:
+        from . import git_layer
+        ws = git_layer.working_set(self.store, limit=limit)
+        if not ws["dirty"] and not ws["recent"]:
+            return ("(working set vacío: sin cambios sin commitear y sin historia Git. "
+                    "¿Falta 'memorygraf sync' o no es un repo git?)")
+        lines = ["# working_set — qué se está tocando ahora"]
+        if ws["dirty"]:
+            lines.append(f"## sin commitear ({len(ws['dirty'])})")
+            for fid in ws["dirty"]:
+                n = self.store.get_node(fid)
+                s = f" — {n['summary']}" if n and n.get("summary") else ""
+                lines.append(f"- {fid}{s}")
+        if ws["recent"]:
+            lines.append("## cambiados recientemente")
+            for fid, last, churn in ws["recent"]:
+                lines.append(f"- {fid}  (últ. {last}, {churn} cambios)")
+        return _budget("\n".join(lines), budget_tokens)
+
+    # --- impact: llamadas estáticas ∪ co-cambio (predice mejor el impacto) ---
+    def impact(self, node_id: str, depth: int = 1, budget_tokens: int = 800) -> str:
+        node = self.store.get_node(node_id)
+        if not node:
+            return f"(nodo no encontrado: {node_id})"
+        static_types = {"calls", "imports", "depends_on", "references"}
+        # "impacto" = blast radius: quién DEPENDE de nid (aristas entrantes) + co-cambio.
+        # Cambiar X afecta a quien lo llama/importa, no a aquello de lo que X depende.
+        why: dict[str, set] = {}
+        frontier = {node_id}
+        seen = {node_id}
+        for _ in range(max(1, depth)):
+            nxt = set()
+            for nid in frontier:
+                for e in self.store.neighbors(nid, direction="both"):
+                    if e["type"] == "co_changes_with":     # simétrica (ambas direcciones)
+                        other = e["target"] if e["source"] == nid else e["source"]
+                        reason = f"co-cambio·{e['confidence']}"
+                    elif e["type"] in static_types and e["target"] == nid:
+                        other = e["source"]                 # entrante: depende de nid
+                        reason = f"usado_por·{e['type']}"
+                    else:
+                        continue
+                    if other == nid:
+                        continue
+                    why.setdefault(other, set()).add(reason)
+                    if other not in seen:
+                        seen.add(other); nxt.add(other)
+            frontier = nxt
+            if not frontier:
+                break
+        why.pop(node_id, None)
+        if not why:
+            return (f"# impact: {node['name']} @{_loc(node)}\n"
+                    "(sin dependencias estáticas ni co-cambios registrados)")
+        # co-cambio primero (es la señal que el call-graph no ve)
+        def _rank(item):
+            nid, reasons = item
+            has_co = any(r.startswith("co-cambio") for r in reasons)
+            return (0 if has_co else 1, nid)
+        lines = [f"# impact: {node['name']} @{_loc(node)}  ({len(why)} nodos, prof {depth})",
+                 "# unión de llamadas/imports estáticos ∪ co-cambio (Git)"]
+        for nid, reasons in sorted(why.items(), key=_rank):
+            tgt = self.store.get_node(nid)
+            nm = tgt["name"] if tgt else nid
+            loc = _loc(tgt) if tgt else ""
+            lines.append(f"- {nm}  @{loc}  [{', '.join(sorted(reasons))}]")
+        return _budget("\n".join(lines), budget_tokens)
+
+    # --- history: churn + fragilidad + "por qué" compacto ---
+    def history(self, node_id: str, budget_tokens: int = 800) -> str:
+        from . import git_layer
+        node = self.store.get_node(node_id)
+        if not node:
+            return f"(nodo no encontrado: {node_id})"
+        g = self.store.git_node_get(node_id)
+        if not g or not g.get("churn"):
+            return (f"# history: {node['name']} @{_loc(node)}\n"
+                    "(sin historia Git; ¿repo sin commits o capa temporal desactivada?)")
+        age = git_layer.age_days(g.get("first_changed"))
+        lines = [f"# history: {node['name']} @{_loc(node)}",
+                 f"cambios (churn): {g['churn']}"
+                 + (f" · fragilidad (fix): {g['fix_touches']}" if g.get("fix_touches") else "")
+                 + (f" · edad: {age}d" if age is not None else "")]
+        if g.get("last_changed"):
+            lines.append(f"último cambio: {g['last_changed']}"
+                         + (f" · primero: {g['first_changed']}" if g.get("first_changed") else ""))
+        authors = g.get("authors") or {}
+        if authors:
+            top = sorted(authors.items(), key=lambda kv: kv[1], reverse=True)
+            lines.append("autores (a quién preguntar): "
+                         + ", ".join(f"{a} ({c})" for a, c in top))
+        commits = self.store.git_commits_get(node_id)
+        if commits:
+            lines.append("commits (el porqué):")
+            for c in commits:
+                lines.append(f"  {c['hash'][:9]} {c['date']} — {c['subject']}")
+        return _budget("\n".join(lines), budget_tokens)
 
 
 def _budget(text: str, budget_tokens: int) -> str:

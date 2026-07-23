@@ -77,6 +77,13 @@ def main(argv=None):
     p = sub.add_parser("neighbors"); p.add_argument("node_id"); p.add_argument("--types"); p.add_argument("--budget", type=int, default=800)
     p = sub.add_parser("get"); p.add_argument("node_id")
     p = sub.add_parser("decisions"); p.add_argument("topic", nargs="?"); p.add_argument("--budget", type=int, default=1200)
+    # CAPA 1 · Temporal/Git
+    p = sub.add_parser("working-set", help="Qué se está tocando ahora (Git)")
+    p.add_argument("--budget", type=int, default=800); p.add_argument("--limit", type=int, default=20)
+    p = sub.add_parser("impact", help="Impacto de cambiar un nodo (llamadas ∪ co-cambio)")
+    p.add_argument("node_id"); p.add_argument("--depth", type=int, default=1); p.add_argument("--budget", type=int, default=800)
+    p = sub.add_parser("history", help="Historia de un nodo: churn, fragilidad, autores, commits")
+    p.add_argument("node_id"); p.add_argument("--budget", type=int, default=800)
     p = sub.add_parser("summarize"); p.add_argument("--rebuild", action="store_true"); p.add_argument("--all", action="store_true")
     p = sub.add_parser("embed"); p.add_argument("--rebuild", action="store_true")
     sub.add_parser("sync")
@@ -195,6 +202,12 @@ def main(argv=None):
                 print(q.get(args.node_id))
             elif args.cmd == "decisions":
                 print(q.decisions(topic=args.topic, budget_tokens=args.budget))
+            elif args.cmd == "working-set":
+                print(q.working_set(budget_tokens=args.budget, limit=args.limit))
+            elif args.cmd == "impact":
+                print(q.impact(args.node_id, depth=args.depth, budget_tokens=args.budget))
+            elif args.cmd == "history":
+                print(q.history(args.node_id, budget_tokens=args.budget))
     finally:
         store.close()
 

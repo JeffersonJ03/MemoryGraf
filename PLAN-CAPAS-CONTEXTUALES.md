@@ -1,6 +1,6 @@
 # MemoryGraf — Plan de Acción: Capas de Contexto Vivo
 
-> **Estado:** propuesta v1.0 (por validar e implementar).
+> **Estado:** propuesta v1.0 · **Fase 6 implementada** (ver §15).
 > **Fecha:** 2026-07-23.
 > **Autor:** Jefferson J. Patiño Ortega (con Claude como copiloto de diseño).
 > **Relación con DESIGN.md:** este documento **extiende** la visión (DESIGN §1–§17) con
@@ -336,3 +336,48 @@ vivo**: el único que combina **estructura + historia real (Git) + verdad de run
 todo **pre-compilado por un LLM local privado y gratuito**. Es automático (sin captura
 manual), trazable, portable y de costo-token cloud cercano a cero — un ángulo que ni el
 líder del mercado ni la alternativa de memoria manual ocupan hoy.
+
+---
+
+## 15. Estado de implementación
+
+### Fase 6 — Temporal/Git ✅ (2026-07-23)
+
+Entregado en `memorygraf/git_layer.py`, integrado en `pipeline.full_sync()` tras `index`.
+Todo es **caché regenerable desde `.git`** (nunca fuente de verdad), determinista,
+incremental y con degradación elegante (sin `git`/repo la capa se omite en silencio).
+
+**Señales por nodo** (`file` y `symbol`), en tablas nuevas de `store.py` (`git_node`,
+`git_commits`, `git_cochange`, `git_blame` — todas regenerables):
+- `churn`, `first_changed`/`last_changed`, `age_days`, `fix_touches`, `authors`.
+- Nivel **archivo**: recorrido de commits (`git log --numstat`), **incremental por SHA**
+  (`meta git_head_sha:<proj>`); solo lee commits nuevos. Historia reescrita → recompute total.
+- Nivel **símbolo**: `git blame --line-porcelain` del archivo actual, **cacheado por
+  `content_hash`**; mapea el span del símbolo a sus commits → atribución exacta al código de hoy.
+
+**Arista nueva** `co_changes_with` (file↔file, `EDGE_CO_CHANGES` en `model.py`): acoplamiento
+real que el AST no ve. Peso = `co / min(churn_a, churn_b)`; umbrales `min_cochange` y
+`cochange_threshold`; commits "barredera" (> `cochange_max_files`) no cuentan. `provenance="git-cochange"`.
+
+**Consultas nuevas** (MCP + CLI, en `query.py`):
+- `working_set` — archivos sin commitear + cambiados recientemente ("¿en qué estamos?").
+- `impact(node[, depth])` — *blast radius*: quién depende del nodo (aristas entrantes:
+  calls/imports) **∪** co-cambio (Git). Predice impacto que el call-graph solo no ve.
+- `history(node)` — churn + fragilidad (fix) + edad + autores + top commits (el "por qué",
+  con procedencia `commit:hash`). `get` también hereda una línea `git:` resumida.
+
+**Config** (bloque `git` en `config.json`, opcional): `enabled`, `min_cochange`,
+`cochange_threshold`, `cochange_max_files`, `top_commits`, `max_authors`.
+
+**Pruebas**: `tests/test_memorygraf.py::TestGitLayer` (repo git real efímero) cubre churn/autores,
+co-cambio, `impact` con co-cambio, blame de símbolos, `working_set`, incremental y degradación
+sin git. Suite completa: 26/26 en verde.
+
+**Nota de campo** (repo actual, ~3 commits no-merge): la señal de co-cambio ya emerge
+(6 pares: `cli/pipeline/summarizer/test`, acoplados por el feature de resúmenes Ollama) y
+crecerá con la historia. Los imports intra-paquete son relativos (`from .x import`) y el
+extractor aún no los resuelve a aristas internas → el co-cambio es justo lo que compensa ese
+hueco. Resolver imports relativos queda como mejora del extractor (fuera de Fase 6).
+
+### Fases 7–9 — pendientes
+Sin cambios respecto al roadmap §10.

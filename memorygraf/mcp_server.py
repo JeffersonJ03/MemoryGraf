@@ -106,6 +106,54 @@ TOOLS = [
         "description": "Estadísticas del grafo: totales de nodos/aristas por tipo y por proyecto.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "working_set",
+        "description": (
+            "CAPA temporal (Git): qué se está tocando AHORA — archivos modificados sin "
+            "commitear + cambiados en los últimos commits. Úsalo al inicio de una tarea "
+            "para saber '¿en qué estamos?' sin explorar a ciegas."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget_tokens": {"type": "integer", "default": 800},
+                "limit": {"type": "integer", "default": 20},
+            },
+        },
+    },
+    {
+        "name": "impact",
+        "description": (
+            "Predice el impacto de cambiar un nodo: unión de dependencias estáticas "
+            "(llamadas/imports) y CO-CAMBIO histórico (Git) — acoplamiento real que el "
+            "call-graph no ve. Úsalo antes de modificar algo para no romper acoplados ocultos."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node_id": {"type": "string"},
+                "depth": {"type": "integer", "default": 1},
+                "budget_tokens": {"type": "integer", "default": 800},
+            },
+            "required": ["node_id"],
+        },
+    },
+    {
+        "name": "history",
+        "description": (
+            "Historia de un nodo (Git): nº de cambios (churn), fragilidad (commits de fix), "
+            "edad, autores (a quién preguntar) y top commits (el 'por qué'). Úsalo para "
+            "saber si es seguro/arriesgado tocar algo, con procedencia commit:hash."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node_id": {"type": "string"},
+                "budget_tokens": {"type": "integer", "default": 800},
+            },
+            "required": ["node_id"],
+        },
+    },
 ]
 
 
@@ -148,6 +196,15 @@ class Server:
                                budget_tokens=int(args.get("budget_tokens", 1200)))
         if name == "stats":
             return json.dumps(self.store.stats(), ensure_ascii=False, indent=2)
+        if name == "working_set":
+            return q.working_set(budget_tokens=int(args.get("budget_tokens", 800)),
+                                 limit=int(args.get("limit", 20)))
+        if name == "impact":
+            return q.impact(args["node_id"], depth=int(args.get("depth", 1)),
+                            budget_tokens=int(args.get("budget_tokens", 800)))
+        if name == "history":
+            return q.history(args["node_id"],
+                             budget_tokens=int(args.get("budget_tokens", 800)))
         raise ValueError(f"herramienta desconocida: {name}")
 
     def handle(self, msg: dict):

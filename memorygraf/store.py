@@ -69,6 +69,35 @@ CREATE TABLE IF NOT EXISTS summaries (
     summary TEXT,
     PRIMARY KEY (content_hash, summarizer)
 );
+-- CAPA 1 · Temporal/Git (PLAN-CAPAS-CONTEXTUALES §4, §8).
+-- TODO lo de git es CACHÉ REGENERABLE desde `.git`, nunca fuente de verdad
+-- (DESIGN §3.8): se puede borrar y reconstruir con `memorygraf sync`.
+CREATE TABLE IF NOT EXISTS git_node (
+    node_id TEXT PRIMARY KEY,   -- file o symbol id
+    churn INTEGER DEFAULT 0,    -- nº de commits que tocaron el nodo
+    first_changed TEXT,         -- fecha del commit más antiguo (para age_days)
+    last_changed TEXT,          -- fecha del commit más reciente
+    fix_touches INTEGER DEFAULT 0,  -- commits con mensaje tipo fix|bug|hotfix
+    authors TEXT                -- JSON: {autor: nº de commits}
+);
+CREATE TABLE IF NOT EXISTS git_commits (   -- top-N commits por nodo (el "por qué")
+    node_id TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    date TEXT,
+    subject TEXT,
+    PRIMARY KEY (node_id, hash)
+);
+CREATE TABLE IF NOT EXISTS git_cochange (  -- acumulador de co-cambio (a<b canónico)
+    a TEXT NOT NULL,
+    b TEXT NOT NULL,
+    cnt INTEGER DEFAULT 0,
+    PRIMARY KEY (a, b)
+);
+CREATE TABLE IF NOT EXISTS git_blame (     -- marca de caché: hash con el que se blameó
+    path TEXT PRIMARY KEY,
+    content_hash TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_git_cochange_b ON git_cochange(b);
 """
 
 
@@ -227,6 +256,112 @@ class Store:
         self.conn.execute(
             "INSERT INTO meta (key,value) VALUES (?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    # --- CAPA 1 · Temporal/Git (caché regenerable desde .git) ---
+    def git_node_get(self, node_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM git_node WHERE node_id=?", (node_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["authors"] = json.loads(d["authors"]) if d.get("authors") else {}
+        return d
+
+    def git_node_bump(self, node_id: str, *, date: str, is_fix: bool,
+                      author: str | None):
+        """Acumula UN commit sobre el nodo (churn+1, fechas, autores). Incremental."""
+        cur = self.git_node_get(node_id)
+        authors = cur["authors"] if cur else {}
+        if author:
+            authors[author] = authors.get(author, 0) + 1
+        first = min(cur["first_changed"], date) if cur and cur.get("first_changed") else date
+        last = max(cur["last_changed"], date) if cur and cur.get("last_changed") else date
+        churn = (cur["churn"] if cur else 0) + 1
+        fixes = (cur["fix_touches"] if cur else 0) + (1 if is_fix else 0)
+        self.conn.execute(
+            """INSERT INTO git_node (node_id,churn,first_changed,last_changed,fix_touches,authors)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(node_id) DO UPDATE SET
+                 churn=excluded.churn, first_changed=excluded.first_changed,
+                 last_changed=excluded.last_changed, fix_touches=excluded.fix_touches,
+                 authors=excluded.authors""",
+            (node_id, churn, first, last, fixes,
+             json.dumps(authors, ensure_ascii=False)))
+
+    def git_node_set(self, node_id: str, *, churn: int, first_changed: str | None,
+                     last_changed: str | None, fix_touches: int, authors: dict):
+        """Escribe (reemplaza) los atributos de un nodo. Para blame (recompute total)."""
+        self.conn.execute(
+            """INSERT INTO git_node (node_id,churn,first_changed,last_changed,fix_touches,authors)
+               VALUES (?,?,?,?,?,?)
+               ON CONFLICT(node_id) DO UPDATE SET
+                 churn=excluded.churn, first_changed=excluded.first_changed,
+                 last_changed=excluded.last_changed, fix_touches=excluded.fix_touches,
+                 authors=excluded.authors""",
+            (node_id, churn, first_changed, last_changed, fix_touches,
+             json.dumps(authors, ensure_ascii=False)))
+
+    def git_commits_set(self, node_id: str, commits: list):
+        """Reemplaza los commits top-N de un nodo. commits=[(hash,date,subject),...]."""
+        self.conn.execute("DELETE FROM git_commits WHERE node_id=?", (node_id,))
+        for h, date, subject in commits:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO git_commits (node_id,hash,date,subject) "
+                "VALUES (?,?,?,?)", (node_id, h, date, subject))
+
+    def git_commits_get(self, node_id: str) -> list:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT hash,date,subject FROM git_commits WHERE node_id=? "
+            "ORDER BY date DESC", (node_id,))]
+
+    def git_cochange_bump(self, a: str, b: str, delta: int = 1):
+        a, b = (a, b) if a < b else (b, a)
+        self.conn.execute(
+            "INSERT INTO git_cochange (a,b,cnt) VALUES (?,?,?) "
+            "ON CONFLICT(a,b) DO UPDATE SET cnt=cnt+excluded.cnt", (a, b, delta))
+
+    def git_cochange_all(self) -> list:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT a,b,cnt FROM git_cochange")]
+
+    def git_cochange_for(self, node_id: str) -> list:
+        """Pares de co-cambio que tocan a node_id -> [(otro, cnt), ...]."""
+        rows = self.conn.execute(
+            "SELECT a,b,cnt FROM git_cochange WHERE a=? OR b=?",
+            (node_id, node_id)).fetchall()
+        return [(r["b"] if r["a"] == node_id else r["a"], r["cnt"]) for r in rows]
+
+    def git_blame_hash(self, path: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT content_hash FROM git_blame WHERE path=?", (path,)).fetchone()
+        return row["content_hash"] if row else None
+
+    def git_blame_mark(self, path: str, content_hash: str):
+        self.conn.execute(
+            "INSERT INTO git_blame (path,content_hash) VALUES (?,?) "
+            "ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash",
+            (path, content_hash))
+
+    def delete_edges_of_type(self, edge_type: str):
+        self.conn.execute("DELETE FROM edges WHERE type=?", (edge_type,))
+
+    def clear_git_layer(self):
+        """Borra TODA la caché Git (para reconstruir tras historia reescrita)."""
+        for t in ("git_node", "git_commits", "git_cochange", "git_blame"):
+            self.conn.execute(f"DELETE FROM {t}")
+        self.conn.execute("DELETE FROM meta WHERE key LIKE 'git_head_sha%'")
+
+    def prune_git_layer(self):
+        """Elimina filas Git de nodos que ya no existen (tras renombrados/borrados)."""
+        self.conn.execute(
+            "DELETE FROM git_node WHERE node_id NOT IN (SELECT id FROM nodes)")
+        self.conn.execute(
+            "DELETE FROM git_commits WHERE node_id NOT IN (SELECT id FROM nodes)")
+        self.conn.execute(
+            "DELETE FROM git_cochange WHERE a NOT IN (SELECT id FROM nodes) "
+            "OR b NOT IN (SELECT id FROM nodes)")
+        self.conn.execute(
+            "DELETE FROM git_blame WHERE path NOT IN (SELECT id FROM nodes)")
 
     # --- Cache de resúmenes ---
     def get_summary(self, content_hash: str, summarizer: str) -> Optional[str]:

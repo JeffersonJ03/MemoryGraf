@@ -31,6 +31,10 @@ EDGE_DECIDED_BECAUSE = "decided_because"
 EDGE_GOVERNS = "governs"
 EDGE_MODELS = "models"
 EDGE_RELATES_TO = "relates_to"
+# CAPA 1 (temporal/Git): acoplamiento real por co-cambio. INFERRED, no lo ve el AST
+# (DESIGN §6.2 / PLAN-CAPAS-CONTEXTUALES §4.2). Es una arista de CACHÉ regenerable
+# desde `.git`: nunca fuente de verdad.
+EDGE_CO_CHANGES = "co_changes_with"
 
 
 @dataclass

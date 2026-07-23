@@ -4,14 +4,15 @@ Ejecutar:  python3 -m unittest discover -s tests   (desde la raíz del repo)
 """
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 
 from memorygraf.store import Store
 from memorygraf.indexer import Indexer
 from memorygraf.query import Query
-from memorygraf.model import Edge, EDGE_CALLS
-from memorygraf import semantic, docs, entities, summarizer, workspace
+from memorygraf.model import Edge, EDGE_CALLS, EDGE_CO_CHANGES
+from memorygraf import semantic, docs, entities, summarizer, workspace, git_layer
 
 
 class Base(unittest.TestCase):
@@ -279,6 +280,150 @@ class TestOllamaSetup(Base):
             self.assertTrue(ollama.model_present("http://x", "qwen2.5-coder:3b"))
             self.assertTrue(ollama.model_present("http://x", "qwen2.5-coder"))
             self.assertFalse(ollama.model_present("http://x", "llama3"))
+
+
+def _git_available() -> bool:
+    try:
+        return subprocess.run(["git", "--version"], capture_output=True).returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
+
+
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestGitLayer(Base):
+    """CAPA 1 · Temporal/Git. Crea un repo git real y valida las señales."""
+
+    def _git(self, *args):
+        subprocess.run(["git", *args], cwd=self.proj, check=True,
+                       capture_output=True, text=True)
+
+    def _init_repo(self):
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@t.io")
+        self._git("config", "user.name", "Tester")
+        self._git("config", "commit.gpgsign", "false")
+
+    def _commit(self, msg, author=None):
+        self._git("add", "-A")
+        env_args = []
+        if author:
+            self._git("-c", f"user.name={author}", "-c", f"user.email={author}@t.io",
+                      "commit", "-q", "-m", msg)
+        else:
+            self._git("commit", "-q", "-m", msg)
+
+    def _sync_git(self, store):
+        return git_layer.sync(store, self.config)
+
+    def test_file_churn_and_authors(self):
+        self._init_repo()
+        self.write("a.py", "def f():\n    return 1\n")
+        self._commit("add a")
+        self.write("a.py", "def f():\n    return 2\n")
+        self._commit("fix bug in a", author="Alice")
+        store, _ = self.index()
+        r = self._sync_git(store)
+        self.assertTrue(r["enabled"])
+        g = store.git_node_get("proj/a.py")
+        self.assertEqual(g["churn"], 2)
+        self.assertEqual(g["fix_touches"], 1)      # "fix bug" cuenta
+        self.assertIn("Alice", g["authors"])
+        self.assertIn("Tester", g["authors"])
+        store.close()
+
+    def test_cochange_edge(self):
+        self._init_repo()
+        self.write("a.py", "def a():\n    return 1\n")
+        self.write("b.py", "def b():\n    return 2\n")
+        self._commit("c1")
+        # tocar ambos juntos dos veces -> co-cambio fuerte
+        self.write("a.py", "def a():\n    return 10\n")
+        self.write("b.py", "def b():\n    return 20\n")
+        self._commit("c2")
+        self.write("a.py", "def a():\n    return 100\n")
+        self.write("b.py", "def b():\n    return 200\n")
+        self._commit("c3")
+        store, _ = self.index()
+        self._sync_git(store)
+        co = {(e["source"], e["target"]) for e in store.all_edges()
+              if e["type"] == EDGE_CO_CHANGES}
+        self.assertIn(("proj/a.py", "proj/b.py"), co)
+        self.assertIn(("proj/b.py", "proj/a.py"), co)  # simétrica
+        store.close()
+
+    def test_impact_includes_cochange(self):
+        self._init_repo()
+        self.write("a.py", "def a():\n    return 1\n")
+        self.write("b.py", "def b():\n    return 2\n")
+        self._commit("c1")
+        for i in range(3):
+            self.write("a.py", f"def a():\n    return {i}\n")
+            self.write("b.py", f"def b():\n    return {i}\n")
+            self._commit(f"c{i+2}")
+        store, _ = self.index()
+        self._sync_git(store)
+        out = Query(store).impact("proj/a.py")
+        self.assertIn("proj/b.py", out)
+        self.assertIn("co-cambio", out)
+        store.close()
+
+    def test_history_and_symbol_blame(self):
+        self._init_repo()
+        self.write("a.py", "def helper():\n    return 1\n")
+        self._commit("add helper")
+        self.write("a.py", "def helper():\n    return 1\n\ndef main():\n    return helper()\n")
+        self._commit("fix add main")
+        store, _ = self.index()
+        self._sync_git(store)
+        # nivel símbolo: main solo existe desde el 2º commit
+        gm = store.git_node_get("proj/a.py::main")
+        self.assertIsNotNone(gm)
+        self.assertGreaterEqual(gm["churn"], 1)
+        out = Query(store).history("proj/a.py")
+        self.assertIn("churn", out)
+        self.assertIn("add helper", out)     # aparece el "por qué"
+        store.close()
+
+    def test_working_set_dirty(self):
+        self._init_repo()
+        self.write("a.py", "def a():\n    return 1\n")
+        self._commit("c1")
+        store, _ = self.index()
+        self._sync_git(store)
+        # modificar sin commitear
+        self.write("a.py", "def a():\n    return 999\n")
+        out = Query(store).working_set()
+        self.assertIn("proj/a.py", out)
+        self.assertIn("sin commitear", out)
+        store.close()
+
+    def test_incremental_bumps_churn(self):
+        self._init_repo()
+        self.write("a.py", "def a():\n    return 1\n")
+        self._commit("c1")
+        store, _ = self.index()
+        self._sync_git(store)
+        self.assertEqual(store.git_node_get("proj/a.py")["churn"], 1)
+        # nuevo commit + re-sync incremental
+        self.write("a.py", "def a():\n    return 2\n")
+        self._commit("c2")
+        store2, _ = self.index()
+        r = git_layer.sync(store2, self.config)
+        self.assertFalse(r["full_rebuild"])          # incremental, no recompute
+        self.assertEqual(store2.git_node_get("proj/a.py")["churn"], 2)
+        store2.close()
+        store.close()
+
+    def test_degrades_without_git(self):
+        # self.proj NO es repo git
+        self.write("a.py", "def a():\n    return 1\n")
+        store, _ = self.index()
+        r = git_layer.sync(store, self.config)
+        self.assertFalse(r["enabled"])
+        # las consultas degradan sin romperse
+        self.assertIn("working set vacío", Query(store).working_set())
+        self.assertIn("sin historia", Query(store).history("proj/a.py"))
+        store.close()
 
 
 class TestWorkspace(Base):
