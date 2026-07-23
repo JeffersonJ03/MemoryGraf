@@ -542,9 +542,12 @@ class TestCompilerCochange(_GitRepo, Base):
 
 
 class TestBenchmark(Base):
-    """El benchmark corre y el subgrafo dirigido pesa menos que leer todo (DESIGN §11)."""
+    """El benchmark corre, produce números coherentes y EXCLUYE lo ilustrativo del total.
 
-    def test_savings_are_positive(self):
+    No asserta ahorro positivo: en un repo de juguete MG puede no ahorrar (DESIGN §10:
+    el ahorro depende del tamaño del repo). El test valida la mecánica y la honestidad."""
+
+    def test_runs_and_excludes_illustrative_from_total(self):
         import benchmark
         self.write("DESIGN.md", "# Diseño\n\n- Regla: validar entrada.\n" + "x " * 500)
         self.write("orders.py",
@@ -557,8 +560,13 @@ class TestBenchmark(Base):
         store.close()
         r = benchmark.run(self.db, self.config)
         self.assertGreater(len(r["tasks"]), 0)
-        self.assertGreater(r["total_baseline"], r["total_mg"])   # MG ahorra
-        self.assertGreaterEqual(r["total_savings_pct"], 0)
+        self.assertGreater(r["total_baseline"], 0)
+        self.assertGreater(r["total_mg"], 0)
+        self.assertIsInstance(r["total_savings_pct"], float)
+        # el total NO incluye las tareas ilustrativas (input sintético)
+        real = [t for t in r["tasks"] if not t.get("illustrative")]
+        self.assertEqual(r["total_baseline"], sum(t["baseline_tokens"] for t in real))
+        self.assertTrue(any(t.get("illustrative") for t in r["tasks"]))
 
 
 class TestWorkspace(Base):

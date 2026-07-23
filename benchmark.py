@@ -161,8 +161,8 @@ def task_log_triage(store, q, roots) -> dict:
     mg = est_tokens(context_compiler.digest_log(store, log, {"projects":
                     [{"name": p, "root": r} for p, r in roots.items()]}))
     return {"task": "triage de log de tests (grande)",
-            "baseline_tokens": base, "mg_tokens": mg,
-            "detail": "baseline: pegar log crudo · mg: digest_log"}
+            "baseline_tokens": base, "mg_tokens": mg, "illustrative": True,
+            "detail": "baseline: pegar log crudo · mg: digest_log (log SINTÉTICO)"}
 
 
 def run(db_path: str, config: dict) -> dict:
@@ -178,8 +178,11 @@ def run(db_path: str, config: dict) -> dict:
         tasks.append(loc)
     tasks.append(task_log_triage(store, q, roots))
     store.close()
-    tot_base = sum(t["baseline_tokens"] for t in tasks)
-    tot_mg = sum(t["mg_tokens"] for t in tasks)
+    # el agregado excluye tareas ILUSTRATIVAS (input sintético, no medido del repo):
+    # mezclarlas inflaría el titular con un ratio diseñado a voluntad.
+    real = [t for t in tasks if not t.get("illustrative")]
+    tot_base = sum(t["baseline_tokens"] for t in real)
+    tot_mg = sum(t["mg_tokens"] for t in real)
     return {"tasks": tasks, "total_baseline": tot_base, "total_mg": tot_mg,
             "total_savings_pct": _pct(tot_base, tot_mg)}
 
@@ -195,18 +198,27 @@ def _print_report(r: dict):
     print(f"  {'tarea':<40} {'sin MG':>8} {'con MG':>8} {'ahorro':>7}")
     print("  " + "-" * 66)
     for t in r["tasks"]:
-        print(f"  {t['task'][:40]:<40} {t['baseline_tokens']:>8} "
+        mark = " *" if t.get("illustrative") else ""
+        print(f"  {(t['task']+mark)[:40]:<40} {t['baseline_tokens']:>8} "
               f"{t['mg_tokens']:>8} {_pct(t['baseline_tokens'], t['mg_tokens']):>6}%")
         print(f"    └ {t['detail']}")
     print("  " + "-" * 66)
-    print(f"  {'TOTAL':<40} {r['total_baseline']:>8} {r['total_mg']:>8} "
-          f"{r['total_savings_pct']:>6}%")
+    print(f"  {'TOTAL (tareas medidas del repo)':<40} {r['total_baseline']:>8} "
+          f"{r['total_mg']:>8} {r['total_savings_pct']:>6}%")
     print("=" * 74)
-    print("  Metodología: tokens = est_tokens(~4 chars/token) sobre contenido REAL del")
-    print("  repo (baseline) y salidas REALES de las consultas (MG). Determinista, offline,")
-    print("  sin LLM ni nube. El baseline modela leer docs/archivos completos + vecinos")
-    print("  ('por si acaso'); MG modela traer solo el subgrafo dirigido. El log es")
-    print("  sintético pero realista (ilustra el sumidero de tokens de los logs).")
+    print("  * = ilustrativa (input SINTÉTICO): NO cuenta en el TOTAL para no inflarlo.")
+    print()
+    print("  LECTURA HONESTA (no tomar el % como 'ahorro esperado'):")
+    print("  - Es un LÍMITE SUPERIOR en ESTE repo. El baseline modela el peor caso")
+    print("    (leer docs/archivos completos + TODOS los vecinos 'por si acaso'); el uso")
+    print("    real lee menos. El % crece con el tamaño del repo (no es una constante).")
+    print("  - NO se contabilizan del lado MG: el esquema de las herramientas MCP (coste")
+    print("    fijo/sesión), los round-trips por consulta, ni la RELECTURA del archivo")
+    print("    real (DESIGN §9: MemoryGraf orienta, no sustituye leer el código).")
+    print("  - DESIGN §12 fija la meta honesta en ≥40% y estima 50-80% en repos grandes;")
+    print("    trata este número como techo optimista, no como promesa.")
+    print("  - tokens = est_tokens(~4 chars/token), idéntico en ambos lados. Determinista,")
+    print("    offline, sin LLM ni nube; contenido real del repo y salidas reales de consultas.")
 
 
 def main(argv=None):
