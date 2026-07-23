@@ -23,13 +23,14 @@ memorygraf = "memorygraf.cli:main"
 parsers = ["tree-sitter>=0.23", "tree-sitter-language-pack>=0.9"]  # calls/implements JS/TS
 neural = ["model2vec>=0.6"]                                        # semántica cross-idioma
 watch = ["watchdog>=4"]                                            # watch por eventos nativo
+lsp = ["python-lsp-server>=1.7"]                                   # Capa 2: diagnósticos + resolved_type (hover)
 full = [
     "tree-sitter>=0.23", "tree-sitter-language-pack>=0.9",
-    "model2vec>=0.6", "watchdog>=4",
+    "model2vec>=0.6", "watchdog>=4", "python-lsp-server>=1.7",
 ]
 
 [tool.setuptools]
-packages = ["memorygraf", "memorygraf.extractors"]
+packages = ["memorygraf", "memorygraf.extractors", "memorygraf.runtime"]
 
 [tool.setuptools.package-data]
 memorygraf = ["py.typed"]
