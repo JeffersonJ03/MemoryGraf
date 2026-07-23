@@ -41,6 +41,7 @@ _DEFAULTS = {
     "min_cochange": 2,          # nº mínimo de co-ocurrencias para emitir arista
     "cochange_threshold": 0.25,  # peso mínimo (co / min(churn_a, churn_b))
     "cochange_max_files": 25,    # commits que tocan más archivos no cuentan co-cambio
+    "cochange_max_symbols": 20,  # ídem a nivel símbolo (evita commits "barredera")
     "top_commits": 3,            # commits guardados por nodo (el "por qué")
     "max_authors": 5,            # autores guardados por nodo (bus factor)
 }
@@ -208,15 +209,19 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
     # nivel símbolo: blame por archivo cambiado (cacheado por content_hash)
     blamed = _blame_symbols(store, config, repos, st, log)
 
-    # reconstruir aristas co_changes_with desde el acumulador
+    # reconstruir aristas co_changes_with: archivo↔archivo (acumulador) y luego
+    # símbolo↔símbolo (recompute desde blame). El de archivo BORRA todas y añade; el
+    # de símbolo solo AÑADE -> el orden importa.
     edges = _rebuild_cochange_edges(store, file_ids, st)
+    sym_edges = _rebuild_symbol_cochange(store, st)
 
     store.prune_git_layer()
     store.commit()
     log(f"git: {processed_commits} commits nuevos · {blamed} archivos blame · "
-        f"{edges} aristas co_changes_with")
+        f"{edges} co_changes_with archivo, {sym_edges} símbolo")
     return {"enabled": True, "commits": processed_commits, "blamed_files": blamed,
-            "cochange_edges": edges, "full_rebuild": full}
+            "cochange_edges": edges, "cochange_symbol_edges": sym_edges,
+            "full_rebuild": full}
 
 
 def _walk_commits(store, root, project, file_ids, rng, st, recent, log) -> int:
@@ -373,8 +378,10 @@ def _attr_symbol(store, sym, line_sha: dict, meta: dict, st):
         store.git_node_set(sym["id"], churn=0, first_changed=None,
                            last_changed=None, fix_touches=0, authors={})
         store.git_commits_set(sym["id"], [])
+        store.git_symbol_commits_set(sym["id"], [])   # sin blame -> sin co-cambio
         return
     distinct = list(dict.fromkeys(shas))       # commits únicos, orden de aparición
+    store.git_symbol_commits_set(sym["id"], distinct)  # para co-cambio por símbolo
     dates = [meta[s][1] for s in distinct if s in meta]
     authors: dict[str, int] = {}
     fixes = 0
@@ -422,6 +429,48 @@ def _rebuild_cochange_edges(store, file_ids, st) -> int:
         # arista no dirigida representada en ambos sentidos para consultas simétricas
         store.upsert_edge(Edge(a, b, EDGE_CO_CHANGES, weight, "git-cochange"))
         store.upsert_edge(Edge(b, a, EDGE_CO_CHANGES, weight, "git-cochange"))
+        count += 1
+    return count
+
+
+def _rebuild_symbol_cochange(store, st) -> int:
+    """Aristas co_changes_with a nivel SÍMBOLO (INFERRED), recompute total.
+
+    Señal: símbolos cuyo código ACTUAL fue tocado por commits comunes (blame). Recompute
+    completo cada sync desde `git_symbol_commit` (persistido) -> sin doble-conteo. Debe
+    correr DESPUÉS de _rebuild_cochange_edges (que borra todas las co_changes_with) y solo
+    AÑADE. Honestidad: blame colapsa a la atribución de HOY, así que es un acoplamiento
+    más 'de superficie' que el de archivo (historia completa); por eso va acotado.
+    """
+    sym_ids = {n["id"] for n in store.all_nodes(types=["symbol"])}
+    by_sha = store.git_symbol_commit_by_sha()
+    max_syms = st.get("cochange_max_symbols", 20)
+    pair_cnt: dict = {}
+    for _sha, syms in by_sha.items():
+        uniq = sorted({s for s in syms if s in sym_ids})   # solo símbolos vigentes
+        if not (1 < len(uniq) <= max_syms):                # ignora commits barredera
+            continue
+        for i in range(len(uniq)):
+            for j in range(i + 1, len(uniq)):
+                key = (uniq[i], uniq[j])
+                pair_cnt[key] = pair_cnt.get(key, 0) + 1
+    churn: dict = {}
+    count = 0
+    for (a, b), cnt in pair_cnt.items():
+        if cnt < st["min_cochange"]:
+            continue
+        for nid in (a, b):
+            if nid not in churn:
+                g = store.git_node_get(nid)
+                churn[nid] = g["churn"] if g else 0
+        denom = min(churn[a], churn[b])
+        if denom <= 0:
+            continue
+        weight = round(min(1.0, cnt / denom), 3)
+        if weight < st["cochange_threshold"]:
+            continue
+        store.upsert_edge(Edge(a, b, EDGE_CO_CHANGES, weight, "git-cochange-sym"))
+        store.upsert_edge(Edge(b, a, EDGE_CO_CHANGES, weight, "git-cochange-sym"))
         count += 1
     return count
 

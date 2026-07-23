@@ -97,7 +97,13 @@ CREATE TABLE IF NOT EXISTS git_blame (     -- marca de caché: hash con el que s
     path TEXT PRIMARY KEY,
     content_hash TEXT
 );
+CREATE TABLE IF NOT EXISTS git_symbol_commit (  -- commits (blame) que tocan las líneas
+    sym_id TEXT NOT NULL,                        -- ACTUALES de cada símbolo -> co-cambio
+    sha TEXT NOT NULL,                           -- por símbolo (recompute, regenerable)
+    PRIMARY KEY (sym_id, sha)
+);
 CREATE INDEX IF NOT EXISTS idx_git_cochange_b ON git_cochange(b);
+CREATE INDEX IF NOT EXISTS idx_git_symcommit_sha ON git_symbol_commit(sha);
 -- CAPA 3 · Compilador de contexto local (PLAN §6). Salida del LLM local (o del
 -- heurístico): CACHÉ REGENERABLE por content_hash, NUNCA fuente de verdad (§3.8/§6.4).
 CREATE TABLE IF NOT EXISTS ctx_note (
@@ -344,6 +350,21 @@ class Store:
         return [dict(r) for r in self.conn.execute(
             "SELECT a,b,cnt FROM git_cochange")]
 
+    def git_symbol_commits_set(self, sym_id: str, shas):
+        """Reemplaza los commits (blame) de un símbolo. Regenerable e incremental."""
+        self.conn.execute("DELETE FROM git_symbol_commit WHERE sym_id=?", (sym_id,))
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO git_symbol_commit (sym_id, sha) VALUES (?,?)",
+            [(sym_id, s) for s in shas])
+
+    def git_symbol_commit_by_sha(self) -> dict:
+        """{sha: [sym_id, ...]} para reconstruir el co-cambio a nivel símbolo."""
+        out: dict = {}
+        for sym_id, sha in self.conn.execute(
+                "SELECT sym_id, sha FROM git_symbol_commit"):
+            out.setdefault(sha, []).append(sym_id)
+        return out
+
     def git_cochange_for(self, node_id: str) -> list:
         """Pares de co-cambio que tocan a node_id -> [(otro, cnt), ...]."""
         rows = self.conn.execute(
@@ -417,7 +438,8 @@ class Store:
 
     def clear_git_layer(self):
         """Borra TODA la caché Git (para reconstruir tras historia reescrita)."""
-        for t in ("git_node", "git_commits", "git_cochange", "git_blame"):
+        for t in ("git_node", "git_commits", "git_cochange", "git_blame",
+                  "git_symbol_commit"):
             self.conn.execute(f"DELETE FROM {t}")
         self.conn.execute("DELETE FROM meta WHERE key LIKE 'git_head_sha%'")
 
@@ -432,6 +454,8 @@ class Store:
             "OR b NOT IN (SELECT id FROM nodes)")
         self.conn.execute(
             "DELETE FROM git_blame WHERE path NOT IN (SELECT id FROM nodes)")
+        self.conn.execute(
+            "DELETE FROM git_symbol_commit WHERE sym_id NOT IN (SELECT id FROM nodes)")
 
     # --- Cache de resúmenes ---
     def get_summary(self, content_hash: str, summarizer: str) -> Optional[str]:

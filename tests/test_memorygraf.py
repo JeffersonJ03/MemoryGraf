@@ -381,6 +381,29 @@ class TestGitLayer(_GitRepo, Base):
         self.assertIn(("proj/b.py", "proj/a.py"), co)  # simétrica
         store.close()
 
+    def test_symbol_cochange_edge(self):
+        # dos funciones cuyas líneas cambian en commits distintos -> su blame abarca
+        # commits comunes -> arista co_changes_with a nivel SÍMBOLO.
+        self._init_repo()
+        self.write("a.py", "def fa():\n    x = 1\n    return x\n")
+        self.write("b.py", "def fb():\n    y = 1\n    return y\n")
+        self._commit("c1 create")
+        self.write("a.py", "def fa():\n    x = 2\n    return x\n")      # línea 2
+        self.write("b.py", "def fb():\n    y = 2\n    return y\n")
+        self._commit("c2 edit line2")
+        self.write("a.py", "def fa():\n    x = 2\n    return x + 0\n")  # línea 3
+        self.write("b.py", "def fb():\n    y = 2\n    return y + 0\n")
+        self._commit("c3 edit line3")
+        store, _ = self.index()
+        r = self._sync_git(store)
+        self.assertGreaterEqual(r.get("cochange_symbol_edges", 0), 1)
+        co = {(e["source"], e["target"]) for e in store.all_edges()
+              if e["type"] == EDGE_CO_CHANGES}
+        # el par SÍMBOLO↔SÍMBOLO solo puede venir del co-cambio por símbolo
+        self.assertIn(("proj/a.py::fa", "proj/b.py::fb"), co)
+        self.assertIn(("proj/b.py::fb", "proj/a.py::fa"), co)
+        store.close()
+
     def test_impact_includes_cochange(self):
         self._init_repo()
         self.write("a.py", "def a():\n    return 1\n")
