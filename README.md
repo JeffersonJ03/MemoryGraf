@@ -57,15 +57,20 @@ El **núcleo corre solo con la stdlib** (cero dependencias, offline, cualquier p
 Instalando dependencias **opcionales** se activa el **modo potencia**; si falta alguna,
 hay **degradación elegante** al modo portable.
 
-| Capacidad | Portable (sin extra) | Potencia (con extra) |
-|---|---|---|
-| Símbolos/`calls`/`implements` JS/TS | regex (aprox.) | **tree-sitter** (exacto) |
-| Búsqueda semántica | TF-IDF | **model2vec** neural (cross-idioma) |
-| `watch` | polling | **watchdog** (eventos nativos) |
-| Python (`ast`), grafo, MCP, decisiones, entidades | exacto siempre | igual |
+| Capacidad | Portable (sin extra) | Potencia (con extra) | Extra |
+|---|---|---|---|
+| Símbolos/`calls`/`implements` JS/TS | regex (aprox.) | **tree-sitter** (exacto) | `parsers` |
+| Búsqueda semántica | TF-IDF | **model2vec** neural (cross-idioma) | `neural` |
+| `watch` | polling | **watchdog** (eventos nativos) | `watch` |
+| Diagnósticos + tipos por símbolo (`runtime --lsp`) | — (se omite) | **python-lsp-server** (o pyright) | `lsp` |
+| Python (`ast`), grafo, MCP, decisiones, entidades | exacto siempre | igual | — |
+
+Instala todo con `pip install ".[full]"`, o solo lo que quieras: `pip install ".[neural]"`,
+`".[parsers]"`, `".[watch]"`, `".[lsp]"`. Si un extra falta, esa capacidad **degrada** al
+modo portable en vez de fallar.
 
 Resúmenes de nodos: heurístico por defecto (offline); prosa real opcional vía **Ollama**
-local (privado) o una API compatible OpenAI.
+local (privado, `memorygraf setup-ollama`) o una API compatible OpenAI.
 
 ## Cómo funciona
 

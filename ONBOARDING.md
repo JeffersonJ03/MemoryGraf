@@ -15,7 +15,7 @@ un backend de API). Funciona con Claude y con cualquier cliente que hable MCP.
 - **Python 3.10+**
 - (Opcional) **pipx** para instalación aislada y global.
 - (Opcional, para potencia) las dependencias de `requirements-full.txt` (tree-sitter,
-  model2vec, watchdog) — el instalador las pone por ti.
+  model2vec, watchdog, python-lsp-server) — el instalador las pone por ti.
 - (Opcional, resúmenes en prosa privados) **Ollama** con un modelo de código.
 
 ## 2. Instalar (una vez por equipo)
@@ -75,6 +75,9 @@ memorygraf decisions "base de datos"
 
 - **Parsers exactos JS/TS y semántica cross-idioma**: ya vienen con `install.sh` (sin
   `--core`). Si faltan, cae a regex + TF-IDF sin romperse.
+- **Diagnósticos + tipos por símbolo (LSP)**: con `python-lsp-server` (o `pyright`)
+  instalado, `memorygraf runtime --lsp` mapea errores/warnings y `resolved_type` a cada
+  símbolo. Sin language-server, esa sub-capa se omite en silencio.
 - **Entidades de dominio**: copia `memorygraf.entities.example.json` a tu proyecto como
   `memorygraf.entities.json` (o `.memorygraf/entities.json`), edítalo con tus entidades
   de negocio y `memorygraf sync`.

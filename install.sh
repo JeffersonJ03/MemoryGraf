@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Instalador de MemoryGraf (Linux/macOS/WSL). Deja el comando `memorygraf` disponible.
 # Uso:
-#   ./install.sh            # instala con potencia completa ([full]): tree-sitter, neural, watch
-#   ./install.sh --core     # solo núcleo (sin dependencias opcionales)
+#   ./install.sh            # potencia completa ([full]): tree-sitter, model2vec, watchdog, python-lsp-server
+#   ./install.sh --core     # solo núcleo (stdlib, sin dependencias opcionales)
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -10,6 +10,20 @@ EXTRAS="[full]"
 if [ "${1:-}" = "--core" ]; then EXTRAS=""; fi
 
 echo "==> Instalando MemoryGraf desde: $SRC  (extras: ${EXTRAS:-ninguno})"
+
+# Informa qué activan las dependencias OPCIONALES (degradación elegante si faltan).
+if [ -n "$EXTRAS" ]; then
+  echo "==> Dependencias opcionales (modo potencia) que se instalarán con [full]:"
+else
+  echo "==> Modo --core: solo stdlib. Estas capacidades quedan en modo portable:"
+fi
+cat <<'CAPS'
+      tree-sitter (+ language-pack) : símbolos/calls JS/TS exactos (si no: regex aprox.)
+      model2vec                     : búsqueda semántica neural cross-idioma (si no: TF-IDF)
+      watchdog                      : `watch` por eventos nativos      (si no: polling)
+      python-lsp-server             : `runtime --lsp` diagnósticos + tipos (si no: se omite)
+    (instala solo lo que quieras:  pip install ".[neural]"  ".[parsers]"  ".[watch]"  ".[lsp]")
+CAPS
 
 # Detecta el rc file del shell activo (para persistir el PATH si hace falta)
 detect_rc_file() {
