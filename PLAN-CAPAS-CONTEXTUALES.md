@@ -415,4 +415,7 @@ acoplamiento con `pipeline/summarizer/test` (feature de resúmenes Ollama), con 
 ### Pendiente del roadmap
 - **Fase 8** (verdad de runtime: tests/cobertura + LSP) y **Fase 9** (confidence en aristas,
   `analyze()`/god-nodes, `GRAPH_REPORT.md`): sin cambios respecto a §10.
-- **Benchmark de tokens** (§11, con vs sin las capas): pendiente de construir (`benchmark.py`).
+- **Benchmark de tokens** (§11) ✅: `benchmark.py` (determinista, offline, estilo Graphify:
+  corpus vs subgrafo). En este repo mide **~91% de ahorro agregado** (leer docs/archivos
+  completos + vecinos vs subgrafo dirigido de consultas), con desglose por tarea
+  (onboarding, impacto/entender, localizar, triage de logs).

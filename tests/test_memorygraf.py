@@ -541,6 +541,26 @@ class TestCompilerCochange(_GitRepo, Base):
         store.close()
 
 
+class TestBenchmark(Base):
+    """El benchmark corre y el subgrafo dirigido pesa menos que leer todo (DESIGN §11)."""
+
+    def test_savings_are_positive(self):
+        import benchmark
+        self.write("DESIGN.md", "# Diseño\n\n- Regla: validar entrada.\n" + "x " * 500)
+        self.write("orders.py",
+                   '"""Gestión de órdenes."""\n'
+                   "def get_order_tracking(order_id):\n    return order_id\n")
+        self.write("service.py", "from orders import get_order_tracking\n"
+                   "def run():\n    return get_order_tracking(1)\n")
+        store, _ = self.index()
+        docs.extract_docs(store, self.config)
+        store.close()
+        r = benchmark.run(self.db, self.config)
+        self.assertGreater(len(r["tasks"]), 0)
+        self.assertGreater(r["total_baseline"], r["total_mg"])   # MG ahorra
+        self.assertGreaterEqual(r["total_savings_pct"], 0)
+
+
 class TestWorkspace(Base):
     def test_init_and_resolve(self):
         cfg_path = workspace.init_workspace(self.proj, "demo", [])
