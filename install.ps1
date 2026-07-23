@@ -25,6 +25,7 @@ Write-Host "      model2vec                     : busqueda semantica neural cros
 Write-Host "      watchdog                      : 'watch' por eventos nativos      (si no: polling)"
 Write-Host "      python-lsp-server             : 'runtime --lsp' diagnosticos + tipos (si no: se omite)"
 Write-Host '    (instala solo lo que quieras:  pip install ".[neural]"  ".[parsers]"  ".[watch]"  ".[lsp]")'
+Write-Host '    (revisa el estado y ACTIVA lo que falte con:  memorygraf doctor  - interactivo)'
 
 # Añade una carpeta al PATH del usuario de forma PERMANENTE (persiste en el
 # registro, sobrevive a reinicios de terminal) sin duplicarla si ya está.

@@ -282,6 +282,53 @@ class TestOllamaSetup(Base):
             self.assertFalse(ollama.model_present("http://x", "llama3"))
 
 
+class TestDoctor(Base):
+    def test_collect_reports_every_capability(self):
+        from memorygraf import doctor
+        data = doctor.collect()
+        keys = {c["key"] for c in data["capabilities"]}
+        self.assertEqual(keys, {"parsers", "neural", "watch", "lsp"})
+        # cada capacidad activa no lleva comando; cada faltante sí, con el intérprete real
+        for c in data["capabilities"]:
+            if c["active"]:
+                self.assertIsNone(c["install"])
+            else:
+                self.assertTrue("pip install" in c["install"]
+                                or "pipx inject" in c["install"])
+        self.assertIn(data["environment"], {"pipx", "venv", "sistema"})
+
+    def test_run_report_is_offline_and_succeeds(self):
+        from memorygraf import doctor
+        lines = []
+        # is_tty=False fuerza el camino de solo-reporte (sin prompt ni instalación)
+        self.assertEqual(doctor.run(is_tty=False, log=lines.append), 0)
+        self.assertTrue(any("diagnóstico de capacidades" in l for l in lines))
+
+    def test_selection_parsing(self):
+        from memorygraf import doctor
+        mk = ["parsers", "neural", "lsp"]
+        self.assertEqual(doctor._parse_selection("", mk), [])
+        self.assertEqual(doctor._parse_selection("a", mk), mk)
+        self.assertEqual(doctor._parse_selection("2, lsp", mk), ["neural", "lsp"])
+        self.assertEqual(doctor._parse_selection("neural,neural,9", mk), ["neural"])
+        self.assertEqual(doctor._parse_selection("nope", mk), [])
+
+    def test_install_command_is_env_aware(self):
+        from memorygraf import doctor
+        cmd = doctor._install_command(["model2vec>=0.6"])
+        self.assertEqual(cmd[-1], "model2vec>=0.6")
+        # pipx inject <pkgs>  |  <python> -m pip install <pkgs>
+        self.assertTrue(cmd[:3] == ["pipx", "inject", "memorygraf"]
+                        or cmd[1:4] == ["-m", "pip", "install"])
+
+    def test_interactive_no_selection_installs_nothing(self):
+        from memorygraf import doctor
+        lines = []
+        # simula TTY con una respuesta sin coincidencias: no debe instalar nada
+        rc = doctor.run(is_tty=True, ask=lambda _p: "zzz", log=lines.append)
+        self.assertEqual(rc, 0)
+
+
 def _git_available() -> bool:
     try:
         return subprocess.run(["git", "--version"], capture_output=True).returncode == 0

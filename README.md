@@ -67,7 +67,10 @@ hay **degradación elegante** al modo portable.
 
 Instala todo con `pip install ".[full]"`, o solo lo que quieras: `pip install ".[neural]"`,
 `".[parsers]"`, `".[watch]"`, `".[lsp]"`. Si un extra falta, esa capacidad **degrada** al
-modo portable en vez de fallar.
+modo portable en vez de fallar. Corre **`memorygraf doctor`** para ver qué está activo y
+**activar lo que falte de forma interactiva**: instala en el entorno correcto (pipx o venv,
+detecta plataforma/WSL/distro) y te dice el paso siguiente. También no interactivo:
+`memorygraf doctor --install neural,lsp` (o `--install all`), y `--json` para solo reporte.
 
 Resúmenes de nodos: heurístico por defecto (offline); prosa real opcional vía **Ollama**
 local (privado, `memorygraf setup-ollama`) o una API compatible OpenAI.

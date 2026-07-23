@@ -23,6 +23,7 @@ cat <<'CAPS'
       watchdog                      : `watch` por eventos nativos      (si no: polling)
       python-lsp-server             : `runtime --lsp` diagnósticos + tipos (si no: se omite)
     (instala solo lo que quieras:  pip install ".[neural]"  ".[parsers]"  ".[watch]"  ".[lsp]")
+    (revisa el estado y ACTIVA lo que falte con:  memorygraf doctor  — interactivo)
 CAPS
 
 # Detecta el rc file del shell activo (para persistir el PATH si hace falta)

@@ -69,6 +69,11 @@ def main(argv=None):
     p.add_argument("--model", default=None, help="Modelo a usar (def: qwen2.5-coder:3b)")
     p.add_argument("--no-pull", action="store_true", help="No descargar el modelo ahora")
     p.add_argument("--no-config", action="store_true", help="No escribir el bloque 'summary' en la config")
+    p = sub.add_parser("doctor",
+                       help="Reporta capacidades y (interactivo) instala las que falten")
+    p.add_argument("--json", action="store_true", help="Salida legible por máquina (solo reporte)")
+    p.add_argument("--install", nargs="?", const="all", default=None,
+                   help="Instala sin preguntar: 'all' o claves por coma (p.ej. neural,lsp)")
 
     sub.add_parser("index")
     sub.add_parser("stats")
@@ -149,6 +154,11 @@ def main(argv=None):
             config_path=workspace.resolve_config_path(getattr(args, "config", None)),
             log=lambda m: print(m, file=sys.stderr))
         sys.exit(rc)
+
+    if args.cmd == "doctor":
+        from . import doctor
+        sys.exit(doctor.run(as_json=args.json, install=args.install,
+                            log=lambda m: print(m, file=sys.stderr)))
 
     if args.cmd == "mcp":
         os.environ["MEMORYGRAF_DB"] = _db_path(args)
