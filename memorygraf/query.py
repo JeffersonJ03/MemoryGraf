@@ -112,16 +112,22 @@ class Query:
 
     # --- search: nodos relevantes con resumen + ubicacion (híbrido) ---
     def search(self, query: str, budget_tokens: int = 800, types=None, limit: int = 15,
-               rerank: bool = False) -> str:
+               rerank=False, config: dict | None = None) -> str:
         results, mode = self._hybrid_search(query, types, limit)
         if not results:
             return f"(sin resultados para: {query})"
-        if rerank:   # rerank local determinista (opt-in; no añade latencia por defecto)
+        if rerank:   # opt-in; no añade latencia por defecto (rerank=False)
             from . import context_compiler
-            order = context_compiler.rerank(self.store, query, [n["id"] for n in results])
+            ids = [n["id"] for n in results]
+            if rerank == "llm":   # LLM local con presupuesto de latencia + fallback + caché
+                with context_compiler.local_llm(config, log=lambda m: None) as llm:
+                    order = context_compiler.rerank_llm(self.store, query, ids, llm=llm)
+                mode += "+rerank(llm)" if (llm and llm.available) else "+rerank"
+            else:                 # determinista (léxico + estructura + churn)
+                order = context_compiler.rerank(self.store, query, ids)
+                mode += "+rerank"
             by_id = {n["id"]: n for n in results}
             results = [by_id[i] for i in order if i in by_id]
-            mode += "+rerank"
         lines = [f"# search: {query}  ({len(results)} resultados · {mode})"]
         for n in results:
             loc = _loc(n)

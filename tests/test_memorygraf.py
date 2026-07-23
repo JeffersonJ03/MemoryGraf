@@ -346,6 +346,29 @@ def _ts_lsp_available() -> bool:
     return lsp._find_lang_server(lsp._LANGUAGES[1]) is not None
 
 
+class _FakeLLM:
+    """LLM local falso (offline): cuenta llamadas y devuelve una respuesta fija."""
+    def __init__(self, response, name="ollama:fake"):
+        self.available = True
+        self.name = name
+        self.calls = 0
+        self._response = response
+
+    def generate(self, prompt, num_predict=120, timeout=None):
+        self.calls += 1
+        return self._response
+
+
+def _fake_local_llm_cm(llm):
+    """Devuelve un context manager que cede `llm` (para parchear cc.local_llm)."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm(config, log=lambda m: None):
+        yield llm
+    return _cm
+
+
 class _GitRepo:
     """Mixin con helpers para crear un repo git real de prueba (sin tests propios)."""
 
@@ -593,6 +616,72 @@ class TestContextCompiler(Base):
         store.close()
 
 
+class TestRerankLlm(Base):
+    """M7 · rerank con LLM local: reordena, con presupuesto + caché + fallback."""
+
+    def _two_files(self):
+        self.write("orders.py", '"""Órdenes."""\ndef get_order():\n    return 1\n')
+        self.write("misc.py", "def other():\n    return 2\n")
+        return self.index()
+
+    def test_llm_reorders_by_model_output(self):
+        from memorygraf import context_compiler as cc
+        store, _ = self._two_files()
+        ids = ["proj/misc.py", "proj/orders.py"]     # orden base 'malo'
+        llm = _FakeLLM("2, 1")                        # el modelo prefiere el 2º
+        ranked = cc.rerank_llm(store, "order", ids, llm=llm)
+        self.assertEqual(ranked, ["proj/orders.py", "proj/misc.py"])
+        self.assertEqual(llm.calls, 1)
+        store.close()
+
+    def test_falls_back_to_deterministic_on_garbage(self):
+        from memorygraf import context_compiler as cc
+        store, _ = self._two_files()
+        ids = ["proj/misc.py", "proj/orders.py"]
+        garbage = cc.rerank_llm(store, "order", ids, llm=_FakeLLM("no sé"), cache=False)
+        self.assertEqual(garbage, cc.rerank(store, "order", ids))   # == determinista
+        self.assertEqual(garbage[0], "proj/orders.py")
+        store.close()
+
+    def test_budget_timeout_falls_back(self):
+        from memorygraf import context_compiler as cc
+        store, _ = self._two_files()
+        ids = ["proj/misc.py", "proj/orders.py"]
+        # generate devolviendo None simula expiración del presupuesto de latencia
+        out = cc.rerank_llm(store, "order", ids, llm=_FakeLLM(None), cache=False)
+        self.assertEqual(out, cc.rerank(store, "order", ids))
+        store.close()
+
+    def test_no_llm_is_deterministic(self):
+        from memorygraf import context_compiler as cc
+        store, _ = self._two_files()
+        ids = ["proj/misc.py", "proj/orders.py"]
+        self.assertEqual(cc.rerank_llm(store, "order", ids, llm=None),
+                         cc.rerank(store, "order", ids))
+        store.close()
+
+    def test_result_is_cached(self):
+        from memorygraf import context_compiler as cc
+        store, _ = self._two_files()
+        ids = ["proj/misc.py", "proj/orders.py"]
+        llm = _FakeLLM("2, 1")
+        first = cc.rerank_llm(store, "order", ids, llm=llm)
+        second = cc.rerank_llm(store, "order", ids, llm=llm)   # debe salir de caché
+        self.assertEqual(first, second)
+        self.assertEqual(llm.calls, 1)              # el LLM NO se invocó la 2ª vez
+        store.close()
+
+    def test_search_llm_rerank_wired(self):
+        import unittest.mock as mock
+        from memorygraf import context_compiler as cc
+        store, _ = self._two_files()
+        llm = _FakeLLM("2, 1")
+        with mock.patch.object(cc, "local_llm", _fake_local_llm_cm(llm)):
+            out = Query(store).search("order", rerank="llm", config={})
+        self.assertIn("+rerank(llm)", out)
+        store.close()
+
+
 @unittest.skipUnless(_git_available(), "git no disponible")
 class TestCompilerCochange(_GitRepo, Base):
     """Narrativa del 'por qué' del co-cambio (heurística) + surfacing en impact."""
@@ -671,6 +760,29 @@ class TestCompilerCochange(_GitRepo, Base):
         self.assertGreaterEqual(r1["generated"], 1)
         self.assertEqual(r2["generated"], 0)
         self.assertGreaterEqual(r2["from_cache"], 1)
+        store.close()
+
+    def test_compile_force_llm_uses_local_model(self):
+        # M7: `compile --llm` (force_llm) fuerza el backend Ollama sin tocar la config.
+        import unittest.mock as mock
+        from memorygraf import context_compiler as cc
+        self._init_repo()
+        self.write("a.py", "def a():\n    return 1\n")
+        self.write("b.py", "def b():\n    return 2\n")
+        self._commit("feat: soporte de ordenes")
+        for i in range(3):
+            self.write("a.py", f"def a():\n    return {i}\n")
+            self.write("b.py", f"def b():\n    return {i}\n")
+            self._commit(f"feat: ordenes parte {i}")
+        store, _ = self.index()
+        git_layer.sync(store, self.config)
+        llm = _FakeLLM("cambian juntos al tocar el flujo de órdenes")
+        with mock.patch.object(cc, "local_llm", _fake_local_llm_cm(llm)):
+            r = cc.compile(store, self.config, force_llm=True)   # config sin backend ollama
+        self.assertEqual(r["backend"], "ollama:fake")            # usó el LLM, no el heurístico
+        self.assertGreaterEqual(llm.calls, 1)
+        self.assertEqual(cc.cochange_note(store, "proj/a.py", "proj/b.py"),
+                         "cambian juntos al tocar el flujo de órdenes")
         store.close()
 
 

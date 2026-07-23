@@ -16,5 +16,10 @@
       "manage": true,
       "auto_pull": false
     }
+  },
+
+  "_compiler_comment": "Opcional (M7). Narrativa del 'por qué' del co-cambio. En el sync, 'auto' usa el HEURÍSTICO (barato, no arranca el modelo); pon backend='ollama' para narrativas del LLM local en cada sync, o hazlo on-demand con 'memorygraf compile --llm'. Rerank de búsqueda con LLM: 'memorygraf search <q> --rerank-llm' (latencia acotada + fallback determinista + caché).",
+  "compiler": {
+    "backend": "auto"
   }
 }

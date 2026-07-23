@@ -28,7 +28,7 @@ verificación en vivo antes de dar por buena.
 | ~~M4~~ | ✅ **Implementado** (multi-lenguaje TS/JS) · `resolved_type` + params/vars *(params/vars pend.)* | Medio | Medio | Medio |
 | ~~M5~~ | ✅ **Implementado** · `digest`: formatos **agrupados** (eslint stylish, jest, go test, tsc) | Medio | Medio | Medio |
 | M6 | Escala: `git blame` **paralelo/por lotes** en repos grandes | Medio | Medio | Medio |
-| M7 | Narrativa/rerank con **LLM local por defecto** cuando Ollama está | Bajo | Bajo | Bajo |
+| ~~M7~~ | ✅ **Implementado** · Narrativa/rerank con **LLM local** opt-in (Ollama) | Bajo | Bajo | Bajo |
 | M8 | Co-cambio **cross-project** por símbolo (hoy dentro de un proyecto) | Bajo | Medio | Medio |
 | M4b | `resolved_type` de **params/variables individuales** (hover por offset) — pendiente de M4 | Bajo | Medio | Medio |
 
@@ -222,10 +222,21 @@ principal; paralelizar solo la lectura de blame).
 
 ---
 
-## M7 · Narrativa/rerank con LLM local por defecto
+## M7 · Narrativa/rerank con LLM local por defecto  ✅ IMPLEMENTADO
 
-**Contexto.** En el `sync`, la narrativa de co-cambio usa el **heurístico** (el LLM es
-opt-in por coste). El rerank en consulta es determinista (LLM diferido por latencia).
+**Estado (2026-07-23).** Hecho, como **opt-in** (no "por defecto": se respeta el coste del
+`sync`, DESIGN §11). (1) Narrativa: `compile(force_llm=True)` fuerza el backend Ollama sin
+tocar la config → CLI `memorygraf compile --llm` (espejo de `digest --llm`); también
+`compiler.backend=ollama` para cada sync. (2) Rerank LLM: `context_compiler.rerank_llm`
+DESTILA (solo permuta la lista dada; guardarraíl §6.4) con **presupuesto de latencia
+estricto** (`_LocalLLM.generate(timeout=...)`), **fallback determinista** (`rerank`) si no
+hay LLM/expira/responde inválido, y **caché** por (query, candidatos) en
+`ctx_note(kind='rerank')`. Expuesto en `Query.search(rerank='llm', config=...)` y CLI
+`search --rerank` / `--rerank-llm`. Tests offline con LLM falso (`TestRerankLlm`,
+`test_compile_force_llm_uses_local_model`). El resto queda como registro del plan.
+
+**Contexto.** Antes, en el `sync`, la narrativa de co-cambio usaba solo el **heurístico** (el
+LLM era opt-in por coste). El rerank en consulta era determinista (LLM diferido por latencia).
 
 **Plan de implementación.**
 1. Si Ollama está disponible y el usuario opta (`compiler.backend=ollama`), usar el modelo

@@ -75,6 +75,11 @@ detecta plataforma/WSL/distro) y te dice el paso siguiente. También no interact
 Resúmenes de nodos: heurístico por defecto (offline); prosa real opcional vía **Ollama**
 local (privado, `memorygraf setup-ollama`) o una API compatible OpenAI.
 
+Con Ollama, dos opt-in con **LLM local** (privado, fallback determinista si no está):
+narrativa más rica del co-cambio on-demand (`memorygraf compile --llm`, o `compiler.backend=ollama`
+en la config para cada `sync`), y rerank de búsqueda con presupuesto de latencia acotado y
+caché (`memorygraf search "<consulta>" --rerank-llm`; `--rerank` es la versión determinista).
+
 ## Cómo funciona
 
 1. **Indexa** el código a un grafo: nodos `file`/`symbol`/`entity`/`decision`/…, aristas

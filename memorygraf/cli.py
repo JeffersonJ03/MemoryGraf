@@ -79,6 +79,8 @@ def main(argv=None):
     sub.add_parser("stats")
     p = sub.add_parser("overview"); p.add_argument("--scope"); p.add_argument("--budget", type=int, default=1500)
     p = sub.add_parser("search"); p.add_argument("query"); p.add_argument("--types"); p.add_argument("--budget", type=int, default=800)
+    p.add_argument("--rerank", action="store_true", help="Reordena por relevancia (determinista, local)")
+    p.add_argument("--rerank-llm", action="store_true", help="Reordena con LLM local (Ollama; latencia acotada + fallback)")
     p = sub.add_parser("neighbors"); p.add_argument("node_id"); p.add_argument("--types"); p.add_argument("--budget", type=int, default=800)
     p = sub.add_parser("get"); p.add_argument("node_id")
     p = sub.add_parser("decisions"); p.add_argument("topic", nargs="?"); p.add_argument("--budget", type=int, default=1200)
@@ -94,7 +96,8 @@ def main(argv=None):
     p.add_argument("file", nargs="?", help="Archivo de log (o stdin si se omite)")
     p.add_argument("--budget", type=int, default=400)
     p.add_argument("--llm", action="store_true", help="Usar LLM local para la línea de situación")
-    sub.add_parser("compile", help="Compila el contexto: narra el 'por qué' del co-cambio")
+    p = sub.add_parser("compile", help="Compila el contexto: narra el 'por qué' del co-cambio")
+    p.add_argument("--llm", action="store_true", help="Usar LLM local (Ollama) para narrativas más ricas")
     # CAPA 2 · Verdad de runtime
     p = sub.add_parser("runtime", help="Ingiere cobertura/tests (y LSP con --lsp)")
     p.add_argument("--lsp", action="store_true", help="Además, diagnósticos/tipos vía LSP")
@@ -200,7 +203,8 @@ def main(argv=None):
         elif args.cmd == "compile":
             from . import context_compiler
             r = context_compiler.compile(store, _load_cfg(args),
-                                         log=lambda m: print("  " + m, file=sys.stderr))
+                                         log=lambda m: print("  " + m, file=sys.stderr),
+                                         force_llm=args.llm)
             print(json.dumps(r, ensure_ascii=False))
         elif args.cmd == "runtime":
             from .runtime import tests as runtime_tests, lsp as runtime_lsp
@@ -256,7 +260,9 @@ def main(argv=None):
             if args.cmd == "overview":
                 print(q.overview(scope=args.scope, budget_tokens=args.budget))
             elif args.cmd == "search":
-                print(q.search(args.query, budget_tokens=args.budget, types=types))
+                rr = "llm" if getattr(args, "rerank_llm", False) else bool(getattr(args, "rerank", False))
+                print(q.search(args.query, budget_tokens=args.budget, types=types,
+                               rerank=rr, config=_load_cfg(args) if rr == "llm" else None))
             elif args.cmd == "neighbors":
                 print(q.neighbors(args.node_id, edge_types=types, budget_tokens=args.budget))
             elif args.cmd == "get":

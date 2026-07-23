@@ -57,11 +57,14 @@ class _LocalLLM:
         self.available = bool(url)
         self.name = f"ollama:{model}" if url else "heuristic"
 
-    def generate(self, prompt: str, num_predict: int = 120) -> str | None:
+    def generate(self, prompt: str, num_predict: int = 120,
+                 timeout: float | None = None) -> str | None:
         if not self.url:
             return None
-        return _ollama.generate(self.url, self.model, prompt,
-                                num_predict=num_predict, keep_alive=self.keep_alive)
+        kw = {"num_predict": num_predict, "keep_alive": self.keep_alive}
+        if timeout is not None:      # presupuesto de latencia ESTRICTO (rerank en consulta)
+            kw["timeout"] = timeout
+        return _ollama.generate(self.url, self.model, prompt, **kw)
 
 
 @contextmanager
@@ -444,23 +447,79 @@ def rerank(store, query: str, node_ids: list, boost_recency: bool = True) -> lis
     return [nid for nid, _ in scored]
 
 
+def _parse_rank_order(text: str, n: int) -> list:
+    """Permutación 0-indexed a partir de los números (1-indexed) que devuelve el LLM.
+    Ignora fuera de rango y repetidos; [] si no hay nada usable (-> fallback)."""
+    seen, order = set(), []
+    for tok in re.findall(r"\d+", text or ""):
+        i = int(tok) - 1
+        if 0 <= i < n and i not in seen:
+            seen.add(i)
+            order.append(i)
+    return order
+
+
+def rerank_llm(store, query: str, node_ids: list, llm: "_LocalLLM | None" = None,
+               budget_s: float = 8.0, cache: bool = True, log=lambda m: None) -> list:
+    """Reordena candidatos con el LLM local: DESTILA (solo PERMUTA la lista dada, nunca
+    inventa nodos; guardarraíl §6.4). Salvaguardas (M7):
+      - presupuesto de latencia ESTRICTO (`budget_s`): si expira -> None -> fallback.
+      - fallback DETERMINISTA (`rerank`) si no hay LLM o la respuesta es inválida.
+      - CACHÉ por (query, candidatos) en `ctx_note(kind='rerank')`, regenerable.
+    """
+    node_ids = list(node_ids)
+    if len(node_ids) <= 1:
+        return node_ids
+    key = content_hash(query + "\x00" + "|".join(node_ids))
+    if cache:
+        prev = store.ctx_note_get("rerank", key)
+        if prev and set(prev["note"].split("|")) == set(node_ids):
+            return prev["note"].split("|")
+    if not (llm and llm.available):
+        return rerank(store, query, node_ids)          # sin LLM -> determinista
+    items = []
+    for i, nid in enumerate(node_ids, 1):
+        n = store.get_node(nid) or {}
+        desc = n.get("summary") or n.get("name") or nid
+        items.append(f"{i}. {n.get('name', '?')} [{n.get('type', '')}] — {desc[:80]}")
+    prompt = ("Ordena estos elementos por relevancia para la consulta. Responde SOLO con "
+              "los números en orden de más a menos relevante, separados por comas.\n"
+              f"Consulta: {query}\n" + "\n".join(items) + "\n")
+    order = _parse_rank_order(llm.generate(prompt, num_predict=80, timeout=budget_s),
+                              len(node_ids))
+    if not order:
+        return rerank(store, query, node_ids)          # inválido/expiró -> determinista
+    ranked = [node_ids[i] for i in order]
+    ranked += [nid for i, nid in enumerate(node_ids) if i not in set(order)]  # resto al final
+    if cache:
+        store.ctx_note_set("rerank", key, key, llm.name, "|".join(ranked))
+        store.commit()
+    return ranked
+
+
 # --------------------------------------------------------------------------- #
 # Entrada de sync (opt-in): narra co-cambio. La digestión de logs es on-demand.
 # --------------------------------------------------------------------------- #
-def compile(store, config: dict | None = None, log=lambda m: None) -> dict:
+def compile(store, config: dict | None = None, log=lambda m: None,
+            force_llm: bool = False) -> dict:
     """Paso de compilación del sync: narra las aristas de co-cambio (barato, cacheado).
 
     La digestión de logs NO va aquí (su entrada es transitoria); se invoca on-demand
     vía CLI `digest` / MCP `digest_log`.
 
     Coste (DESIGN §11): en el sync, `backend=auto` usa el HEURÍSTICO determinista (no
-    arranca el modelo). El LLM local en el sync es opt-in (`compiler.backend=ollama`)."""
-    s = _settings(config)
+    arranca el modelo). El LLM local en el sync es opt-in: config `compiler.backend=ollama`
+    o, on-demand, `force_llm=True` (CLI `compile --llm`) que fuerza el backend Ollama."""
+    cfg = config
+    if force_llm:      # on-demand: fuerza el backend Ollama sin tocar la config del proyecto
+        cfg = {**(config or {}),
+               "compiler": {**((config or {}).get("compiler") or {}), "backend": "ollama"}}
+    s = _settings(cfg)
     if not s["enabled"] or s["backend"] == "off":
         return {"enabled": False}
     if s["backend"] == "ollama":
-        with local_llm(config, log=log) as llm:
-            r = compile_cochange_notes(store, config, llm=llm, log=log)
+        with local_llm(cfg, log=log) as llm:
+            r = compile_cochange_notes(store, cfg, llm=llm, log=log)
     else:   # auto | heuristic -> sin LLM en el camino del sync
-        r = compile_cochange_notes(store, config, llm=None, log=log)
+        r = compile_cochange_notes(store, cfg, llm=None, log=log)
     return {"enabled": True, **r}
