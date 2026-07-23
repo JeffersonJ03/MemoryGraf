@@ -24,7 +24,7 @@ import re
 from contextlib import contextmanager
 
 from . import ollama as _ollama
-from .model import content_hash
+from .model import content_hash, EDGE_CO_CHANGES, NODE_SYMBOL
 
 _DEFAULTS = {
     "enabled": True,
@@ -231,12 +231,21 @@ _STOP = {"the", "and", "for", "with", "fix", "feat", "docs", "chore", "add", "up
 
 
 def _shared_subjects(store, a: str, b: str) -> list:
-    """Asuntos de commits donde ambos nodos aparecen (aprox. vía top commits guardados)."""
+    """Asuntos de commits donde ambos nodos aparecen (aprox. vía top commits guardados).
+
+    Funciona por node id para ARCHIVOS y SÍMBOLOS: ambos persisten sus commits en
+    `git_commits` (archivos en `_persist_recent`, símbolos en `_attr_symbol`)."""
     ca = {c["hash"]: c for c in store.git_commits_get(a)}
     cb = {c["hash"]: c for c in store.git_commits_get(b)}
     shared = [ca[h] for h in ca if h in cb]
     shared.sort(key=lambda c: c["date"], reverse=True)
     return [c["subject"] for c in shared]
+
+
+def _pair_is_symbol(store, a: str, b: str) -> bool:
+    """¿El par es símbolo↔símbolo? (solo para afinar el enunciado del prompt LLM)."""
+    na = store.get_node(a)
+    return bool(na and na.get("type") == NODE_SYMBOL)
 
 
 def _heuristic_cochange_note(subjects: list, cnt: int) -> str:
@@ -258,25 +267,34 @@ def compile_cochange_notes(store, config: dict | None = None,
                            log=lambda m: None) -> dict:
     """Genera/actualiza la narrativa del 'por qué' de cada arista co_changes_with.
 
+    Itera las aristas `co_changes_with` REALES (archivo↔archivo Y símbolo↔símbolo);
+    así narra ambos niveles sin depender del acumulador (que es solo de archivos).
     Cacheada por content_hash de los asuntos compartidos (regenerable). El LLM local,
     si está, produce la frase; si no, un heurístico determinista. Se guarda en
     `ctx_note(kind='cochange')` y lo consumen impact()/history()/neighbors()."""
-    pairs = store.git_cochange_all()
     node_ids = store.all_node_ids()
+    # cnt del acumulador (archivo↔archivo). Los pares de SÍMBOLO no viven ahí: se narran
+    # igual desde la arista, usando el nº de asuntos compartidos como medida de fuerza.
+    file_cnt = {(r["a"], r["b"]): r["cnt"] for r in store.git_cochange_all()}
     generated = cached = 0
     keep = set()
+    seen = set()
     backend = llm.name if (llm and llm.available) else "heuristic"
-    for row in pairs:
-        a, b, cnt = row["a"], row["b"], row["cnt"]
-        if a not in node_ids or b not in node_ids:
+    for e in store.all_edges():
+        if e["type"] != EDGE_CO_CHANGES:
             continue
-        # ¿existe la arista? (solo narramos las que superaron el umbral en git_layer)
-        if not any(e["type"] == "co_changes_with" and e["target"] == b
-                   for e in store.neighbors(a, edge_types=["co_changes_with"], direction="out")):
+        a, b = e["source"], e["target"]
+        if a > b:                       # par canónico (la arista es simétrica)
+            a, b = b, a
+        if (a, b) in seen:
+            continue
+        seen.add((a, b))
+        if a not in node_ids or b not in node_ids:
             continue
         key = f"{a}|{b}"
         keep.add(key)
         subjects = _shared_subjects(store, a, b)
+        cnt = file_cnt.get((a, b)) or len(subjects)
         # `_COCHANGE_LOGIC_VER` versiona la LÓGICA (stopwords/heurística): al cambiarla,
         # el hash cambia y las notas cacheadas se regeneran solas (sin bust manual).
         chash = content_hash("|".join(subjects) + f"#{cnt}#{backend}#{_COCHANGE_LOGIC_VER}")
@@ -286,7 +304,8 @@ def compile_cochange_notes(store, config: dict | None = None,
             continue
         note = None
         if llm and llm.available and subjects:
-            prompt = ("En UNA frase (español, máx 18 palabras) di POR QUÉ estos dos archivos "
+            kind = "símbolos" if _pair_is_symbol(store, a, b) else "archivos"
+            prompt = (f"En UNA frase (español, máx 18 palabras) di POR QUÉ estos dos {kind} "
                       "suelen cambiar juntos, según estos asuntos de commit. Solo la frase.\n"
                       f"Asuntos: {' | '.join(subjects[:5])}\n")
             note = (llm.generate(prompt, num_predict=50) or "").splitlines()

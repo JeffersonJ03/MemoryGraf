@@ -617,6 +617,38 @@ class TestCompilerCochange(_GitRepo, Base):
         self.assertIn("↳", hist)
         store.close()
 
+    def test_symbol_cochange_is_narrated(self):
+        # M3: las aristas co_changes_with SÍMBOLO↔SÍMBOLO también reciben narrativa,
+        # y aflora en impact() e history() del símbolo (no solo del archivo).
+        from memorygraf import context_compiler as cc
+        self._init_repo()
+        self.write("a.py", "def fa():\n    x = 1\n    return x\n")
+        self.write("b.py", "def fb():\n    y = 1\n    return y\n")
+        self._commit("feat: valida token en login")
+        self.write("a.py", "def fa():\n    x = 2\n    return x\n")
+        self.write("b.py", "def fb():\n    y = 2\n    return y\n")
+        self._commit("feat: refresca token en login")
+        self.write("a.py", "def fa():\n    x = 2\n    return x + 0\n")
+        self.write("b.py", "def fb():\n    y = 2\n    return y + 0\n")
+        self._commit("fix: token expira en login")
+        store, _ = self.index()
+        git_layer.sync(store, self.config)
+        r = cc.compile(store, self.config)          # backend auto -> heurístico
+        self.assertTrue(r["enabled"])
+
+        fa, fb = "proj/a.py::fa", "proj/b.py::fb"
+        note = cc.cochange_note(store, fa, fb)       # orden canónico interno
+        self.assertIsNotNone(note)                   # el par SÍMBOLO quedó narrado
+        self.assertIn("co-cambian por", note)
+
+        q = Query(store)
+        self.assertIn("↳", q.impact(fa))             # impact ya usaba aristas
+        hist = q.history(fa)                         # history: nuevo camino por aristas
+        self.assertIn("co-cambia con", hist)
+        self.assertIn("↳", hist)
+        self.assertIn("fb", hist)
+        store.close()
+
     def test_note_cached_by_hash(self):
         from memorygraf import context_compiler as cc
         self._init_repo()

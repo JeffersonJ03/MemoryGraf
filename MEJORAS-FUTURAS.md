@@ -24,7 +24,7 @@ verificación en vivo antes de dar por buena.
 |---|---|---|---|---|
 | M1 | Co-cambio por símbolo con **historia completa** (diff, no solo blame) | Alto | Alto | Alto |
 | M2 | `tested_by` a nivel **símbolo→test** (no archivo→archivo) | Alto | Medio | Medio |
-| M3 | Narrar el "por qué" del co-cambio de **símbolos** (hoy solo archivos) | Medio | Bajo | Bajo |
+| ~~M3~~ | ✅ **Implementado** · Narrar el "por qué" del co-cambio de **símbolos** | Medio | Bajo | Bajo |
 | M4 | `resolved_type`: **multi-lenguaje** (TS/JS) + params/vars | Medio | Medio | Medio |
 | M5 | `digest`: formatos **agrupados** (eslint stylish, jest, go test, tsc) | Medio | Medio | Medio |
 | M6 | Escala: `git blame` **paralelo/por lotes** en repos grandes | Medio | Medio | Medio |
@@ -93,11 +93,19 @@ Contenido a `runtime/tests.py`.
 
 ---
 
-## M3 · Narrar el "por qué" del co-cambio de símbolos
+## M3 · Narrar el "por qué" del co-cambio de símbolos  ✅ IMPLEMENTADO
 
-**Contexto.** `context_compiler.compile_cochange_notes` itera solo el acumulador de
-**archivos** (`git_cochange_all`), así que las aristas **símbolo↔símbolo** existen pero
-no llevan narrativa (`impact`/`history` las muestran sin "↳ ...").
+**Estado (2026-07-23).** Hecho. `compile_cochange_notes` ahora itera las aristas
+`co_changes_with` reales (archivo↔archivo Y símbolo↔símbolo) en vez del acumulador de
+archivos; `_shared_subjects` ya servía por node id (símbolos persisten sus commits en
+`_attr_symbol`). Además `query.history()` muestra el co-cambio de símbolos leyéndolo de
+las aristas (antes solo consultaba el acumulador de archivo). Test:
+`TestCompilerCochange.test_symbol_cochange_is_narrated`. El resto de esta sección queda
+como registro del plan original.
+
+**Contexto.** `context_compiler.compile_cochange_notes` iteraba solo el acumulador de
+**archivos** (`git_cochange_all`), así que las aristas **símbolo↔símbolo** existían pero
+no llevaban narrativa (`impact`/`history` las mostraban sin "↳ ...").
 
 **Plan de implementación.**
 1. Iterar también las aristas `co_changes_with` con extremos símbolo (o el nuevo

@@ -363,17 +363,26 @@ class Query:
             lines.append("commits (el porqué):")
             for c in commits:
                 lines.append(f"  {c['hash'][:9]} {c['date']} — {c['subject']}")
-        # acoplamiento por co-cambio + su narrativa (compilador local), si existe
+        # acoplamiento por co-cambio + su narrativa (compilador local), si existe.
+        # Archivos: cnt del acumulador. Símbolos: no viven en el acumulador -> se leen
+        # de las aristas co_changes_with (fuerza = peso de la arista).
         from . import context_compiler
         co = self.store.git_cochange_for(node_id)
         if co:
-            co.sort(key=lambda x: x[1], reverse=True)
+            partners = [(other, f"×{cnt}") for other, cnt
+                        in sorted(co, key=lambda x: x[1], reverse=True)[:5]]
+        else:
+            edges = self.store.neighbors(node_id, edge_types=["co_changes_with"],
+                                         direction="out")
+            edges.sort(key=lambda e: e["confidence"], reverse=True)
+            partners = [(e["target"], f"w={e['confidence']}") for e in edges[:5]]
+        if partners:
             lines.append("co-cambia con (acoplamiento oculto):")
-            for other, cnt in co[:5]:
+            for other, strength in partners:
                 on = self.store.get_node(other)
                 nm = on["name"] if on else other
                 note = context_compiler.cochange_note(self.store, node_id, other)
-                lines.append(f"  {nm} (×{cnt})" + (f" ↳ {note}" if note else ""))
+                lines.append(f"  {nm} ({strength})" + (f" ↳ {note}" if note else ""))
         return _budget("\n".join(lines), budget_tokens)
 
 
