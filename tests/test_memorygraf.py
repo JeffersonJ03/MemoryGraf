@@ -718,6 +718,59 @@ class TestBenchmark(Base):
         self.assertTrue(any(t.get("illustrative") for t in r["tasks"]))
 
 
+class TestConfidence(Base):
+    """Fase 9 · etiquetas de confianza en aristas (§7)."""
+
+    def test_classify_labels(self):
+        from memorygraf import confidence as cf
+        self.assertEqual(cf.classify("imports"), cf.EXTRACTED)
+        self.assertEqual(cf.classify("calls", "xfile", 0.9), cf.EXTRACTED)
+        self.assertEqual(cf.classify("co_changes_with", "git", 0.8), cf.INFERRED)
+        self.assertEqual(cf.classify("tested_by", "test-import", 0.7), cf.INFERRED)
+        self.assertEqual(cf.classify("co_changes_with", "git", 0.3), cf.AMBIGUOUS)
+
+    def test_distribution(self):
+        from memorygraf import confidence as cf
+        edges = [{"type": "imports", "confidence": 1.0},
+                 {"type": "co_changes_with", "confidence": 0.8},
+                 {"type": "co_changes_with", "confidence": 0.2}]
+        d = cf.distribution(edges)
+        self.assertEqual(d[cf.EXTRACTED], 1)
+        self.assertEqual(d[cf.INFERRED], 1)
+        self.assertEqual(d[cf.AMBIGUOUS], 1)
+
+
+class TestAnalyzeReport(Base):
+    """Fase 9 · analyze() (god-nodes) y GRAPH_REPORT.md."""
+
+    def _hub_repo(self):
+        self.write("mod.py", "def work():\n    return 1\n")
+        for i in range(4):                 # 4 archivos importan mod -> fan-in alto
+            self.write(f"c{i}.py", "from mod import work\n\n"
+                       f"def f{i}():\n    return work()\n")
+        return self.index()
+
+    def test_analyze_flags_god_node(self):
+        from memorygraf import analyze as an
+        store, _ = self._hub_repo()
+        r = an.analyze(store)
+        gods = {g["id"] for g in r["god_nodes"]}
+        self.assertIn("proj/mod.py", gods)
+        top = next(g for g in r["god_nodes"] if g["id"] == "proj/mod.py")
+        self.assertGreaterEqual(top["fan_in"], 4)
+        store.close()
+
+    def test_report_markdown_sections(self):
+        from memorygraf import report
+        store, _ = self._hub_repo()
+        md = report.build_markdown(store, self.config)
+        self.assertIn("# GRAPH_REPORT", md)
+        self.assertIn("Confianza de las aristas", md)
+        self.assertIn("Riesgo arquitectónico", md)
+        self.assertIn("EXTRACTED", md)
+        store.close()
+
+
 class TestWorkspace(Base):
     def test_init_and_resolve(self):
         cfg_path = workspace.init_workspace(self.proj, "demo", [])

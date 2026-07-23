@@ -93,6 +93,11 @@ def main(argv=None):
     # CAPA 2 · Verdad de runtime
     p = sub.add_parser("runtime", help="Ingiere cobertura/tests (y LSP con --lsp)")
     p.add_argument("--lsp", action="store_true", help="Además, diagnósticos/tipos vía LSP")
+    # Fase 9 · Adopciones + reporte
+    p = sub.add_parser("analyze", help="Anomalías del grafo: god-nodes y hotspots de riesgo")
+    p.add_argument("--limit", type=int, default=10)
+    p = sub.add_parser("report", help="Genera GRAPH_REPORT.md (reporte markdown del grafo)")
+    p.add_argument("--out")
     p = sub.add_parser("summarize"); p.add_argument("--rebuild", action="store_true"); p.add_argument("--all", action="store_true")
     p = sub.add_parser("embed"); p.add_argument("--rebuild", action="store_true")
     sub.add_parser("sync")
@@ -205,6 +210,20 @@ def main(argv=None):
                     print(context_compiler.digest_log(store, text, cfg, llm=llm, budget_tokens=args.budget))
             else:
                 print(context_compiler.digest_log(store, text, cfg, budget_tokens=args.budget))
+        elif args.cmd == "analyze":
+            from . import analyze as _analyze
+            print(json.dumps(_analyze.analyze(store, limit=args.limit),
+                             ensure_ascii=False, indent=2))
+        elif args.cmd == "report":
+            from . import report
+            md = report.build_markdown(store, _load_cfg(args))
+            out = args.out or os.path.join(
+                workspace.project_base(workspace.resolve_config_path(getattr(args, "config", None))),
+                "GRAPH_REPORT.md")
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(md)
+            print(f"Reporte generado: {out}", file=sys.stderr)
+            print(out)
         elif args.cmd == "stats":
             print(json.dumps(store.stats(), ensure_ascii=False, indent=2))
         elif args.cmd == "export":

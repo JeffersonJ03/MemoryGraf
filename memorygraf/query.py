@@ -177,6 +177,10 @@ class Query:
         edges = self.store.neighbors(node_id, edge_types=edge_types)
         lines = [f"# neighbors: {node['name']} @{_loc(node)}",
                  f"({len(edges)} relaciones)"]
+        from . import confidence
+        def _conf(e):   # marca solo las deducidas (INFERRED/AMBIGUOUS); EXTRACTED = default
+            lbl = confidence.label(e)
+            return f" ⟨{lbl}⟩" if lbl != confidence.EXTRACTED else ""
         out_e = [e for e in edges if e["source"] == node_id]
         in_e = [e for e in edges if e["target"] == node_id]
         if out_e:
@@ -184,13 +188,13 @@ class Query:
             for e in out_e[:40]:
                 tgt = self.store.get_node(e["target"])
                 nm = tgt["name"] if tgt else e["target"]
-                lines.append(f"  {e['type']} -> {nm}  @{_loc(tgt) if tgt else ''}")
+                lines.append(f"  {e['type']} -> {nm}  @{_loc(tgt) if tgt else ''}{_conf(e)}")
         if in_e:
             lines.append("## <- entra")
             for e in in_e[:40]:
                 src = self.store.get_node(e["source"])
                 nm = src["name"] if src else e["source"]
-                lines.append(f"  {nm} -[{e['type']}]->  @{_loc(src) if src else ''}")
+                lines.append(f"  {nm} -[{e['type']}]->  @{_loc(src) if src else ''}{_conf(e)}")
         return _budget("\n".join(lines), budget_tokens)
 
     # --- decisions: decisiones y convenciones aplicables (con procedencia) ---

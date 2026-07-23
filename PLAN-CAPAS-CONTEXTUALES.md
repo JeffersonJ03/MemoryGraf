@@ -1,6 +1,6 @@
 # MemoryGraf — Plan de Acción: Capas de Contexto Vivo
 
-> **Estado:** propuesta v1.0 · **Fases 6–8 implementadas + benchmark** (ver §15).
+> **Estado:** propuesta v1.0 · **Fases 6–9 implementadas + benchmark — roadmap completo** (ver §15).
 > **Fecha:** 2026-07-23.
 > **Autor:** Jefferson J. Patiño Ortega (con Claude como copiloto de diseño).
 > **Relación con DESIGN.md:** este documento **extiende** la visión (DESIGN §1–§17) con
@@ -445,7 +445,35 @@ y `TestRuntimeLsp` (helpers puros: normalización de diagnósticos, asignación 
 Suite completa: 40/40 en verde. Validado en vivo: `get` de símbolos muestra cobertura y
 `último test: failed`, con el mapeo línea→span exacto.
 
-### Pendiente del roadmap
-- **Fase 9** (confidence EXTRACTED/INFERRED/AMBIGUOUS en aristas, `analyze()`/god-nodes,
-  `GRAPH_REPORT.md`): sin cambios respecto a §10.
-- Sub-capa A (LSP) tipos por hover y sub-capa C (build/lint dedicada): ampliables sobre lo hecho.
+### Fase 9 — Adopciones + reporte ✅ (2026-07-23)
+Adopciones puntuales de Graphify (§7), baratas y trazables. Todo determinista.
+
+- **Confianza en aristas** (`confidence.py`): clasificador PURO por (tipo, provenance,
+  peso) → `EXTRACTED` (explícita: import/call/defines), `INFERRED` (deducida: co-cambio,
+  `tested_by`, dominio, endpoints), `AMBIGUOUS` (deducida y débil → revisar). Se **deriva
+  al vuelo** (no persiste columna → regenerable, §3.8). `neighbors` marca ⟨INFERRED/AMBIGUOUS⟩.
+- **`analyze()`** (`analyze.py`): métricas de grafo (fan-in/fan-out, umbral media+2σ) →
+  **god nodes** (cuellos de botella / "hacen demasiado"; excluye externos) y **hotspots de
+  fragilidad** cruzando Git (churn+fix) con runtime (cobertura). CLI `analyze`.
+- **`GRAPH_REPORT.md`** (`report.py`): reporte markdown revisable en PRs (complemento a
+  `graph.html`): resumen, reparto de confianza, god nodes, fragilidad y acoplamiento por
+  co-cambio con su "por qué". CLI `report`. Es regenerable (gitignored).
+
+**Pruebas**: `TestConfidence` + `TestAnalyzeReport`. Suite completa: **44/44** en verde.
+Validado en vivo: en este repo, 90% EXTRACTED / 10% INFERRED / 0% AMBIGUOUS; god nodes
+reales (`ollama_setup.py`, `_budget`); hotspot `content_hash` (sin cobertura).
+
+---
+
+## 16. Cierre
+
+**Roadmap completo (Fases 6–9) + benchmark.** MemoryGraf es hoy la **capa de contexto
+vivo** que combina estructura (Capa 0) + historia real de Git (Capa 1) + verdad de runtime
+(Capa 2), pre-compilada por un LLM local privado (Capa 3), con un ahorro de tokens medido
+(~91% en este repo). Todo respeta los principios vinculantes (§3 de DESIGN y §1 de este
+plan): fuentes de verdad legibles, portabilidad con degradación elegante, trazabilidad,
+incremental, y caché regenerable que nunca es fuente de verdad.
+
+Ampliaciones futuras (sobre lo hecho, no bloqueantes): tipos por hover en LSP (sub-capa A),
+sub-capa C de build/lint dedicada, rerank-LLM en tiempo de consulta, y coverage-contexts
+para `tested_by` a nivel de símbolo.
