@@ -21,7 +21,6 @@ from ..model import Edge, EDGE_TESTED_BY
 _COVERAGE_NAMES = ("coverage.xml", "cobertura.xml", "cobertura-coverage.xml")
 _JUNIT_NAMES = ("junit.xml", "test-results.xml", "report.xml", "pytest.xml", "results.xml")
 _SUBDIRS = ("", "reports", "coverage", "test-results", ".reports")
-_TEST_HINT = ("test", "spec", "__tests__")
 
 
 def _find(roots: dict, names, explicit: str | None) -> str | None:
@@ -65,12 +64,18 @@ def _node_id_for(roots: dict, file_ids: set, filename: str) -> str | None:
 # --------------------------------------------------------------------------- #
 # Parsers (puros: sin tocar el store)
 # --------------------------------------------------------------------------- #
-def parse_cobertura(path: str) -> dict:
-    """{filename: {line_no: hits}} desde un coverage.xml (formato Cobertura)."""
+def parse_cobertura(path: str):
+    """Devuelve ({filename: {line_no: hits}}, [sources]) de un coverage.xml Cobertura.
+
+    Los `filename` de coverage.py suelen ser relativos a `<sources><source>` (p.ej. la
+    raíz del run), no siempre a la raíz del repo; devolvemos `sources` para resolver
+    rutas de forma robusta (antes solo se dependía del match por sufijo)."""
     try:
         root = ET.parse(path).getroot()
     except (ET.ParseError, OSError):
-        return {}
+        return {}, []
+    sources = [s.text.strip() for s in root.iter("source")
+               if s.text and s.text.strip()]
     out: dict[str, dict] = {}
     for cls in root.iter("class"):
         fn = cls.get("filename")
@@ -84,7 +89,7 @@ def parse_cobertura(path: str) -> dict:
             except (TypeError, ValueError):
                 continue
             lines[n] = max(lines.get(n, 0), h)
-    return out
+    return out, sources
 
 
 def parse_junit(path: str) -> list:
@@ -112,7 +117,17 @@ def parse_junit(path: str) -> list:
 # --------------------------------------------------------------------------- #
 # Aplicación al grafo
 # --------------------------------------------------------------------------- #
-def _apply_coverage(store, roots, file_ids, cov: dict, log) -> int:
+def _resolve_cov_file(roots, file_ids, filename, sources) -> str | None:
+    """Resuelve un filename de cobertura a un file node id, probando también los
+    prefijos de <sources> (coverage.py suele dar rutas relativas a la raíz del run)."""
+    for cand in [filename] + [os.path.join(src, filename) for src in sources]:
+        fid = _node_id_for(roots, file_ids, cand)
+        if fid:
+            return fid
+    return None
+
+
+def _apply_coverage(store, roots, file_ids, cov: dict, sources, log) -> int:
     touched = 0
     # símbolos por archivo (para mapear líneas -> span)
     by_file: dict[str, list] = {}
@@ -120,7 +135,7 @@ def _apply_coverage(store, roots, file_ids, cov: dict, log) -> int:
         if s.get("path") and s.get("span_start"):
             by_file.setdefault(s["path"], []).append(s)
     for filename, lines in cov.items():
-        fid = _node_id_for(roots, file_ids, filename)
+        fid = _resolve_cov_file(roots, file_ids, filename, sources)
         if not fid or not lines:
             continue
         # archivo: covered si alguna línea medida tiene hits > 0
@@ -168,6 +183,20 @@ def _apply_junit(store, roots, file_ids, cases: list, log) -> int:
     return applied
 
 
+def _is_test_file(fid: str) -> bool:
+    """¿Es un archivo de test? Match por SEGMENTO de ruta / nombre, no por substring
+    (evita falsos positivos como 'latest.py' o carpetas '/testing/')."""
+    parts = fid.lower().split("/")
+    base = parts[-1]
+    name = base.rsplit(".", 1)[0]
+    if name.startswith("test_") or name.endswith("_test") or name in ("test", "tests"):
+        return True
+    if base.endswith((".spec.js", ".spec.ts", ".spec.tsx", ".test.js", ".test.ts",
+                      ".test.tsx", ".spec.py")):
+        return True
+    return any(seg in ("tests", "test", "__tests__", "spec", "specs") for seg in parts[:-1])
+
+
 def _build_tested_by(store, file_ids, log) -> int:
     """Arista tested_by (código -> test), INFERRED desde los imports del test.
 
@@ -176,9 +205,7 @@ def _build_tested_by(store, file_ids, log) -> int:
     store.delete_edges_of_type(EDGE_TESTED_BY)
     count = 0
     for fid in file_ids:
-        base = fid.rsplit("/", 1)[-1].lower()
-        is_test = any(h in base for h in _TEST_HINT) or "/test" in fid.lower()
-        if not is_test:
+        if not _is_test_file(fid):
             continue
         for e in store.neighbors(fid, edge_types=["imports"], direction="out"):
             mod = e["target"]
@@ -199,12 +226,15 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
     cov_path = _find(roots, _COVERAGE_NAMES, rt.get("coverage"))
     junit_path = _find(roots, _JUNIT_NAMES, rt.get("junit"))
 
+    # Anti-staleness: se limpian SIEMPRE (aunque falte el artefacto), así los datos
+    # viejos desaparecen si se retira coverage.xml/junit.xml (caché regenerable §3.8).
+    store.runtime_clear("covered", "coverage_ratio")
+    store.runtime_clear("last_test_status")
     cov_n = test_n = 0
     if cov_path:
-        store.runtime_clear("covered", "coverage_ratio")
-        cov_n = _apply_coverage(store, roots, file_ids, parse_cobertura(cov_path), log)
+        cov, sources = parse_cobertura(cov_path)
+        cov_n = _apply_coverage(store, roots, file_ids, cov, sources, log)
     if junit_path:
-        store.runtime_clear("last_test_status")
         test_n = _apply_junit(store, roots, file_ids, parse_junit(junit_path), log)
     edges = _build_tested_by(store, file_ids, log)
 

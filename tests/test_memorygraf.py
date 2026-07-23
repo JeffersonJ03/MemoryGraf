@@ -614,6 +614,49 @@ class TestRuntimeTests(Base):
         self.assertIsNone(r["junit_file"])
         store.close()
 
+    def test_coverage_resolves_via_sources(self):
+        # filename relativo a <sources><source> (raíz del run), no a la del repo
+        from memorygraf.runtime import tests as rt
+        self.write("pkg/a.py", "def f():\n    return 1\n\ndef g():\n    return 2\n")
+        xml = (
+            '<?xml version="1.0"?>\n<coverage><sources><source>'
+            + os.path.join(self.proj, "pkg") +
+            '</source></sources><packages><package><classes>\n'
+            '<class filename="a.py"><lines><line number="1" hits="1"/>'
+            '<line number="2" hits="1"/></lines></class>\n'
+            '</classes></package></packages></coverage>\n')
+        self.write("cov.xml", xml)
+        store, _ = self.index()
+        self.config["runtime"] = {"coverage": os.path.join(self.proj, "cov.xml")}
+        rt.sync(store, self.config)
+        f = store.runtime_node_get("proj/pkg/a.py::f")
+        self.assertIsNotNone(f)
+        self.assertEqual(f["covered"], 1)        # resuelto vía <source>
+        store.close()
+
+    def test_staleness_cleared_when_artifact_removed(self):
+        from memorygraf.runtime import tests as rt
+        self.write("a.py", "def f():\n    return 1\n")
+        cov = self._cov_xml()
+        store, _ = self.index()
+        self.config["runtime"] = {"coverage": cov}
+        rt.sync(store, self.config)
+        self.assertEqual(store.runtime_node_get("proj/a.py::f")["covered"], 1)
+        # se retira el artefacto (borrado real, no solo config) -> re-sync debe limpiar
+        self.rm("coverage.xml")
+        self.config["runtime"] = {}
+        rt.sync(store, self.config)
+        self.assertIsNone(store.runtime_node_get("proj/a.py::f")["covered"])
+        store.close()
+
+    def test_is_test_file_by_segment_not_substring(self):
+        from memorygraf.runtime import tests as rt
+        self.assertTrue(rt._is_test_file("proj/tests/test_x.py"))
+        self.assertTrue(rt._is_test_file("proj/foo_test.py"))
+        self.assertTrue(rt._is_test_file("proj/ui/Button.spec.ts"))
+        self.assertFalse(rt._is_test_file("proj/latest.py"))      # 'test' como substring
+        self.assertFalse(rt._is_test_file("proj/testing/util.py"))  # carpeta 'testing'
+
 
 class TestRuntimeLsp(Base):
     """CAPA 2 · Sub-capa A — helpers LSP puros (sin servidor)."""

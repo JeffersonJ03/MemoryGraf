@@ -4,8 +4,12 @@ Cliente LSP mínimo y EFÍMERO (como Ollama): se conecta al language-server ya i
 (pyright/pylsp/tsserver), consulta y se apaga. Aporta la verdad que hoy el asistente
 reconstruye leyendo y razonando:
   - `diagnostics`: errores/warnings ACTUALES mapeados a su nodo (arranca sabiendo qué
-    está roto, sin ejecutar nada).
-  - `resolved_type` (opt-in `runtime.lsp_types`): tipo resuelto por hover.
+    está roto, sin ejecutar nada).  ← IMPLEMENTADO en esta v1.
+
+Nota de alcance (honestidad): `resolved_type` (tipo por hover) está DIFERIDO —la
+columna existe en el store y `get()` la muestra si está presente, pero esta v1 NO envía
+`textDocument/hover` ni la puebla (requiere correlacionar respuestas por `id`, ver
+PLAN §15/§16). Hoy la sub-capa A entrega solo diagnósticos.
 
 Degradación elegante (DESIGN §3.2): sin binario de LSP o si el handshake falla, la
 sub-capa se omite en silencio. Todo es caché regenerable, nunca fuente de verdad.
