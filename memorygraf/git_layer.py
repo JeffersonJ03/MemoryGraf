@@ -44,6 +44,7 @@ _DEFAULTS = {
     "cochange_max_symbols": 20,  # ídem a nivel símbolo (evita commits "barredera")
     "top_commits": 3,            # commits guardados por nodo (el "por qué")
     "max_authors": 5,            # autores guardados por nodo (bus factor)
+    "blame_workers": 0,          # hilos para el blame (I/O-bound); 0=auto, 1=secuencial
 }
 
 
@@ -303,15 +304,29 @@ def _cap_authors(authors: dict, max_authors: int) -> dict:
 # --------------------------------------------------------------------------- #
 # Nivel símbolo: git blame -> atribución exacta al código actual
 # --------------------------------------------------------------------------- #
+def _resolve_blame_workers(st, n_items: int) -> int:
+    """Nº de hilos para el blame: 0=auto (I/O-bound -> más que cores), acotado a la tarea."""
+    w = st.get("blame_workers", 0)
+    if not w or w < 1:
+        w = min(8, (os.cpu_count() or 2) + 2)
+    return max(1, min(w, n_items))
+
+
 def _blame_symbols(store, config, repos, st, log) -> int:
-    """Blame por archivo (cacheado). Mapea spans de símbolos a sus commits."""
+    """Blame por archivo (cacheado). Escala (M6): la LECTURA (git blame, I/O-bound) va en
+    paralelo con un pool de hilos ACOTADO; toda ESCRITURA a la BD queda en el HILO PRINCIPAL
+    (SQLite/WAL a salvo de concurrencia). Determinista: `ex.map` conserva el orden, y cada
+    símbolo se atribuye de forma independiente -> mismas aristas/atributos que en secuencial.
+    """
     roots = {name: root for name, (root, _t, _h) in repos.items()}
     # símbolos agrupados por archivo (path == file node id)
     by_file: dict[str, list] = {}
     for s in store.all_nodes(types=["symbol"]):
         if s.get("path") and s.get("span_start"):
             by_file.setdefault(s["path"], []).append(s)
-    blamed = 0
+
+    # 1) work-list (hilo principal): qué archivos hay que blamear (respeta la caché)
+    work = []   # (fid, root, rel, symbols, chash)
     for fid, symbols in by_file.items():
         fnode = store.get_node(fid)
         if not fnode:
@@ -324,7 +339,27 @@ def _blame_symbols(store, config, repos, st, log) -> int:
         if chash and store.git_blame_hash(fid) == chash:
             continue  # sin cambios desde el último blame
         rel = fid[len(project) + 1:] if project else fid
+        work.append((fid, root, rel, symbols, chash))
+    if not work:
+        return 0
+
+    # 2) LECTURA en paralelo: solo subprocess (git blame) + parseo, sin tocar el store
+    def _read(item):
+        fid, root, rel, symbols, chash = item
         line_sha, meta = _blame_file(root, rel)
+        return fid, symbols, chash, line_sha, meta
+
+    workers = _resolve_blame_workers(st, len(work))
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(_read, work))
+    else:
+        results = [_read(it) for it in work]
+
+    # 3) ESCRITURA secuencial (hilo principal): BD a salvo de concurrencia
+    blamed = 0
+    for fid, symbols, chash, line_sha, meta in results:
         if line_sha is None:
             continue
         for sym in symbols:

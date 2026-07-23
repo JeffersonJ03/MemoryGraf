@@ -554,6 +554,74 @@ class TestGitLayer(_GitRepo, Base):
         store.close()
 
 
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestBlameParallel(_GitRepo, Base):
+    """M6 · blame paralelo (lectura) con escritura secuencial: escala sin cambiar resultados."""
+
+    def test_resolve_workers(self):
+        # 0 = auto (acotado a nº de tareas y a un tope); explícito respeta y capa por tareas
+        self.assertEqual(git_layer._resolve_blame_workers({"blame_workers": 1}, 10), 1)
+        self.assertEqual(git_layer._resolve_blame_workers({"blame_workers": 3}, 10), 3)
+        self.assertEqual(git_layer._resolve_blame_workers({"blame_workers": 3}, 2), 2)
+        auto = git_layer._resolve_blame_workers({"blame_workers": 0}, 100)
+        self.assertTrue(1 <= auto <= 8)
+        self.assertEqual(git_layer._resolve_blame_workers({"blame_workers": 0}, 1), 1)
+
+    def _build_repo(self):
+        # varios archivos co-editados en varios commits -> blame + churn + co-cambio ricos
+        self._init_repo()
+        files = [f"m{i}.py" for i in range(6)]
+        for i, f in enumerate(files):
+            self.write(f, f"def f{i}():\n    return 0\n\ndef g{i}():\n    return 0\n")
+        self._commit("c0 create")
+        for c in range(1, 3):
+            for i, f in enumerate(files):
+                self.write(f, f"def f{i}():\n    return {c}\n\ndef g{i}():\n    return {c}\n")
+            self._commit(f"c{c} edit all")
+        return files
+
+    def _snapshot(self, store):
+        syms = sorted(n["id"] for n in store.all_nodes(types=["symbol"]))
+        attrs, commits = [], []
+        for sid in syms:
+            g = store.git_node_get(sid) or {}
+            attrs.append((sid, g.get("churn"), g.get("last_changed"), g.get("fix_touches")))
+            commits.append((sid, tuple(sorted(c["hash"] for c in store.git_commits_get(sid)))))
+        edges = sorted((e["source"], e["target"], e["confidence"])
+                       for e in store.all_edges() if e["type"] == EDGE_CO_CHANGES)
+        return attrs, edges, commits
+
+    def test_parallel_matches_sequential(self):
+        # mismo repo, dos DBs: workers=1 (secuencial) vs workers=4 (paralelo) -> idénticos
+        self._build_repo()
+
+        seq_store = Store(os.path.join(self.tmp, "seq.db"))
+        Indexer(seq_store, self.config).index_all()
+        git_layer.sync(seq_store, {**self.config, "git": {"blame_workers": 1}})
+        seq = self._snapshot(seq_store)
+        seq_store.close()
+
+        par_store = Store(os.path.join(self.tmp, "par.db"))
+        Indexer(par_store, self.config).index_all()
+        git_layer.sync(par_store, {**self.config, "git": {"blame_workers": 4}})
+        par = self._snapshot(par_store)
+
+        self.assertEqual(seq, par)                 # aristas/atributos/commits idénticos
+        # y hubo trabajo de verdad (no un empate trivial de vacíos)
+        self.assertTrue(any(a[1] for a in par[0]))  # algún churn > 0
+        self.assertTrue(par[1])                     # hay co-cambio
+        par_store.close()
+
+    def test_db_integrity_after_parallel_sync(self):
+        self._build_repo()
+        store, _ = self.index()
+        r = git_layer.sync(store, {**self.config, "git": {"blame_workers": 4}})
+        self.assertGreaterEqual(r["blamed_files"], 1)
+        row = store.conn.execute("PRAGMA integrity_check").fetchone()
+        self.assertEqual(row[0], "ok")            # BD (WAL) consistente bajo el pool
+        store.close()
+
+
 class TestContextCompiler(Base):
     """CAPA 3 · Compilador local. Rutas heurísticas (offline, deterministas)."""
 

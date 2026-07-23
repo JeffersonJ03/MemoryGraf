@@ -8,6 +8,11 @@
 
   "_runtime_comment": "Opcional (autodescubre en reports/, coverage/, ...). 'memorygraf runtime' ingiere coverage.xml (cobertura por símbolo) y junit.xml (estado de tests). Para tested_by SÍMBOLO→test, genera coverage.json con contextos: pytest --cov-context=test && coverage json --show-contexts.",
 
+  "_git_comment": "Opcional. Ajustes de la capa Git. 'blame_workers': hilos para el 'git blame' (I/O-bound) en repos grandes; 0=auto (min(8, cpu+2)), 1=secuencial.",
+  "git": {
+    "blame_workers": 0
+  },
+
   "_summary_comment": "Opcional. backend: auto|heuristic|ollama|api. 'auto' usa Ollama si está instalado, si no, heurístico. Configúralo con: memorygraf setup-ollama",
   "summary": {
     "backend": "auto",

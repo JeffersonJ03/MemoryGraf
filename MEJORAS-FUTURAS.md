@@ -27,7 +27,7 @@ verificación en vivo antes de dar por buena.
 | ~~M3~~ | ✅ **Implementado** · Narrar el "por qué" del co-cambio de **símbolos** | Medio | Bajo | Bajo |
 | ~~M4~~ | ✅ **Implementado** (multi-lenguaje TS/JS) · `resolved_type` + params/vars *(params/vars pend.)* | Medio | Medio | Medio |
 | ~~M5~~ | ✅ **Implementado** · `digest`: formatos **agrupados** (eslint stylish, jest, go test, tsc) | Medio | Medio | Medio |
-| M6 | Escala: `git blame` **paralelo/por lotes** en repos grandes | Medio | Medio | Medio |
+| ~~M6~~ | ✅ **Implementado** · Escala: `git blame` **paralelo** (lectura) en repos grandes | Medio | Medio | Medio |
 | ~~M7~~ | ✅ **Implementado** · Narrativa/rerank con **LLM local** opt-in (Ollama) | Bajo | Bajo | Bajo |
 | M8 | Co-cambio **cross-project** por símbolo (hoy dentro de un proyecto) | Bajo | Medio | Medio |
 | M4b | `resolved_type` de **params/variables individuales** (hover por offset) — pendiente de M4 | Bajo | Medio | Medio |
@@ -200,11 +200,21 @@ por eso quedaron fuera de la v1. Mitigar con parsers estrictos + muchos fixtures
 
 ---
 
-## M6 · `git blame` paralelo/por lotes (escala)
+## M6 · `git blame` paralelo/por lotes (escala)  ✅ IMPLEMENTADO
 
-**Contexto.** `_blame_symbols` hace un `git blame` **por archivo** (secuencial). En la
+**Estado (2026-07-23).** Hecho. `_blame_symbols` separa LECTURA de ESCRITURA: (1) construye
+la work-list respetando la caché por `content_hash`; (2) corre los `git blame` (I/O-bound)
+en un `ThreadPoolExecutor` ACOTADO (`_resolve_blame_workers`: `git.blame_workers`, 0=auto =
+`min(8, cpu+2)`, 1=secuencial); (3) escribe a la BD en el HILO PRINCIPAL (SQLite/WAL a salvo
+de concurrencia). Determinista: `ex.map` conserva el orden y cada símbolo se atribuye
+independiente → mismas aristas/atributos que en secuencial (test dedicado que compara
+paralelo vs. secuencial), + `PRAGMA integrity_check` == ok tras el sync paralelo. Medición
+local (WSL): 300 archivos ~x2 (mayor en repos grandes / discos rápidos). El resto queda como
+registro del plan; el punto 3 (`git log -L` agregado) sigue opcional/no necesario.
+
+**Contexto.** Antes `_blame_symbols` hacía un `git blame` **por archivo** (secuencial). En la
 prueba de escala, 2000 archivos → ~39 s de sync (blame es O(archivos)). En repos enormes
-será el cuello de botella (limitación conocida de la capa Git: blame O(archivos)).
+era el cuello de botella (limitación conocida de la capa Git: blame O(archivos)).
 
 **Plan de implementación.**
 1. Paralelizar el blame por archivo con un pool de procesos/hilos acotado (git es
