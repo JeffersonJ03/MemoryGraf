@@ -229,6 +229,58 @@ class TestSummarizerFallback(Base):
             del os.environ["MEMORYGRAF_OLLAMA_URL"]
 
 
+class TestSummarySettings(Base):
+    def test_defaults_when_no_config(self):
+        s = summarizer._resolve_summary_settings(None)
+        self.assertEqual(s["backend"], "auto")
+        self.assertTrue(s["manage"])
+        self.assertFalse(s["auto_pull"])
+
+    def test_config_block_is_read(self):
+        cfg = {"summary": {"backend": "heuristic",
+                           "ollama": {"model": "m:1", "manage": False, "auto_pull": True}}}
+        s = summarizer._resolve_summary_settings(cfg)
+        self.assertEqual(s["backend"], "heuristic")
+        self.assertEqual(s["model"], "m:1")
+        self.assertFalse(s["manage"])
+        self.assertTrue(s["auto_pull"])
+
+    def test_env_overrides_config(self):
+        cfg = {"summary": {"backend": "heuristic", "ollama": {"model": "config-model"}}}
+        os.environ["MEMORYGRAF_SUMMARY_BACKEND"] = "ollama"
+        os.environ["MEMORYGRAF_OLLAMA_MODEL"] = "env-model"
+        try:
+            s = summarizer._resolve_summary_settings(cfg)
+            self.assertEqual(s["backend"], "ollama")
+            self.assertEqual(s["model"], "env-model")
+        finally:
+            del os.environ["MEMORYGRAF_SUMMARY_BACKEND"]
+            del os.environ["MEMORYGRAF_OLLAMA_MODEL"]
+
+    def test_ctx_heuristic_is_offline_and_deterministic(self):
+        # backend=heuristic nunca toca la red aunque Ollama esté instalado
+        cfg = {"summary": {"backend": "heuristic"}}
+        with summarizer._summarizer_ctx(cfg) as s:
+            self.assertEqual(s.name, "heuristic-v1")
+
+
+class TestOllamaSetup(Base):
+    def test_detect_platform_known(self):
+        from memorygraf import ollama_setup
+        self.assertIn(ollama_setup.detect_platform(),
+                      {"windows", "macos", "wsl", "linux"})
+
+    def test_model_present_matches_base_and_exact(self):
+        # función pura sobre un dict tipo respuesta de /api/tags (sin red)
+        from memorygraf import ollama
+        import unittest.mock as mock
+        tags = {"models": [{"name": "qwen2.5-coder:3b"}]}
+        with mock.patch.object(ollama, "_get_json", return_value=tags):
+            self.assertTrue(ollama.model_present("http://x", "qwen2.5-coder:3b"))
+            self.assertTrue(ollama.model_present("http://x", "qwen2.5-coder"))
+            self.assertFalse(ollama.model_present("http://x", "llama3"))
+
+
 class TestWorkspace(Base):
     def test_init_and_resolve(self):
         cfg_path = workspace.init_workspace(self.proj, "demo", [])

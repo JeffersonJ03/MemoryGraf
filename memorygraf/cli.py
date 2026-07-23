@@ -64,6 +64,11 @@ def main(argv=None):
     sub.add_parser("mcp-config", help="Imprime el JSON de MCP para pegar en tu cliente")
     p = sub.add_parser("install", help="Registra el MCP en un cliente")
     p.add_argument("target", choices=["claude"]); p.add_argument("--scope", default="project")
+    p = sub.add_parser("setup-ollama",
+                       help="Instala/configura Ollama para resúmenes en prosa (IA local, opcional)")
+    p.add_argument("--model", default=None, help="Modelo a usar (def: qwen2.5-coder:3b)")
+    p.add_argument("--no-pull", action="store_true", help="No descargar el modelo ahora")
+    p.add_argument("--no-config", action="store_true", help="No escribir el bloque 'summary' en la config")
 
     sub.add_parser("index")
     sub.add_parser("stats")
@@ -113,6 +118,16 @@ def main(argv=None):
                "--", spec["command"], "-m", "memorygraf.cli", "mcp"]
         print("Ejecutando:", " ".join(cmd), file=sys.stderr)
         sys.exit(subprocess.call(cmd))
+
+    if args.cmd == "setup-ollama":
+        from . import ollama, ollama_setup
+        rc = ollama_setup.run(
+            model=args.model or ollama.DEFAULT_MODEL,
+            do_pull=not args.no_pull,
+            write_config=not args.no_config,
+            config_path=workspace.resolve_config_path(getattr(args, "config", None)),
+            log=lambda m: print(m, file=sys.stderr))
+        sys.exit(rc)
 
     if args.cmd == "mcp":
         os.environ["MEMORYGRAF_DB"] = _db_path(args)

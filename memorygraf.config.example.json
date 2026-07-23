@@ -4,5 +4,15 @@
   "projects": [
     { "name": "mi-proyecto", "root": "." }
   ],
-  "excludes": []
+  "excludes": [],
+
+  "_summary_comment": "Opcional. backend: auto|heuristic|ollama|api. 'auto' usa Ollama si está instalado, si no, heurístico. Configúralo con: memorygraf setup-ollama",
+  "summary": {
+    "backend": "auto",
+    "ollama": {
+      "model": "qwen2.5-coder:3b",
+      "manage": true,
+      "auto_pull": false
+    }
+  }
 }

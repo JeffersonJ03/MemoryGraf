@@ -34,8 +34,9 @@ def full_sync(store: Store, config: dict, do_summarize: bool = True,
 
     s = {"generated": 0, "from_cache": 0}
     if do_summarize:
-        s = summarizer.summarize_all(store, config=config, only_missing=True)
-        log(f"resúmenes: {s['generated']} nuevos, {s['from_cache']} de cache")
+        s = summarizer.summarize_all(store, config=config, only_missing=True, log=log)
+        log(f"resúmenes ({s.get('summarizer', '?')}): {s['generated']} nuevos, "
+            f"{s['from_cache']} de cache")
 
     e = {"embedded": 0, "skipped": 0}
     if do_embed:
