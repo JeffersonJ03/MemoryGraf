@@ -541,6 +541,112 @@ class TestCompilerCochange(_GitRepo, Base):
         store.close()
 
 
+class TestRuntimeTests(Base):
+    """CAPA 2 · Sub-capa B — cobertura + resultados de tests (offline, fixtures XML)."""
+
+    def _cov_xml(self, rel="coverage.xml"):
+        xml = (
+            '<?xml version="1.0"?>\n<coverage><packages><package><classes>\n'
+            '<class filename="a.py"><lines>\n'
+            '  <line number="1" hits="1"/><line number="2" hits="1"/>\n'
+            '  <line number="4" hits="0"/><line number="5" hits="0"/>\n'
+            '</lines></class>\n'
+            '</classes></package></packages></coverage>\n')
+        self.write(rel, xml)
+        return os.path.join(self.proj, rel)
+
+    def _junit_xml(self, rel="junit.xml"):
+        xml = (
+            '<?xml version="1.0"?>\n<testsuite>\n'
+            '<testcase classname="TestX" name="test_ok" file="t_a.py"/>\n'
+            '<testcase classname="TestX" name="test_bad" file="t_a.py">'
+            '<failure message="boom"/></testcase>\n'
+            '</testsuite>\n')
+        self.write(rel, xml)
+        return os.path.join(self.proj, rel)
+
+    def test_coverage_maps_to_symbols(self):
+        from memorygraf.runtime import tests as rt
+        self.write("a.py", "def f():\n    return 1\n\ndef g():\n    return 2\n")
+        cov = self._cov_xml()
+        store, _ = self.index()
+        self.config["runtime"] = {"coverage": cov}
+        rt.sync(store, self.config)
+        f = store.runtime_node_get("proj/a.py::f")
+        g = store.runtime_node_get("proj/a.py::g")
+        self.assertEqual(f["covered"], 1)
+        self.assertEqual(f["coverage_ratio"], 1.0)
+        self.assertEqual(g["covered"], 0)       # g (líneas 4-5) sin hits
+        store.close()
+
+    def test_junit_sets_test_status(self):
+        from memorygraf.runtime import tests as rt
+        self.write("t_a.py",
+                   "class TestX:\n    def test_ok(self):\n        return 1\n"
+                   "    def test_bad(self):\n        assert False\n")
+        junit = self._junit_xml()
+        store, _ = self.index()
+        self.config["runtime"] = {"junit": junit}
+        rt.sync(store, self.config)
+        ok = store.runtime_node_get("proj/t_a.py::TestX.test_ok")
+        bad = store.runtime_node_get("proj/t_a.py::TestX.test_bad")
+        self.assertEqual(ok["last_test_status"], "passed")
+        self.assertEqual(bad["last_test_status"], "failed")
+        store.close()
+
+    def test_tested_by_edge_from_imports(self):
+        from memorygraf.runtime import tests as rt
+        self.write("mod.py", "def work():\n    return 1\n")
+        self.write("test_mod.py", "from mod import work\n\ndef test_work():\n    assert work()\n")
+        store, _ = self.index()
+        rt.sync(store, self.config)
+        tb = {(e["source"], e["target"]) for e in store.all_edges()
+              if e["type"] == "tested_by"}
+        self.assertIn(("proj/mod.py", "proj/test_mod.py"), tb)
+        store.close()
+
+    def test_degrades_without_artifacts(self):
+        from memorygraf.runtime import tests as rt
+        self.write("a.py", "def f():\n    return 1\n")
+        store, _ = self.index()
+        r = rt.sync(store, self.config)          # sin coverage/junit
+        self.assertIsNone(r["coverage_file"])
+        self.assertIsNone(r["junit_file"])
+        store.close()
+
+
+class TestRuntimeLsp(Base):
+    """CAPA 2 · Sub-capa A — helpers LSP puros (sin servidor)."""
+
+    def test_format_diagnostics_normalizes_and_sorts(self):
+        from memorygraf.runtime import lsp
+        raw = [
+            {"severity": 2, "message": "unused import", "range": {"start": {"line": 9}}},
+            {"severity": 1, "message": "undefined name x\nmore", "range": {"start": {"line": 4}}},
+        ]
+        out = lsp.format_diagnostics(raw)
+        self.assertEqual(out[0]["severity"], "error")     # errores primero
+        self.assertEqual(out[0]["line"], 5)               # 1-indexed
+        self.assertEqual(out[0]["message"], "undefined name x")
+        self.assertEqual(out[1]["severity"], "warning")
+
+    def test_assign_diagnostics_to_symbol_span(self):
+        from memorygraf.runtime import lsp
+        self.write("a.py", "def f():\n    return undefined\n")
+        store, _ = self.index()
+        diags = [{"severity": "error", "message": "undefined", "line": 2}]
+        lsp.assign_to_symbols(store, "proj/a.py", diags)
+        sym = store.runtime_node_get("proj/a.py::f")
+        self.assertIsNotNone(sym)
+        self.assertIn("undefined", sym["diagnostics"])
+        store.close()
+
+    def test_find_server_returns_none_or_tuple(self):
+        from memorygraf.runtime import lsp
+        s = lsp.find_server()
+        self.assertTrue(s is None or (isinstance(s, tuple) and len(s) == 2))
+
+
 class TestBenchmark(Base):
     """El benchmark corre, produce números coherentes y EXCLUYE lo ilustrativo del total.
 

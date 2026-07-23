@@ -1,6 +1,6 @@
 # MemoryGraf — Plan de Acción: Capas de Contexto Vivo
 
-> **Estado:** propuesta v1.0 · **Fases 6–7 implementadas** (ver §15).
+> **Estado:** propuesta v1.0 · **Fases 6–8 implementadas + benchmark** (ver §15).
 > **Fecha:** 2026-07-23.
 > **Autor:** Jefferson J. Patiño Ortega (con Claude como copiloto de diseño).
 > **Relación con DESIGN.md:** este documento **extiende** la visión (DESIGN §1–§17) con
@@ -412,10 +412,40 @@ Config: bloque `compiler` (`enabled`, `backend`, `model`, `manage`, `max_log_fin
 Suite completa: 32/32 en verde. Validado en vivo: `impact` de `cli.py` muestra el porqué del
 acoplamiento con `pipeline/summarizer/test` (feature de resúmenes Ollama), con procedencia.
 
+### Benchmark de tokens (§11) ✅ (2026-07-23)
+`benchmark.py` (determinista, offline, estilo Graphify: corpus vs subgrafo). Mide tokens
+que el asistente traería SIN MemoryGraf (docs/archivos completos + vecinos "por si acaso")
+vs CON (subgrafo dirigido de consultas). En este repo: **~91% de ahorro agregado**, con
+desglose por tarea (onboarding, impacto/entender, localizar, triage de logs). Es la métrica
+de éxito exigida por la regla de oro del roadmap antes de avanzar.
+
+### Fase 8 — Verdad de runtime ✅ (2026-07-23)
+Paquete `memorygraf/runtime/`. Cada sub-capa es independiente y degrada sola (DESIGN §3.2);
+todo es caché regenerable desde artefactos, nunca fuente de verdad.
+
+**Sub-capa B — tests/cobertura** (`runtime/tests.py`, la más portable, hecha primero):
+- Parsea **Cobertura** `coverage.xml` → `covered` y `coverage_ratio` por símbolo y archivo
+  (mapeando líneas cubiertas a spans, exacto). Parsea **JUnit** `junit.xml` → `last_test_status`
+  en el símbolo del test. No ejecuta nada: solo lee artefactos que el proyecto ya produce.
+- Arista **`tested_by`** (código→test), INFERRED desde los imports del test (qué módulos ejercita).
+- Auto-descubre `coverage.xml`/`junit.xml` (o rutas explícitas en `runtime.coverage`/`.junit`).
+
+**Sub-capa A — LSP** (`runtime/lsp.py`): cliente LSP mínimo y **efímero** (pyright/pylsp),
+JSON-RPC sobre stdio. Recoge **diagnósticos** actuales (`textDocument/publishDiagnostics`) y
+los mapea a archivo y a los símbolos cuyo span los contiene (`diagnostics`). Tipos por hover:
+opt-in. Sin language-server instalado → se omite en silencio.
+
+**Superficie**: la verdad de runtime enriquece `get` (línea `runtime:` con cobertura, estado
+de test, tipo, diagnósticos) e `impact` (anota cada nodo afectado con ⚠ "SIN cobertura / test
+failed / con errores" → responde "¿es seguro cambiar esto?"). CLI `runtime [--lsp]`.
+Integración en el sync: tests/cobertura siempre (barato); LSP opt-in (`runtime.lsp: true`).
+
+**Pruebas**: `TestRuntimeTests` (cobertura→símbolos, JUnit→estado, `tested_by`, degradación)
+y `TestRuntimeLsp` (helpers puros: normalización de diagnósticos, asignación a spans).
+Suite completa: 40/40 en verde. Validado en vivo: `get` de símbolos muestra cobertura y
+`último test: failed`, con el mapeo línea→span exacto.
+
 ### Pendiente del roadmap
-- **Fase 8** (verdad de runtime: tests/cobertura + LSP) y **Fase 9** (confidence en aristas,
-  `analyze()`/god-nodes, `GRAPH_REPORT.md`): sin cambios respecto a §10.
-- **Benchmark de tokens** (§11) ✅: `benchmark.py` (determinista, offline, estilo Graphify:
-  corpus vs subgrafo). En este repo mide **~91% de ahorro agregado** (leer docs/archivos
-  completos + vecinos vs subgrafo dirigido de consultas), con desglose por tarea
-  (onboarding, impacto/entender, localizar, triage de logs).
+- **Fase 9** (confidence EXTRACTED/INFERRED/AMBIGUOUS en aristas, `analyze()`/god-nodes,
+  `GRAPH_REPORT.md`): sin cambios respecto a §10.
+- Sub-capa A (LSP) tipos por hover y sub-capa C (build/lint dedicada): ampliables sobre lo hecho.

@@ -90,6 +90,9 @@ def main(argv=None):
     p.add_argument("--budget", type=int, default=400)
     p.add_argument("--llm", action="store_true", help="Usar LLM local para la línea de situación")
     sub.add_parser("compile", help="Compila el contexto: narra el 'por qué' del co-cambio")
+    # CAPA 2 · Verdad de runtime
+    p = sub.add_parser("runtime", help="Ingiere cobertura/tests (y LSP con --lsp)")
+    p.add_argument("--lsp", action="store_true", help="Además, diagnósticos/tipos vía LSP")
     p = sub.add_parser("summarize"); p.add_argument("--rebuild", action="store_true"); p.add_argument("--all", action="store_true")
     p = sub.add_parser("embed"); p.add_argument("--rebuild", action="store_true")
     sub.add_parser("sync")
@@ -183,6 +186,14 @@ def main(argv=None):
             from . import context_compiler
             r = context_compiler.compile(store, _load_cfg(args),
                                          log=lambda m: print("  " + m, file=sys.stderr))
+            print(json.dumps(r, ensure_ascii=False))
+        elif args.cmd == "runtime":
+            from .runtime import tests as runtime_tests, lsp as runtime_lsp
+            cfg = _load_cfg(args)
+            _log = lambda m: print("  " + m, file=sys.stderr)
+            r = runtime_tests.sync(store, cfg, log=_log)
+            if args.lsp:
+                r = {"tests": r, "lsp": runtime_lsp.sync(store, cfg, log=_log)}
             print(json.dumps(r, ensure_ascii=False))
         elif args.cmd == "digest":
             from . import context_compiler

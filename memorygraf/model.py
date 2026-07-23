@@ -35,6 +35,9 @@ EDGE_RELATES_TO = "relates_to"
 # (DESIGN §6.2 / PLAN-CAPAS-CONTEXTUALES §4.2). Es una arista de CACHÉ regenerable
 # desde `.git`: nunca fuente de verdad.
 EDGE_CO_CHANGES = "co_changes_with"
+# CAPA 2 (verdad de runtime): código ejercitado por un test (PLAN §5.3). Caché
+# regenerable desde artefactos de test/cobertura; nunca fuente de verdad.
+EDGE_TESTED_BY = "tested_by"
 
 
 @dataclass

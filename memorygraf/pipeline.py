@@ -9,6 +9,7 @@ from __future__ import annotations
 from .store import Store
 from .indexer import Indexer
 from . import cross_link, docs, summarizer, semantic, entities, git_layer, context_compiler
+from .runtime import tests as runtime_tests, lsp as runtime_lsp
 
 
 def bump_version(store: Store) -> int:
@@ -35,6 +36,12 @@ def full_sync(store: Store, config: dict, do_summarize: bool = True,
     # CAPA 1 · Temporal/Git: tras index, sobre los spans ya calculados (PLAN §4.3).
     g = git_layer.sync(store, config, log=log)
 
+    # CAPA 2 · Verdad de runtime: tests/cobertura (barato). LSP es opt-in por coste
+    # (runtime.lsp: true) y se corre on-demand con `memorygraf runtime --lsp`.
+    rt = runtime_tests.sync(store, config, log=log)
+    if (config.get("runtime") or {}).get("lsp") is True:
+        runtime_lsp.sync(store, config, log=log)
+
     # CAPA 3 · Compilador local: narra el "por qué" del co-cambio (barato/cacheado).
     cc = context_compiler.compile(store, config, log=log)
 
@@ -51,4 +58,5 @@ def full_sync(store: Store, config: dict, do_summarize: bool = True,
 
     version = bump_version(store)
     return {"index": c, "cross_link": l, "docs": d, "entities": en, "git": g,
-            "compiler": cc, "summarize": s, "embed": e, "sync_version": version}
+            "runtime": rt, "compiler": cc, "summarize": s, "embed": e,
+            "sync_version": version}

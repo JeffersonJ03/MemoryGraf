@@ -22,6 +22,51 @@ def _loc(n: dict) -> str:
     return n["path"]
 
 
+def _runtime_line(rt: dict) -> str:
+    """Línea compacta de verdad de runtime: cobertura, estado de test, diagnósticos."""
+    import json as _json
+    parts = []
+    if rt.get("covered") is not None:
+        ratio = rt.get("coverage_ratio")
+        parts.append(f"cobertura: {'sí' if rt['covered'] else 'NO'}"
+                     + (f" ({round(ratio*100)}%)" if ratio is not None else ""))
+    if rt.get("last_test_status"):
+        parts.append(f"último test: {rt['last_test_status']}")
+    if rt.get("resolved_type"):
+        parts.append(f"tipo: {rt['resolved_type']}")
+    diags = rt.get("diagnostics")
+    if diags:
+        try:
+            ds = _json.loads(diags)
+            errs = sum(1 for d in ds if d.get("severity") == "error")
+            parts.append(f"diagnósticos: {len(ds)}"
+                         + (f" ({errs} error/es)" if errs else ""))
+        except (ValueError, TypeError):
+            pass
+    return "runtime: " + " · ".join(parts) if parts else "runtime: (sin datos)"
+
+
+def _runtime_tag(store, node_id: str) -> str:
+    """Etiqueta breve de seguridad para anotar nodos afectados en impact()."""
+    rt = store.runtime_node_get(node_id)
+    if not rt:
+        return ""
+    flags = []
+    if rt.get("covered") == 0:
+        flags.append("SIN cobertura")
+    if rt.get("last_test_status") in ("failed", "error"):
+        flags.append(f"test {rt['last_test_status']}")
+    diags = rt.get("diagnostics")
+    if diags:
+        try:
+            import json as _json
+            if any(d.get("severity") == "error" for d in _json.loads(diags)):
+                flags.append("con errores")
+        except (ValueError, TypeError):
+            pass
+    return f"  ⚠ {', '.join(flags)}" if flags else ""
+
+
 class Query:
     def __init__(self, store: Store):
         self.store = store
@@ -203,6 +248,9 @@ class Query:
             lines.append(f"git: {g['churn']} cambios{frag}"
                          + (f", edad {age}d" if age is not None else "")
                          + (f", últ. {g['last_changed']}" if g.get("last_changed") else ""))
+        rt = self.store.runtime_node_get(node_id)
+        if rt:
+            lines.append(_runtime_line(rt))
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
@@ -275,7 +323,8 @@ class Query:
             tgt = self.store.get_node(nid)
             nm = tgt["name"] if tgt else nid
             loc = _loc(tgt) if tgt else ""
-            lines.append(f"- {nm}  @{loc}  [{', '.join(sorted(reasons))}]")
+            tag = _runtime_tag(self.store, nid)   # ¿seguro de cambiar el afectado?
+            lines.append(f"- {nm}  @{loc}  [{', '.join(sorted(reasons))}]{tag}")
             if any(r.startswith("co-cambio") for r in reasons):
                 note = context_compiler.cochange_note(self.store, node_id, nid)
                 if note:

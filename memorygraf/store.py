@@ -108,6 +108,16 @@ CREATE TABLE IF NOT EXISTS ctx_note (
     note TEXT,
     PRIMARY KEY (kind, key)
 );
+-- CAPA 2 · Verdad de runtime (PLAN §5). Datos de tests/cobertura/LSP: CACHÉ
+-- REGENERABLE desde artefactos (coverage.xml, JUnit, LSP), nunca fuente de verdad.
+CREATE TABLE IF NOT EXISTS runtime_node (
+    node_id TEXT PRIMARY KEY,
+    covered INTEGER,           -- 1/0/NULL: ¿alguna línea del span cubierta?
+    coverage_ratio REAL,       -- fracción de líneas cubiertas del span
+    last_test_status TEXT,     -- passed | failed | error | skipped
+    resolved_type TEXT,        -- tipo resuelto por LSP (hover)
+    diagnostics TEXT           -- JSON: [{severity, message, line}]
+);
 """
 
 
@@ -374,6 +384,36 @@ class Store:
         for r in self.conn.execute("SELECT key FROM ctx_note WHERE kind=?", (kind,)).fetchall():
             if r["key"] not in keep_keys:
                 self.conn.execute("DELETE FROM ctx_note WHERE kind=? AND key=?", (kind, r["key"]))
+
+    # --- CAPA 2 · verdad de runtime (caché regenerable desde tests/cobertura/LSP) ---
+    _RUNTIME_COLS = ("covered", "coverage_ratio", "last_test_status",
+                     "resolved_type", "diagnostics")
+
+    def runtime_node_get(self, node_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM runtime_node WHERE node_id=?", (node_id,)).fetchone()
+        return dict(row) if row else None
+
+    def runtime_node_update(self, node_id: str, **fields):
+        """Upsert PARCIAL: solo escribe las columnas dadas (tests y LSP no chocan)."""
+        cols = [c for c in fields if c in self._RUNTIME_COLS]
+        if not cols:
+            return
+        self.conn.execute(
+            "INSERT INTO runtime_node (node_id) VALUES (?) "
+            "ON CONFLICT(node_id) DO NOTHING", (node_id,))
+        sets = ", ".join(f"{c}=?" for c in cols)
+        self.conn.execute(f"UPDATE runtime_node SET {sets} WHERE node_id=?",
+                          [fields[c] for c in cols] + [node_id])
+
+    def runtime_clear(self, *columns):
+        """Limpia columnas de runtime (p.ej. antes de re-parsear cobertura)."""
+        cols = [c for c in columns if c in self._RUNTIME_COLS] or self._RUNTIME_COLS
+        self.conn.execute("UPDATE runtime_node SET " + ", ".join(f"{c}=NULL" for c in cols))
+
+    def runtime_prune(self):
+        self.conn.execute(
+            "DELETE FROM runtime_node WHERE node_id NOT IN (SELECT id FROM nodes)")
 
     def clear_git_layer(self):
         """Borra TODA la caché Git (para reconstruir tras historia reescrita)."""
