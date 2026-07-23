@@ -16,7 +16,7 @@ Python; toda dependencia es opcional), trazabilidad (`archivo:línea`), incremen
 
 ## 0. Contexto de lo implementado (para calibrar, no para confiar)
 
-Roadmap **completo** en `PLAN-CAPAS-CONTEXTUALES.md` (§15/§16). Resumen:
+Roadmap de capas **completo** e implementado (Capas 0–3). Resumen:
 
 | Capa / Fase | Módulo(s) | Qué aporta |
 |---|---|---|

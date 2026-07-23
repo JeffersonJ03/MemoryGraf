@@ -2,8 +2,8 @@
 
 > **Estado:** backlog vivo. **Fecha:** 2026-07-23.
 > **Autor:** Jefferson J. Patiño Ortega (con Claude como copiloto).
-> **Relación:** complementa `PLAN-CAPAS-CONTEXTUALES.md` (roadmap) y `DESIGN.md`
-> (principios §3, vinculantes). Aquí viven las **limitaciones conscientes** anotadas en
+> **Relación:** complementa `DESIGN.md` (principios §3, vinculantes). El roadmap de las
+> capas 0–3 ya está implementado (vive en el código). Aquí viven las **limitaciones conscientes** anotadas en
 > el código y las oportunidades de potenciación, cada una con **plan de implementación**
 > y **pruebas a realizar después**. Nada de esto es un bug: el sistema funciona y degrada
 > bien sin estas mejoras.
@@ -163,7 +163,7 @@ por eso quedaron fuera de la v1. Mitigar con parsers estrictos + muchos fixtures
 
 **Contexto.** `_blame_symbols` hace un `git blame` **por archivo** (secuencial). En la
 prueba de escala, 2000 archivos → ~39 s de sync (blame es O(archivos)). En repos enormes
-será el cuello de botella (ya anotado en PLAN §4.7).
+será el cuello de botella (limitación conocida de la capa Git: blame O(archivos)).
 
 **Plan de implementación.**
 1. Paralelizar el blame por archivo con un pool de procesos/hilos acotado (git es
