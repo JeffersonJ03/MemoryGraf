@@ -100,6 +100,12 @@ _PY_FRAME = re.compile(r'File "([^"]+)", line (\d+)')
 _PY_ERROR = re.compile(r"^([A-Za-z_][\w.]*(?:Error|Exception|Warning)): (.*)$")
 _PYTEST_FAIL = re.compile(r"^(FAILED|ERROR)\s+([^\s:]+(?:::[^\s]+)?)(?:\s+-\s+(.*))?$")
 _PYTEST_SUM = re.compile(r"=+\s*(.*\b\d+ (?:failed|passed|error).*?)\s*=+")
+# ubicación condensada de pytest:  "path/to/file.py:62: AssertionError"
+_PYTEST_LOC = re.compile(r"^(\S+\.[A-Za-z]\w*):(\d+):\s+"
+                         r"([A-Za-z_]\w*(?:Error|Exception|Warning|Failure))\b")
+# diagnóstico estilo mypy/gcc/clang:  "path/file.py:12: error: msg"  (col opcional)
+_TOOL_DIAG = re.compile(r"^(\S+\.[A-Za-z]\w*):(\d+)(?::\d+)?:\s+error:?\s+(.+)$",
+                        re.IGNORECASE)
 _GENERIC_ERR = re.compile(r"\b(error|failed|exception|assert\w*)\b", re.IGNORECASE)
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 
@@ -158,6 +164,17 @@ def digest_log(store, text: str, config: dict | None = None,
             path, lineno = last_frame or (None, None)
             findings.append((path, lineno, f"{m.group(1)}: {m.group(2)}".strip()))
             last_frame = None
+            continue
+        # aserción condensada de pytest ("file.py:62: AssertionError")
+        m = _PYTEST_LOC.match(ln.strip())
+        if m:
+            findings.append((m.group(1), int(m.group(2)), m.group(3)))
+            continue
+        # diagnóstico de herramienta (mypy/gcc/clang): "file:12: error: msg"
+        m = _TOOL_DIAG.match(ln.strip())
+        if m:
+            findings.append((m.group(1), int(m.group(2)),
+                             f"error: {m.group(3).strip()}"))
 
     # dedup preservando orden; ligar a node ids
     seen, resolved = set(), []
@@ -201,9 +218,16 @@ def digest_log(store, text: str, config: dict | None = None,
 # --------------------------------------------------------------------------- #
 # B. Narrativa del "por qué" de co-cambio  (etiqueta las aristas co_changes_with)
 # --------------------------------------------------------------------------- #
+# stopwords: artículos/preposiciones + palabras de CEREMONIA de commits (proceso, no
+# tema). Sin esto, el tema más frecuente degenera en ruido tipo "fase"/"wip"/"merge".
+# versión de la lógica de narrativa: súbela al cambiar stopwords/heurística para
+# invalidar las notas cacheadas automáticamente (regenerables, DESIGN §3.8).
+_COCHANGE_LOGIC_VER = 2
 _STOP = {"the", "and", "for", "with", "fix", "feat", "docs", "chore", "add", "update",
          "de", "en", "el", "la", "los", "las", "por", "con", "para", "y", "a", "un",
-         "una", "que", "del", "al", "se", "su", "más", "memorygraf"}
+         "una", "que", "del", "al", "se", "su", "más", "memorygraf",
+         "fase", "fases", "wip", "refactor", "refactoriza", "release", "merge", "revert",
+         "initial", "inicial", "bump", "hotfix", "chore", "pull", "request", "branch"}
 
 
 def _shared_subjects(store, a: str, b: str) -> list:
@@ -253,7 +277,9 @@ def compile_cochange_notes(store, config: dict | None = None,
         key = f"{a}|{b}"
         keep.add(key)
         subjects = _shared_subjects(store, a, b)
-        chash = content_hash("|".join(subjects) + f"#{cnt}#{backend}")
+        # `_COCHANGE_LOGIC_VER` versiona la LÓGICA (stopwords/heurística): al cambiarla,
+        # el hash cambia y las notas cacheadas se regeneran solas (sin bust manual).
+        chash = content_hash("|".join(subjects) + f"#{cnt}#{backend}#{_COCHANGE_LOGIC_VER}")
         prev = store.ctx_note_get("cochange", key)
         if prev and prev["content_hash"] == chash:
             cached += 1

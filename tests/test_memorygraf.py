@@ -814,5 +814,93 @@ class TestWorkspace(Base):
         self.assertTrue(db.endswith(os.path.join(".memorygraf", "graph.db")))
 
 
+class TestRuntimeJUnit(Base):
+    """Fix: pytest --junitxml NO emite `file`; hay que mapear por `classname`."""
+
+    def _file_ids(self, store):
+        return {n["id"] for n in store.all_nodes(types=["file"])}
+
+    def test_junit_maps_symbol_by_classname_without_file(self):
+        from memorygraf.runtime import tests as rt
+        self.write("tests/test_mod.py", "def test_ok():\n    assert True\n")
+        store, _ = self.index()
+        roots = {"proj": self.proj}
+        # caso pytest real: file=None, classname punteado, test a nivel de módulo
+        cases = [{"file": None, "classname": "tests.test_mod",
+                  "name": "test_ok", "status": "passed"}]
+        applied = rt._apply_junit(store, roots, self._file_ids(store), cases,
+                                  log=lambda m: None)
+        self.assertEqual(applied, 1)
+        rt_row = store.runtime_node_get("proj/tests/test_mod.py::test_ok")
+        self.assertIsNotNone(rt_row)
+        self.assertEqual(rt_row["last_test_status"], "passed")
+        store.close()
+
+    def test_junit_classname_with_class_falls_back_to_file(self):
+        from memorygraf.runtime import tests as rt
+        self.write("tests/test_mod.py", "class TestX:\n    def test_a(self):\n        pass\n")
+        store, _ = self.index()
+        roots = {"proj": self.proj}
+        cases = [{"file": None, "classname": "tests.test_mod.TestX",
+                  "name": "test_a", "status": "failed"}]
+        applied = rt._apply_junit(store, roots, self._file_ids(store), cases,
+                                  log=lambda m: None)
+        self.assertEqual(applied, 1)   # mapea al símbolo o, en su defecto, al archivo
+        store.close()
+
+
+class TestDigestExtraFormats(Base):
+    """Mejoras: aserción condensada de pytest + diagnósticos mypy/gcc."""
+
+    def test_digest_pytest_condensed_location(self):
+        from memorygraf import context_compiler as cc
+        self.write("indexer.py", "def f():\n    return 1\n")
+        store, _ = self.index()
+        log = ("    def test_x(self):\n>       assert False\n"
+               "indexer.py:1: AssertionError\n")
+        out = cc.digest_log(store, log, self.config)
+        self.assertIn("AssertionError", out)
+        self.assertIn("proj/indexer.py:1", out)   # ligado a nodo con procedencia
+        store.close()
+
+    def test_digest_tool_diagnostic_mypy_style(self):
+        from memorygraf import context_compiler as cc
+        self.write("indexer.py", "def f():\n    return 1\n")
+        store, _ = self.index()
+        log = "indexer.py:1: error: Incompatible return value type (got int)\n"
+        out = cc.digest_log(store, log, self.config)
+        self.assertIn("error: Incompatible return value type", out)
+        self.assertIn("proj/indexer.py:1", out)
+        store.close()
+
+
+class TestCochangeTheme(Base):
+    """Mejora: el tema del co-cambio ignora palabras de ceremonia (fase/feat/…)."""
+
+    def test_ceremony_words_are_not_the_theme(self):
+        from memorygraf.context_compiler import _heuristic_cochange_note
+        subjects = ["feat: Fase 6 contexto vivo", "feat: Fase 7 contexto vivo"]
+        note = _heuristic_cochange_note(subjects, 2)
+        self.assertNotIn("tema: fase", note)     # ya no degenera en 'fase'
+        self.assertIn("contexto", note)          # tema significativo real
+
+
+class TestSummarizerLabel(Base):
+    """Mejora: en sync no-op, la etiqueta refleja el backend RESUELTO, no un meta viejo."""
+
+    def test_noop_reports_resolved_heuristic_not_stale_meta(self):
+        self.write("a.py", '"""m."""\ndef f():\n    return 1\n')
+        store, _ = self.index()
+        cfg = dict(self.config)
+        cfg["summary"] = {"backend": "heuristic"}
+        summarizer.summarize_all(store, config=cfg)          # llena (heurístico)
+        store.set_meta("summarizer", "ollama:qwen2.5-coder:3b")  # simula meta obsoleto
+        store.commit()
+        r = summarizer.summarize_all(store, config=cfg)      # nada pendiente
+        self.assertEqual(r["generated"], 0)
+        self.assertEqual(r["summarizer"], "heuristic-v1")    # no el 'ollama' obsoleto
+        store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

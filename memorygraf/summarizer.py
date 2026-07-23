@@ -316,8 +316,17 @@ def summarize_all(store: Store, config=None, rebuild=False, only_missing=True,
                   log=lambda m: None) -> dict:
     # Cortocircuito: si no hay nada pendiente, ni tocamos el backend (no arranca Ollama).
     if not _has_pending(store, rebuild, only_missing):
-        return {"summarizer": store.get_meta("summarizer") or "heuristic-v1",
-                "generated": 0, "from_cache": 0, "skipped": 0}
+        # Reporta el backend RESUELTO (config/env), no un meta obsoleto: si el usuario
+        # fijó backend=heuristic, no debe decir "ollama:..." aunque los resúmenes
+        # existentes se hayan hecho antes con Ollama. Sin red (no resuelve disponibilidad).
+        s = _resolve_summary_settings(config)
+        if s["backend"] == "heuristic":
+            name = "heuristic-v1"
+        elif s["backend"] == "ollama":
+            name = f"ollama:{s['model']}"
+        else:  # auto | api: reporta el summarizer que realmente produjo los resúmenes
+            name = store.get_meta("summarizer") or "heuristic-v1"
+        return {"summarizer": name, "generated": 0, "from_cache": 0, "skipped": 0}
     with _summarizer_ctx(config, log) as summarizer:
         return _run_summaries(store, summarizer, config, rebuild, only_missing)
 

@@ -162,12 +162,18 @@ def _apply_junit(store, roots, file_ids, cases: list, log) -> int:
     node_ids = store.all_node_ids()
     applied = 0
     for c in cases:
-        fid = _node_id_for(roots, file_ids, c["file"]) if c.get("file") else None
-        # nombre cualificado: ClassName.method si el classname termina en una clase
-        qual = c["name"]
         cls_tail = c["classname"].rsplit(".", 1)[-1] if c["classname"] else ""
-        if cls_tail and cls_tail[:1].isupper():
-            qual = f"{cls_tail}.{c['name']}"
+        has_class = bool(cls_tail) and cls_tail[:1].isupper()
+        fid = _node_id_for(roots, file_ids, c["file"]) if c.get("file") else None
+        # Fallback: pytest `--junitxml` NO emite el atributo `file` en <testcase>
+        # (solo `classname`). Deriva el archivo del módulo punteado:
+        #   "tests.test_x.TestY" -> "tests/test_x.py"  (o sin clase: "tests.test_x").
+        if not fid and c["classname"]:
+            module = c["classname"].rsplit(".", 1)[0] if has_class else c["classname"]
+            if module:
+                fid = _node_id_for(roots, file_ids, module.replace(".", "/") + ".py")
+        # nombre cualificado: ClassName.method si el classname termina en una clase
+        qual = f"{cls_tail}.{c['name']}" if has_class else c["name"]
         target = None
         if fid:
             cand = f"{fid}::{qual}"
