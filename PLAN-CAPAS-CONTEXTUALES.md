@@ -415,9 +415,13 @@ acoplamiento con `pipeline/summarizer/test` (feature de resúmenes Ollama), con 
 ### Benchmark de tokens (§11) ✅ (2026-07-23)
 `benchmark.py` (determinista, offline, estilo Graphify: corpus vs subgrafo). Mide tokens
 que el asistente traería SIN MemoryGraf (docs/archivos completos + vecinos "por si acaso")
-vs CON (subgrafo dirigido de consultas). En este repo: **~91% de ahorro agregado**, con
-desglose por tarea (onboarding, impacto/entender, localizar, triage de logs). Es la métrica
-de éxito exigida por la regla de oro del roadmap antes de avanzar.
+vs CON (subgrafo dirigido de consultas). En este repo el agregado ronda el **90%**, pero
+—por honestidad (auditoría)— se reporta como **LÍMITE SUPERIOR de este repo**, no como
+ahorro esperado: el baseline modela el peor caso, el % crece con el tamaño del repo, y no
+se contabilizan el esquema MCP, los round-trips ni la relectura del archivo real (DESIGN §9).
+La meta honesta declarada es la de DESIGN §12 (≥40%, 50-80% en repos grandes). La tarea de
+triage de log usa input sintético y se excluye del agregado. Es la métrica de éxito exigida
+por la regla de oro del roadmap antes de avanzar.
 
 ### Fase 8 — Verdad de runtime ✅ (2026-07-23)
 Paquete `memorygraf/runtime/`. Cada sub-capa es independiente y degrada sola (DESIGN §3.2);
@@ -470,7 +474,8 @@ reales (`ollama_setup.py`, `_budget`); hotspot `content_hash` (sin cobertura).
 **Roadmap completo (Fases 6–9) + benchmark.** MemoryGraf es hoy la **capa de contexto
 vivo** que combina estructura (Capa 0) + historia real de Git (Capa 1) + verdad de runtime
 (Capa 2), pre-compilada por un LLM local privado (Capa 3), con un ahorro de tokens medido
-(~91% en este repo). Todo respeta los principios vinculantes (§3 de DESIGN y §1 de este
+(límite superior ~90% en este repo; meta honesta ≥40%, DESIGN §12). Todo respeta los
+principios vinculantes (§3 de DESIGN y §1 de este
 plan): fuentes de verdad legibles, portabilidad con degradación elegante, trazabilidad,
 incremental, y caché regenerable que nunca es fuente de verdad.
 
