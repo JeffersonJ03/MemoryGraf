@@ -25,7 +25,7 @@ verificación en vivo antes de dar por buena.
 | M1 | Co-cambio por símbolo con **historia completa** (diff, no solo blame) | Alto | Alto | Alto |
 | ~~M2~~ | ✅ **Implementado** · `tested_by` a nivel **símbolo→test** (contextos de cobertura) | Alto | Medio | Medio |
 | ~~M3~~ | ✅ **Implementado** · Narrar el "por qué" del co-cambio de **símbolos** | Medio | Bajo | Bajo |
-| M4 | `resolved_type`: **multi-lenguaje** (TS/JS) + params/vars | Medio | Medio | Medio |
+| ~~M4~~ | ✅ **Implementado** (multi-lenguaje TS/JS) · `resolved_type` + params/vars *(params/vars pend.)* | Medio | Medio | Medio |
 | M5 | `digest`: formatos **agrupados** (eslint stylish, jest, go test, tsc) | Medio | Medio | Medio |
 | M6 | Escala: `git blame` **paralelo/por lotes** en repos grandes | Medio | Medio | Medio |
 | M7 | Narrativa/rerank con **LLM local por defecto** cuando Ollama está | Bajo | Bajo | Bajo |
@@ -135,10 +135,21 @@ no llevaban narrativa (`impact`/`history` las mostraban sin "↳ ...").
 
 ---
 
-## M4 · `resolved_type` multi-lenguaje y de params/vars
+## M4 · `resolved_type` multi-lenguaje y de params/vars  ✅ IMPLEMENTADO (parcial)
 
-**Contexto.** `runtime/lsp.py` cubre **Python** (pylsp/pyright) y toma la firma de la
-**definición**. No cubre TS/JS ni resuelve tipos de parámetros/variables individuales.
+**Estado (2026-07-23).** Hecho el multi-lenguaje. `runtime/lsp.py` pasó de Python-only a
+un **registro por lenguaje** (`_LANGUAGES`): Python (pyright/pylsp/jedi) y TS/JS
+(`typescript-language-server`, con `languageId` por extensión: ts/tsx/js/jsx). `sync`
+agrupa los archivos por lenguaje, arranca un LSP efímero por cada uno con servidor
+disponible (los que falten se omiten con degradación elegante) y limpia una sola vez para
+que cada lenguaje solo AÑADA. `_parse_hover` descarta el fence de cualquier lenguaje.
+`find_server()` mantiene la firma histórica (Python) por compat. Tests offline del
+despacho + `TestLspTypeScript` (E2E guardado por disponibilidad del server).
+**Pendiente:** tipos de **params/vars individuales** (hover en sus offsets) — sigue solo
+la firma de la definición. El resto de esta sección queda como registro del plan.
+
+**Contexto.** Antes `runtime/lsp.py` cubría solo **Python** (pylsp/pyright) y tomaba la
+firma de la **definición**. No cubría TS/JS ni resolvía tipos de params/variables.
 
 **Plan de implementación.**
 1. Añadir servidores por lenguaje a `_PY_SERVERS` → un registro `{lang: (bin, args,

@@ -25,23 +25,55 @@ import subprocess
 import threading
 import time
 
-# Candidatos por lenguaje: (binario, [args para modo stdio])
-_PY_SERVERS = [
-    ("pyright-langserver", ["--stdio"]),
-    ("pylsp", []),
-    ("jedi-language-server", []),
+# Registro POR LENGUAJE (M4). Cada lenguaje declara:
+#   - servers : candidatos (binario, [args stdio]); se usa el primero disponible
+#   - ext_lang: extensión -> languageId LSP (tsserver distingue ts/tsx/js/jsx)
+# Añadir un lenguaje = añadir una entrada aquí (el resto es genérico).
+_LANGUAGES = [
+    {
+        "name": "python",
+        "servers": [("pyright-langserver", ["--stdio"]), ("pylsp", []),
+                    ("jedi-language-server", [])],
+        "ext_lang": {".py": "python"},
+    },
+    {
+        "name": "typescript",
+        "servers": [("typescript-language-server", ["--stdio"])],
+        "ext_lang": {".ts": "typescript", ".tsx": "typescriptreact",
+                     ".js": "javascript", ".jsx": "javascriptreact",
+                     ".mjs": "javascript", ".cjs": "javascript"},
+    },
 ]
 
 _SEVERITY = {1: "error", 2: "warning", 3: "info", 4: "hint"}
+# etiquetas de fence/idioma a descartar al extraer la firma del hover (multi-lenguaje)
+_FENCE_TAGS = {"python", "typescript", "javascript", "typescriptreact",
+               "javascriptreact", "ts", "js", "tsx", "jsx", "text", "plaintext"}
 
 
-def find_server() -> tuple | None:
-    """Devuelve (binario_abs, args) del primer language-server Python disponible."""
-    for name, args in _PY_SERVERS:
+def _find_lang_server(spec: dict) -> tuple | None:
+    """(binario_abs, args) del primer servidor disponible para un lenguaje."""
+    for name, args in spec["servers"]:
         found = shutil.which(name)
         if found:
             return found, args
     return None
+
+
+def _lang_for_ext(ext: str) -> tuple:
+    """(spec, languageId) para una extensión, o (None, None) si no hay soporte."""
+    for spec in _LANGUAGES:
+        if ext in spec["ext_lang"]:
+            return spec, spec["ext_lang"][ext]
+    return None, None
+
+
+def find_server() -> tuple | None:
+    """(binario_abs, args) del primer language-server de PYTHON disponible.
+
+    Compat: el multi-lenguaje (M4) resuelve por lenguaje vía `_find_lang_server`;
+    esta función mantiene la firma histórica (Python) usada por instaladores/tests."""
+    return _find_lang_server(_LANGUAGES[0])
 
 
 # --------------------------------------------------------------------------- #
@@ -97,7 +129,7 @@ def _parse_hover(result) -> str | None:
         return None
     for line in text.splitlines():
         s = line.strip().strip("`").strip()
-        if not s or s.lower() in ("python", "```python", "```"):
+        if not s or s.lower() in _FENCE_TAGS:   # fence/idioma (python|typescript|...)
             continue
         return s[:200]
     return None
@@ -108,8 +140,10 @@ def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None) ->
 
     Dos pasadas: los servidores tipo jedi devuelven null en los PRIMEROS hovers
     (analizan en frío); una 2ª pasada reintenta los nulos con el server ya caliente.
+
+    NO limpia `resolved_type` (lo hace `sync` UNA vez): en multi-lenguaje cada lenguaje
+    solo AÑADE los tipos de SUS archivos (los del `opened` que recibe).
     """
-    store.runtime_clear("resolved_type")
     syms_by_file: dict[str, list] = {}
     for s in store.all_nodes(types=["symbol"]):
         if s.get("path") and s.get("span_start"):
@@ -249,30 +283,17 @@ def _uri(path: str) -> str:
     return "file://" + os.path.abspath(path).replace("\\", "/")
 
 
-def sync(store, config: dict, log=lambda m: None) -> dict:
-    """Arranca un LSP efímero, recoge diagnósticos de los .py y los mapea a nodos."""
-    rt = (config or {}).get("runtime") or {}
-    if rt.get("enabled") is False or rt.get("lsp") is False:
-        return {"enabled": False, "reason": "deshabilitado"}
-    server = find_server()
-    if not server:
-        log("runtime/lsp: sin language-server instalado (pyright/pylsp) -> omitido")
-        return {"enabled": False, "reason": "sin language-server"}
+def _run_language(store, server, files, roots, rt, log) -> tuple:
+    """Ciclo LSP efímero para UN lenguaje: abre sus archivos, mapea diagnósticos y
+    puebla tipos. Devuelve (archivos_abiertos, diagnósticos, tipos). Solo AÑADE al
+    store (los `runtime_clear` los hace `sync` una vez, antes de todos los lenguajes)."""
     binary, args = server
-    roots = {p["name"]: p["root"] for p in (config or {}).get("projects", [])}
-
-    # archivos .py indexados (esta sub-capa v1 cubre Python)
-    py_files = [n for n in store.all_nodes(types=["file"])
-                if (n.get("path") or "").endswith(".py")]
-    if not py_files:
-        return {"enabled": False, "reason": "sin archivos python"}
-
     try:
         proc = subprocess.Popen([binary, *args], stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
-        log("runtime/lsp: no se pudo lanzar el servidor -> omitido")
-        return {"enabled": False, "reason": "fallo al lanzar"}
+        log(f"runtime/lsp: no se pudo lanzar {os.path.basename(binary)} -> omitido")
+        return 0, 0, 0
 
     client = _LspClient(proc)
     root_uri = _uri(next(iter(roots.values()), "."))
@@ -286,7 +307,7 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
         client._send("initialized", {}, notify=True)
         opened = []
         file_lines: dict[str, list] = {}
-        for n in py_files:
+        for n in files:
             proj, rel = n["path"].split("/", 1) if "/" in n["path"] else (None, n["path"])
             root = roots.get(proj)
             if not root:
@@ -296,17 +317,17 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
                 text = open(ap, encoding="utf-8", errors="replace").read()
             except OSError:
                 continue
+            _spec, language_id = _lang_for_ext(os.path.splitext(rel)[1].lower())
             uri = _uri(ap)
             client._send("textDocument/didOpen", {"textDocument": {
-                "uri": uri, "languageId": "python", "version": 1, "text": text}},
-                notify=True)
+                "uri": uri, "languageId": language_id or "plaintext",
+                "version": 1, "text": text}}, notify=True)
             opened.append((n["id"], uri))
             file_lines[n["id"]] = text.splitlines()
         # esperar a que lleguen los diagnósticos (best-effort, con tope)
         deadline = time.time() + float(rt.get("lsp_timeout", 8))
         while time.time() < deadline and len(client.diagnostics) < len(opened):
             time.sleep(0.3)
-        store.runtime_clear("diagnostics")
         total = 0
         for fid, uri in opened:
             diags = format_diagnostics(client.diagnostics.get(uri, []))
@@ -319,12 +340,7 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
                 typed = _collect_types(store, client, opened, file_lines, rt, log)
             except Exception:
                 typed = 0
-        store.runtime_prune()
-        store.commit()
-        log(f"runtime/lsp: {len(opened)} archivos, {total} diagnósticos, "
-            f"{typed} tipos ({os.path.basename(binary)})")
-        return {"enabled": True, "files": len(opened),
-                "diagnostics": total, "types": typed}
+        return len(opened), total, typed
     finally:
         try:
             client._send("shutdown", {})
@@ -336,3 +352,57 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
                 proc.kill()
             except Exception:
                 pass
+
+
+def sync(store, config: dict, log=lambda m: None) -> dict:
+    """Arranca un LSP efímero POR LENGUAJE presente, recoge diagnósticos y tipos y los
+    mapea a nodos. Multi-lenguaje (M4): Python y TS/JS (si su servidor está instalado)."""
+    rt = (config or {}).get("runtime") or {}
+    if rt.get("enabled") is False or rt.get("lsp") is False:
+        return {"enabled": False, "reason": "deshabilitado"}
+    roots = {p["name"]: p["root"] for p in (config or {}).get("projects", [])}
+
+    # agrupa los archivos indexados por lenguaje soportado
+    by_lang: dict[str, list] = {}
+    for n in store.all_nodes(types=["file"]):
+        spec, _lid = _lang_for_ext(os.path.splitext(n.get("path") or "")[1].lower())
+        if spec:
+            by_lang.setdefault(spec["name"], []).append(n)
+    if not by_lang:
+        return {"enabled": False, "reason": "sin archivos soportados"}
+
+    # resuelve el servidor de cada lenguaje presente (los que falten se omiten)
+    runnable, missing = [], []
+    for spec in _LANGUAGES:
+        files = by_lang.get(spec["name"])
+        if not files:
+            continue
+        srv = _find_lang_server(spec)
+        if srv:
+            runnable.append((spec, srv, files))
+        else:
+            missing.append(spec["name"])
+    if not runnable:
+        log(f"runtime/lsp: sin language-server para {', '.join(missing)} -> omitido")
+        return {"enabled": False, "reason": "sin language-server", "missing": missing}
+    if missing:
+        log(f"runtime/lsp: sin servidor para {', '.join(missing)} (se omiten esos lenguajes)")
+
+    # limpia UNA vez: en multi-lenguaje cada lenguaje solo AÑADE sus resultados
+    store.runtime_clear("diagnostics")
+    store.runtime_clear("resolved_type")
+    tot_files = tot_diags = tot_types = 0
+    langs = []
+    for spec, srv, files in runnable:
+        f, d, t = _run_language(store, srv, files, roots, rt, log)
+        tot_files += f
+        tot_diags += d
+        tot_types += t
+        langs.append(spec["name"])
+
+    store.runtime_prune()
+    store.commit()
+    log(f"runtime/lsp: {tot_files} archivos, {tot_diags} diagnósticos, "
+        f"{tot_types} tipos ({', '.join(langs)})")
+    return {"enabled": True, "files": tot_files, "diagnostics": tot_diags,
+            "types": tot_types, "languages": langs}

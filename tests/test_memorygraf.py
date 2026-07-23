@@ -341,6 +341,11 @@ def _lsp_available() -> bool:
     return lsp.find_server() is not None
 
 
+def _ts_lsp_available() -> bool:
+    from memorygraf.runtime import lsp
+    return lsp._find_lang_server(lsp._LANGUAGES[1]) is not None
+
+
 class _GitRepo:
     """Mixin con helpers para crear un repo git real de prueba (sin tests propios)."""
 
@@ -877,6 +882,56 @@ class TestRuntimeLsp(Base):
         s = lsp.find_server()
         self.assertTrue(s is None or (isinstance(s, tuple) and len(s) == 2))
 
+    def test_language_registry_maps_extensions(self):
+        # M4: cada extensión resuelve a (spec, languageId) o (None, None)
+        from memorygraf.runtime import lsp
+        self.assertEqual(lsp._lang_for_ext(".py")[1], "python")
+        self.assertEqual(lsp._lang_for_ext(".ts")[1], "typescript")
+        self.assertEqual(lsp._lang_for_ext(".tsx")[1], "typescriptreact")
+        self.assertEqual(lsp._lang_for_ext(".js")[1], "javascript")
+        self.assertEqual(lsp._lang_for_ext(".jsx")[1], "javascriptreact")
+        self.assertEqual(lsp._lang_for_ext(".mjs")[1], "javascript")
+        self.assertEqual(lsp._lang_for_ext(".rb"), (None, None))
+        # el server de cada lenguaje: None o (binario, args)
+        for spec in lsp._LANGUAGES:
+            srv = lsp._find_lang_server(spec)
+            self.assertTrue(srv is None or (isinstance(srv, tuple) and len(srv) == 2))
+
+    def test_parse_hover_handles_typescript_fence(self):
+        # M4: la firma se extrae descartando el fence de CUALQUIER lenguaje (no solo py)
+        from memorygraf.runtime import lsp
+        self.assertEqual(
+            lsp._parse_hover({"contents": {"kind": "markdown",
+                              "value": "```typescript\nfunction foo(): number\n```"}}),
+            "function foo(): number")
+        self.assertEqual(
+            lsp._parse_hover({"contents": "```python\ndef f() -> int\n```"}),
+            "def f() -> int")
+
+    def test_sync_skips_language_without_server(self):
+        # M4: con archivos .ts pero sin typescript-language-server, ese lenguaje se
+        # omite con degradación elegante (no crashea, lo reporta en 'missing').
+        from memorygraf.runtime import lsp
+        if lsp._find_lang_server(lsp._LANGUAGES[1]):
+            self.skipTest("hay typescript-language-server; este caso prueba su AUSENCIA")
+        self.write("app.ts", "export function suma(a: number, b: number): number {\n"
+                             "  return a + b;\n}\n")
+        store, _ = self.index()
+        r = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
+        self.assertFalse(r["enabled"])
+        self.assertEqual(r["reason"], "sin language-server")
+        self.assertIn("typescript", r.get("missing", []))
+        store.close()
+
+    def test_sync_without_supported_files(self):
+        from memorygraf.runtime import lsp
+        self.write("notes.txt", "solo texto, sin código\n")
+        store, _ = self.index()
+        r = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
+        self.assertFalse(r["enabled"])
+        self.assertEqual(r["reason"], "sin archivos soportados")
+        store.close()
+
 
 class TestBenchmark(Base):
     """El benchmark corre, produce números coherentes y EXCLUYE lo ilustrativo del total.
@@ -1125,6 +1180,26 @@ class TestLspResolvedType(Base):
         line, char = lsp._hover_position(["def suma(a):"], 1, "suma")
         self.assertEqual(line, 0)
         self.assertGreater(char, 4)          # > inicio de 'suma' (col 4)
+
+
+@unittest.skipUnless(_ts_lsp_available(), "sin typescript-language-server")
+class TestLspTypeScript(Base):
+    """CAPA 2 · Sub-capa A — M4: resolved_type/diagnósticos en TS con un LSP real."""
+
+    def test_typescript_resolved_type(self):
+        from memorygraf.runtime import lsp
+        self.write("calc.ts",
+                   "export function suma(a: number, b: number): number {\n"
+                   "  return a + b;\n}\n")
+        store, _ = self.index()
+        r = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
+        self.assertTrue(r["enabled"])
+        self.assertIn("typescript", r["languages"])
+        rt = store.runtime_node_get("proj/calc.ts::suma")
+        self.assertIsNotNone(rt)
+        self.assertIsNotNone(rt.get("resolved_type"))
+        self.assertIn("number", rt["resolved_type"])
+        store.close()
 
 
 class TestExtractorRobustness(Base):
