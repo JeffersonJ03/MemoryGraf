@@ -87,7 +87,13 @@ def _date(iso_or_epoch: str) -> str:
 
 
 def _rename_new_path(path: str) -> str:
-    """numstat de un rename puede venir como 'a/{x => y}/f' o 'old => new'."""
+    """numstat de un rename puede venir como 'a/{x => y}/f' o 'old => new'.
+
+    Nota (limitación consciente): el commit del rename SÍ se atribuye al nombre nuevo,
+    pero la historia PREVIA al rename queda bajo la ruta vieja y no se arrastra al nodo
+    nuevo (no usamos `git log --follow`, incompatible con un log de repo completo). En
+    repos con renames frecuentes, el churn del nodo nuevo puede subestimarse; degrada a
+    nivel de archivo con elegancia (PLAN §4.7). Aceptable para v1 de la Capa 1."""
     if "{" in path and " => " in path:
         pre, rest = path.split("{", 1)
         mid, post = rest.split("}", 1)
@@ -235,7 +241,10 @@ def _persist_recent(store, recent: dict, top_n: int):
                    for c in store.git_commits_get(fid)}
         for sha, date, subject in seen:
             by_hash[sha] = (sha, date, subject)
-        ordered = sorted(by_hash.values(), key=lambda c: c[1], reverse=True)[:top_n]
+        # desempate por hash (2ª clave): las fechas son por día y pueden empatar;
+        # así el top-N es determinista entre corridas (§3.10).
+        ordered = sorted(by_hash.values(), key=lambda c: (c[1], c[0]),
+                         reverse=True)[:top_n]
         store.git_commits_set(fid, ordered)
 
 
@@ -342,9 +351,9 @@ def _attr_symbol(store, sym, line_sha: dict, meta: dict, st):
         first_changed=min(dates) if dates else None,
         last_changed=max(dates) if dates else None,
         fix_touches=fixes, authors=_cap_authors(authors, st["max_authors"]))
-    # top-N commits del símbolo por fecha
+    # top-N commits del símbolo por fecha (desempate por sha -> determinista)
     ranked = sorted(({s for s in distinct if s in meta}),
-                    key=lambda s: meta[s][1], reverse=True)[:st["top_commits"]]
+                    key=lambda s: (meta[s][1], s), reverse=True)[:st["top_commits"]]
     store.git_commits_set(sym["id"], [(s, meta[s][1], meta[s][2]) for s in ranked])
 
 
