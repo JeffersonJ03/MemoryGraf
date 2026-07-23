@@ -32,6 +32,10 @@ _WEAK = 0.4   # por debajo: una arista INFERRED pasa a AMBIGUOUS ("revisar")
 # provenances que marcan un origen heurístico/dudoso -> AMBIGUOUS (revisar). Permite
 # que un extractor futuro etiquete aristas "a revisar" sin tocar este clasificador.
 _HEURISTIC_PROV = ("heuristic", "guess", "ambiguous", "fuzzy")
+# provenances que declaran OBSERVACIÓN directa (no deducción) -> EXTRACTED, aunque el
+# tipo sea normalmente INFERRED. P.ej. `tested_by` por CONTEXTO de cobertura: se observó
+# que el test ejecutó ese símbolo (vs. la heurística por imports, que sigue INFERRED).
+_OBSERVED_PROV = ("coverage",)
 
 
 def classify(edge_type: str, provenance: str = "", confidence=1.0) -> str:
@@ -39,6 +43,8 @@ def classify(edge_type: str, provenance: str = "", confidence=1.0) -> str:
     prov = (provenance or "").lower()
     if any(h in prov for h in _HEURISTIC_PROV):
         return AMBIGUOUS               # el origen mismo declara incertidumbre
+    if any(o in prov for o in _OBSERVED_PROV):
+        return EXTRACTED              # observación directa, no deducción
     if edge_type in _INFERRED_TYPES:
         return AMBIGUOUS if c < _WEAK else INFERRED
     if edge_type in _EXTRACTED_TYPES:

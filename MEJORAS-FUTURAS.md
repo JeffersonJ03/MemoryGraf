@@ -23,7 +23,7 @@ verificación en vivo antes de dar por buena.
 | # | Mejora | Valor | Riesgo | Esfuerzo |
 |---|---|---|---|---|
 | M1 | Co-cambio por símbolo con **historia completa** (diff, no solo blame) | Alto | Alto | Alto |
-| M2 | `tested_by` a nivel **símbolo→test** (no archivo→archivo) | Alto | Medio | Medio |
+| ~~M2~~ | ✅ **Implementado** · `tested_by` a nivel **símbolo→test** (contextos de cobertura) | Alto | Medio | Medio |
 | ~~M3~~ | ✅ **Implementado** · Narrar el "por qué" del co-cambio de **símbolos** | Medio | Bajo | Bajo |
 | M4 | `resolved_type`: **multi-lenguaje** (TS/JS) + params/vars | Medio | Medio | Medio |
 | M5 | `digest`: formatos **agrupados** (eslint stylish, jest, go test, tsc) | Medio | Medio | Medio |
@@ -68,10 +68,22 @@ solo si M2/M3 no bastan; empezar por un prototipo medido antes de integrar.
 
 ---
 
-## M2 · `tested_by` a nivel símbolo→test
+## M2 · `tested_by` a nivel símbolo→test  ✅ IMPLEMENTADO
 
-**Contexto.** Hoy `tested_by` (`runtime/tests.py::_build_tested_by`) es **archivo→archivo**,
-INFERRED por imports del test. No dice qué **función** ejercita un test.
+**Estado (2026-07-23).** Hecho. `runtime/tests.py` parsea `coverage.json` con contextos
+(`coverage json --show-contexts`, tras `pytest --cov-context=test` o
+`dynamic_context = test_function`) y emite aristas `tested_by` **símbolo(código)→símbolo(test)**,
+EXTRACTED (se observó la ejecución; `confidence.py` promueve provenance `coverage-*` a
+EXTRACTED). Mapea línea→span de símbolo (el más ajustado) y contexto→símbolo de test
+(acepta nodeid `a/b.py::C::m` y qualname punteado `a.b.C.m`). El fallback archivo→archivo
+por imports se mantiene cuando no hay contextos; al retirar el artefacto, las aristas de
+símbolo se limpian (anti-staleness). Config opcional: `runtime.coverage_contexts` (ruta) o
+autodescubre `coverage.json`. Tests: `test_tested_by_symbol_from_coverage_contexts`,
+`test_symbol_tested_by_falls_back_and_clears`, y el caso EXTRACTED en `TestConfidence`.
+El resto de esta sección queda como registro del plan original.
+
+**Contexto.** Antes `tested_by` (`runtime/tests.py::_build_tested_by`) era **archivo→archivo**,
+INFERRED por imports del test. No decía qué **función** ejercita un test.
 
 **Plan de implementación.**
 1. Usar cobertura **por contexto de test**: `coverage run --context=test` /

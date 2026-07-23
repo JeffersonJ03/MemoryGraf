@@ -742,6 +742,66 @@ class TestRuntimeTests(Base):
         self.assertIsNone(r["junit_file"])
         store.close()
 
+    def _cov_json_contexts(self, rel="coverage.json"):
+        # foo(): líneas 1-2 · bar(): líneas 4-5. Cada test ejecuta UNA función.
+        data = {"files": {"mod.py": {"contexts": {
+            "2": ["tests/test_mod.py::test_foo|run"],   # sufijo de fase: se ignora
+            "5": ["tests/test_mod.py::test_bar"],
+            "1": [""],                                   # contexto vacío: se ignora
+        }}}}
+        import json as _j
+        self.write(rel, _j.dumps(data))
+        return os.path.join(self.proj, rel)
+
+    def test_tested_by_symbol_from_coverage_contexts(self):
+        # M2: qué TEST ejercita qué SÍMBOLO, no solo qué archivo.
+        from memorygraf.runtime import tests as rt
+        from memorygraf import confidence as cf
+        self.write("mod.py", "def foo():\n    return 1\n\ndef bar():\n    return 2\n")
+        self.write("tests/test_mod.py",
+                   "from mod import foo, bar\n\n"
+                   "def test_foo():\n    assert foo()\n\n"
+                   "def test_bar():\n    assert bar()\n")
+        cov_json = self._cov_json_contexts()
+        store, _ = self.index()
+        self.config["runtime"] = {"coverage_contexts": cov_json}
+        r = rt.sync(store, self.config)
+        self.assertGreaterEqual(r["tested_by_symbol_edges"], 2)
+        tb = {(e["source"], e["target"]): e for e in store.all_edges()
+              if e["type"] == "tested_by"}
+        # foo lo ejercita test_foo; bar lo ejercita test_bar (a nivel SÍMBOLO)
+        self.assertIn(("proj/mod.py::foo", "proj/tests/test_mod.py::test_foo"), tb)
+        self.assertIn(("proj/mod.py::bar", "proj/tests/test_mod.py::test_bar"), tb)
+        # y NO se cruza: foo no está "tested_by" test_bar
+        self.assertNotIn(("proj/mod.py::foo", "proj/tests/test_mod.py::test_bar"), tb)
+        # observado por cobertura -> EXTRACTED, alta confianza
+        edge = tb[("proj/mod.py::foo", "proj/tests/test_mod.py::test_foo")]
+        self.assertEqual(cf.label(edge), cf.EXTRACTED)
+        store.close()
+
+    def test_symbol_tested_by_falls_back_and_clears(self):
+        # sin contextos -> solo el fallback archivo→archivo; retirar el artefacto limpia.
+        from memorygraf.runtime import tests as rt
+        self.write("mod.py", "def foo():\n    return 1\n")
+        self.write("tests/test_mod.py", "from mod import foo\n\ndef test_foo():\n    assert foo()\n")
+        cov_json = self._cov_json_contexts()
+        store, _ = self.index()
+        self.config["runtime"] = {"coverage_contexts": cov_json}
+        r1 = rt.sync(store, self.config)
+        self.assertGreaterEqual(r1["tested_by_symbol_edges"], 1)
+        # retiro el artefacto de contextos -> el símbolo→test desaparece (anti-staleness)
+        self.rm("coverage.json")
+        self.config["runtime"] = {}
+        r2 = rt.sync(store, self.config)
+        self.assertEqual(r2["tested_by_symbol_edges"], 0)
+        sym_edges = [e for e in store.all_edges()
+                     if e["type"] == "tested_by" and "::" in e["source"]]
+        self.assertEqual(sym_edges, [])
+        # el fallback archivo→archivo sí permanece
+        tb = {(e["source"], e["target"]) for e in store.all_edges() if e["type"] == "tested_by"}
+        self.assertIn(("proj/mod.py", "proj/tests/test_mod.py"), tb)
+        store.close()
+
     def test_coverage_resolves_via_sources(self):
         # filename relativo a <sources><source> (raíz del run), no a la del repo
         from memorygraf.runtime import tests as rt
@@ -855,6 +915,8 @@ class TestConfidence(Base):
         self.assertEqual(cf.classify("calls", "xfile", 0.9), cf.EXTRACTED)
         self.assertEqual(cf.classify("co_changes_with", "git", 0.8), cf.INFERRED)
         self.assertEqual(cf.classify("tested_by", "test-import", 0.7), cf.INFERRED)
+        # M2: tested_by OBSERVADO por contexto de cobertura -> EXTRACTED (no deducción)
+        self.assertEqual(cf.classify("tested_by", "coverage-context", 0.95), cf.EXTRACTED)
         self.assertEqual(cf.classify("co_changes_with", "git", 0.3), cf.AMBIGUOUS)
         # provenance heurístico -> AMBIGUOUS aunque el tipo sería EXTRACTED
         self.assertEqual(cf.classify("calls", "heuristic", 0.9), cf.AMBIGUOUS)
