@@ -84,6 +84,12 @@ def main(argv=None):
     p.add_argument("node_id"); p.add_argument("--depth", type=int, default=1); p.add_argument("--budget", type=int, default=800)
     p = sub.add_parser("history", help="Historia de un nodo: churn, fragilidad, autores, commits")
     p.add_argument("node_id"); p.add_argument("--budget", type=int, default=800)
+    # CAPA 3 · Compilador de contexto local
+    p = sub.add_parser("digest", help="Destila un log gigante (test/build) ligado a nodos")
+    p.add_argument("file", nargs="?", help="Archivo de log (o stdin si se omite)")
+    p.add_argument("--budget", type=int, default=400)
+    p.add_argument("--llm", action="store_true", help="Usar LLM local para la línea de situación")
+    sub.add_parser("compile", help="Compila el contexto: narra el 'por qué' del co-cambio")
     p = sub.add_parser("summarize"); p.add_argument("--rebuild", action="store_true"); p.add_argument("--all", action="store_true")
     p = sub.add_parser("embed"); p.add_argument("--rebuild", action="store_true")
     sub.add_parser("sync")
@@ -173,6 +179,21 @@ def main(argv=None):
             print(f"  embedder: {r['embedder']} | vectores: {r['total_vectors']}",
                   file=sys.stderr)
             print(json.dumps(r, ensure_ascii=False))
+        elif args.cmd == "compile":
+            from . import context_compiler
+            r = context_compiler.compile(store, _load_cfg(args),
+                                         log=lambda m: print("  " + m, file=sys.stderr))
+            print(json.dumps(r, ensure_ascii=False))
+        elif args.cmd == "digest":
+            from . import context_compiler
+            text = open(args.file, encoding="utf-8", errors="replace").read() \
+                if args.file else sys.stdin.read()
+            cfg = _load_cfg(args)
+            if args.llm:
+                with context_compiler.local_llm(cfg, log=lambda m: print("  " + m, file=sys.stderr)) as llm:
+                    print(context_compiler.digest_log(store, text, cfg, llm=llm, budget_tokens=args.budget))
+            else:
+                print(context_compiler.digest_log(store, text, cfg, budget_tokens=args.budget))
         elif args.cmd == "stats":
             print(json.dumps(store.stats(), ensure_ascii=False, indent=2))
         elif args.cmd == "export":

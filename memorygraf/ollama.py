@@ -68,6 +68,28 @@ def _host_port(url: str) -> str:
     return f"{u.hostname or '127.0.0.1'}:{u.port or 11434}"
 
 
+def generate(url: str, model: str, prompt: str, num_predict: int = 120,
+             temperature: float = 0.1, timeout: float = 120,
+             keep_alive=None) -> str | None:
+    """Genera texto con el modelo local (/api/generate, sin stream).
+
+    Devuelve la respuesta (str) o None ante cualquier fallo (el llamador degrada).
+    Reutilizable por summarizer y context_compiler.
+    """
+    body = {"model": model, "prompt": prompt, "stream": False,
+            "options": {"temperature": temperature, "num_predict": num_predict}}
+    if keep_alive is not None:
+        body["keep_alive"] = keep_alive
+    payload = json.dumps(body).encode()
+    req = urllib.request.Request(url.rstrip("/") + "/api/generate", data=payload,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return (json.loads(r.read()).get("response") or "").strip()
+    except Exception:
+        return None
+
+
 def pull_model(binary: str, model: str, log=lambda m: None) -> bool:
     """Descarga el modelo (bloqueante). Devuelve True si terminó OK."""
     env = dict(os.environ)

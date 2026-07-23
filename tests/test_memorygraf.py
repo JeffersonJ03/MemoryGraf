@@ -289,9 +289,8 @@ def _git_available() -> bool:
         return False
 
 
-@unittest.skipUnless(_git_available(), "git no disponible")
-class TestGitLayer(Base):
-    """CAPA 1 · Temporal/Git. Crea un repo git real y valida las señales."""
+class _GitRepo:
+    """Mixin con helpers para crear un repo git real de prueba (sin tests propios)."""
 
     def _git(self, *args):
         subprocess.run(["git", *args], cwd=self.proj, check=True,
@@ -314,6 +313,11 @@ class TestGitLayer(Base):
 
     def _sync_git(self, store):
         return git_layer.sync(store, self.config)
+
+
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestGitLayer(_GitRepo, Base):
+    """CAPA 1 · Temporal/Git. Crea un repo git real y valida las señales."""
 
     def test_file_churn_and_authors(self):
         self._init_repo()
@@ -423,6 +427,105 @@ class TestGitLayer(Base):
         # las consultas degradan sin romperse
         self.assertIn("working set vacío", Query(store).working_set())
         self.assertIn("sin historia", Query(store).history("proj/a.py"))
+        store.close()
+
+
+class TestContextCompiler(Base):
+    """CAPA 3 · Compilador local. Rutas heurísticas (offline, deterministas)."""
+
+    def test_digest_python_traceback_ties_to_node(self):
+        from memorygraf import context_compiler as cc
+        self.write("a.py", "def boom():\n    return 1/0\n")
+        store, _ = self.index()
+        abspath = os.path.join(self.proj, "a.py")
+        log = (
+            "Running tests...\n"
+            "Traceback (most recent call last):\n"
+            f'  File "{abspath}", line 2, in boom\n'
+            "    return 1/0\n"
+            "ZeroDivisionError: division by zero\n"
+        )
+        out = cc.digest_log(store, log, self.config)
+        self.assertIn("ZeroDivisionError: division by zero", out)
+        self.assertIn("proj/a.py:2", out)      # ligado a nodo con procedencia
+        store.close()
+
+    def test_digest_pytest_failures(self):
+        from memorygraf import context_compiler as cc
+        self.write("a.py", "def f():\n    return 1\n")
+        store, _ = self.index()
+        log = (
+            "==================== FAILURES ====================\n"
+            "FAILED tests/test_x.py::test_foo - AssertionError: 1 != 2\n"
+            "ERROR tests/test_y.py::test_bar\n"
+            "=========== 1 failed, 3 passed in 0.20s ===========\n"
+        )
+        out = cc.digest_log(store, log, self.config)
+        self.assertIn("1 failed, 3 passed", out)
+        self.assertIn("AssertionError", out)
+        store.close()
+
+    def test_digest_empty_when_no_errors(self):
+        from memorygraf import context_compiler as cc
+        store, _ = self.index()
+        out = cc.digest_log(store, "all good\nran 5 tests OK\n", self.config)
+        self.assertIn("sin errores", out)
+        store.close()
+
+    def test_rerank_prefers_lexical_match(self):
+        from memorygraf import context_compiler as cc
+        self.write("orders.py", "def get_order():\n    return 1\n")
+        self.write("misc.py", "def other():\n    return 2\n")
+        store, _ = self.index()
+        # orden base 'malo': misc primero
+        ranked = cc.rerank(store, "order", ["proj/misc.py", "proj/orders.py"])
+        self.assertEqual(ranked[0], "proj/orders.py")
+        store.close()
+
+
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestCompilerCochange(_GitRepo, Base):
+    """Narrativa del 'por qué' del co-cambio (heurística) + surfacing en impact."""
+
+    def test_heuristic_note_and_impact_surfacing(self):
+        from memorygraf import context_compiler as cc
+        self._init_repo()
+        self.write("a.py", "def a():\n    return 1\n")
+        self.write("b.py", "def b():\n    return 2\n")
+        self._commit("feat: soporte de ordenes")
+        for i in range(3):
+            self.write("a.py", f"def a():\n    return {i}\n")
+            self.write("b.py", f"def b():\n    return {i}\n")
+            self._commit(f"feat: ordenes parte {i}")
+        store, _ = self.index()
+        git_layer.sync(store, self.config)
+        r = cc.compile(store, self.config)          # backend auto -> heurístico
+        self.assertTrue(r["enabled"])
+        self.assertEqual(r["backend"], "heuristic")
+        note = cc.cochange_note(store, "proj/a.py", "proj/b.py")
+        self.assertIsNotNone(note)
+        # la narrativa aparece en impact()
+        out = Query(store).impact("proj/a.py")
+        self.assertIn("↳", out)
+        store.close()
+
+    def test_note_cached_by_hash(self):
+        from memorygraf import context_compiler as cc
+        self._init_repo()
+        self.write("a.py", "def a():\n    return 1\n")
+        self.write("b.py", "def b():\n    return 2\n")
+        self._commit("c1")
+        for i in range(3):
+            self.write("a.py", f"def a():\n    return {i}\n")
+            self.write("b.py", f"def b():\n    return {i}\n")
+            self._commit(f"c{i+2}")
+        store, _ = self.index()
+        git_layer.sync(store, self.config)
+        r1 = cc.compile(store, self.config)
+        r2 = cc.compile(store, self.config)          # sin cambios -> todo de caché
+        self.assertGreaterEqual(r1["generated"], 1)
+        self.assertEqual(r2["generated"], 0)
+        self.assertGreaterEqual(r2["from_cache"], 1)
         store.close()
 
 

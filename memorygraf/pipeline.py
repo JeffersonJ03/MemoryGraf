@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .store import Store
 from .indexer import Indexer
-from . import cross_link, docs, summarizer, semantic, entities, git_layer
+from . import cross_link, docs, summarizer, semantic, entities, git_layer, context_compiler
 
 
 def bump_version(store: Store) -> int:
@@ -35,6 +35,9 @@ def full_sync(store: Store, config: dict, do_summarize: bool = True,
     # CAPA 1 · Temporal/Git: tras index, sobre los spans ya calculados (PLAN §4.3).
     g = git_layer.sync(store, config, log=log)
 
+    # CAPA 3 · Compilador local: narra el "por qué" del co-cambio (barato/cacheado).
+    cc = context_compiler.compile(store, config, log=log)
+
     s = {"generated": 0, "from_cache": 0}
     if do_summarize:
         s = summarizer.summarize_all(store, config=config, only_missing=True, log=log)
@@ -48,4 +51,4 @@ def full_sync(store: Store, config: dict, do_summarize: bool = True,
 
     version = bump_version(store)
     return {"index": c, "cross_link": l, "docs": d, "entities": en, "git": g,
-            "summarize": s, "embed": e, "sync_version": version}
+            "compiler": cc, "summarize": s, "embed": e, "sync_version": version}

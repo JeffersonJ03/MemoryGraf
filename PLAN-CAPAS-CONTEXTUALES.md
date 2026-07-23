@@ -1,6 +1,6 @@
 # MemoryGraf — Plan de Acción: Capas de Contexto Vivo
 
-> **Estado:** propuesta v1.0 · **Fase 6 implementada** (ver §15).
+> **Estado:** propuesta v1.0 · **Fases 6–7 implementadas** (ver §15).
 > **Fecha:** 2026-07-23.
 > **Autor:** Jefferson J. Patiño Ortega (con Claude como copiloto de diseño).
 > **Relación con DESIGN.md:** este documento **extiende** la visión (DESIGN §1–§17) con
@@ -379,5 +379,40 @@ crecerá con la historia. Los imports intra-paquete son relativos (`from .x impo
 extractor aún no los resuelve a aristas internas → el co-cambio es justo lo que compensa ese
 hueco. Resolver imports relativos queda como mejora del extractor (fuera de Fase 6).
 
-### Fases 7–9 — pendientes
-Sin cambios respecto al roadmap §10.
+### Fase 7 — Compilador de contexto local ✅ (2026-07-23)
+
+Entregado en `memorygraf/context_compiler.py` — el "bibliotecario local" que destila y
+planifica sobre las otras capas. **Guardarraíles §6.4 (vinculantes)**: el LLM local solo
+destila/planifica, nunca razona la respuesta final; toda salida lleva procedencia; el
+no-determinismo se trata como **caché por `content_hash`** (`ctx_note`), nunca fuente de
+verdad. Sin Ollama, todo degrada a un **heurístico determinista** (DESIGN §3.2).
+
+**A. Digestión de logs** (`digest_log`, el mayor sumidero de tokens §6.2.4): extracción
+determinista de fallos (tracebacks Python, `FAILED`/`ERROR` de pytest, resumen `N failed`),
+ligados a su `archivo:línea` del grafo; el LLM local, si está, añade una línea de "situación"
+(no inventa: pule). Expuesto en CLI `digest [log] [--llm]` y MCP `digest_log`.
+
+**B. Narrativa del "por qué" del co-cambio** (`compile_cochange_notes`): etiqueta cada arista
+`co_changes_with` con una frase del porqué, derivada de los asuntos de commit compartidos.
+Heurístico por defecto (tema + evidencia); LLM opt-in. Cacheada en `ctx_note(kind='cochange')`
+por hash de los asuntos. La consumen `impact()` (línea `↳`) e `history()`.
+
+**C. Rerank local** (`rerank`): reordena candidatos de `search` combinando señal léxica +
+estructura + "calor" (churn) de la capa Git. **Determinista y sin latencia de LLM** en el
+camino caliente (respeta §6.4). *Diferido*: rerank-LLM en tiempo de consulta (compromiso
+latencia/calidad a estudiar con el benchmark de §11).
+
+**Integración/coste** (DESIGN §11): el `sync` narra el co-cambio de forma barata —
+`compiler.backend=auto` usa el heurístico (no arranca el modelo); el LLM en el sync es opt-in
+(`compiler.backend=ollama`). La digestión de logs es on-demand (su entrada es transitoria).
+Config: bloque `compiler` (`enabled`, `backend`, `model`, `manage`, `max_log_findings`).
+
+**Pruebas**: `TestContextCompiler` (digestión traceback/pytest, log limpio, rerank) y
+`TestCompilerCochange` (narrativa heurística + surfacing en `impact`, caché por hash).
+Suite completa: 32/32 en verde. Validado en vivo: `impact` de `cli.py` muestra el porqué del
+acoplamiento con `pipeline/summarizer/test` (feature de resúmenes Ollama), con procedencia.
+
+### Pendiente del roadmap
+- **Fase 8** (verdad de runtime: tests/cobertura + LSP) y **Fase 9** (confidence en aristas,
+  `analyze()`/god-nodes, `GRAPH_REPORT.md`): sin cambios respecto a §10.
+- **Benchmark de tokens** (§11, con vs sin las capas): pendiente de construir (`benchmark.py`).

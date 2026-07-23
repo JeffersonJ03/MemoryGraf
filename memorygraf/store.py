@@ -98,6 +98,16 @@ CREATE TABLE IF NOT EXISTS git_blame (     -- marca de caché: hash con el que s
     content_hash TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_git_cochange_b ON git_cochange(b);
+-- CAPA 3 · Compilador de contexto local (PLAN §6). Salida del LLM local (o del
+-- heurístico): CACHÉ REGENERABLE por content_hash, NUNCA fuente de verdad (§3.8/§6.4).
+CREATE TABLE IF NOT EXISTS ctx_note (
+    kind TEXT NOT NULL,        -- 'cochange' | 'log' | ...
+    key TEXT NOT NULL,         -- p.ej. "a|b" (co-cambio, orden canónico)
+    content_hash TEXT,         -- hash de la ENTRADA destilada (incremental)
+    backend TEXT,              -- quién la generó (heuristic | ollama:model)
+    note TEXT,
+    PRIMARY KEY (kind, key)
+);
 """
 
 
@@ -344,6 +354,26 @@ class Store:
 
     def delete_edges_of_type(self, edge_type: str):
         self.conn.execute("DELETE FROM edges WHERE type=?", (edge_type,))
+
+    # --- CAPA 3 · notas del compilador de contexto (caché regenerable) ---
+    def ctx_note_get(self, kind: str, key: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT content_hash, backend, note FROM ctx_note WHERE kind=? AND key=?",
+            (kind, key)).fetchone()
+        return dict(row) if row else None
+
+    def ctx_note_set(self, kind: str, key: str, content_hash: str, backend: str, note: str):
+        self.conn.execute(
+            "INSERT INTO ctx_note (kind,key,content_hash,backend,note) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(kind,key) DO UPDATE SET content_hash=excluded.content_hash, "
+            "backend=excluded.backend, note=excluded.note",
+            (kind, key, content_hash, backend, note))
+
+    def ctx_note_prune(self, kind: str, keep_keys: set):
+        """Elimina notas de un kind cuyas keys ya no existen (regenerable)."""
+        for r in self.conn.execute("SELECT key FROM ctx_note WHERE kind=?", (kind,)).fetchall():
+            if r["key"] not in keep_keys:
+                self.conn.execute("DELETE FROM ctx_note WHERE kind=? AND key=?", (kind, r["key"]))
 
     def clear_git_layer(self):
         """Borra TODA la caché Git (para reconstruir tras historia reescrita)."""

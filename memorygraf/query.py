@@ -263,11 +263,16 @@ class Query:
             return (0 if has_co else 1, nid)
         lines = [f"# impact: {node['name']} @{_loc(node)}  ({len(why)} nodos, prof {depth})",
                  "# unión de llamadas/imports estáticos ∪ co-cambio (Git)"]
+        from . import context_compiler
         for nid, reasons in sorted(why.items(), key=_rank):
             tgt = self.store.get_node(nid)
             nm = tgt["name"] if tgt else nid
             loc = _loc(tgt) if tgt else ""
             lines.append(f"- {nm}  @{loc}  [{', '.join(sorted(reasons))}]")
+            if any(r.startswith("co-cambio") for r in reasons):
+                note = context_compiler.cochange_note(self.store, node_id, nid)
+                if note:
+                    lines.append(f"    ↳ {note}")
         return _budget("\n".join(lines), budget_tokens)
 
     # --- history: churn + fragilidad + "por qué" compacto ---

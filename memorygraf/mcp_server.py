@@ -154,6 +154,22 @@ TOOLS = [
             "required": ["node_id"],
         },
     },
+    {
+        "name": "digest_log",
+        "description": (
+            "Destila un log gigante de test/build (que gastaría miles de tokens) a lo "
+            "esencial: fallos y errores ligados a su archivo:línea del grafo. Pega la "
+            "salida cruda en 'text'. El trabajo pesado ocurre local; recibes solo el resumen."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Salida cruda del log."},
+                "budget_tokens": {"type": "integer", "default": 400},
+            },
+            "required": ["text"],
+        },
+    },
 ]
 
 
@@ -205,6 +221,13 @@ class Server:
         if name == "history":
             return q.history(args["node_id"],
                              budget_tokens=int(args.get("budget_tokens", 800)))
+        if name == "digest_log":
+            from . import context_compiler, workspace
+            cfg_path = workspace.resolve_config_path(None)
+            cfg = workspace.load_config(cfg_path) if cfg_path else {}
+            return context_compiler.digest_log(
+                self.store, args.get("text", ""), cfg,
+                budget_tokens=int(args.get("budget_tokens", 400)))
         raise ValueError(f"herramienta desconocida: {name}")
 
     def handle(self, msg: dict):
