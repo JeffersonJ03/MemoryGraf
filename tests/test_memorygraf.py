@@ -232,8 +232,10 @@ class TestSummarizerFallback(Base):
 
 class TestSummarySettings(Base):
     def test_defaults_when_no_config(self):
+        # Default = heuristic (Fix B): Ollama es opt-in, nunca implícito. Un sync sin
+        # config ni env no debe dispararse a generar con Ollama solo por estar instalado.
         s = summarizer._resolve_summary_settings(None)
-        self.assertEqual(s["backend"], "auto")
+        self.assertEqual(s["backend"], "heuristic")
         self.assertTrue(s["manage"])
         self.assertFalse(s["auto_pull"])
 

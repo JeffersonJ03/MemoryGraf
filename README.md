@@ -78,8 +78,23 @@ modo portable en vez de fallar. Corre **`memorygraf doctor`** para ver qué est�
 detecta plataforma/WSL/distro) y te dice el paso siguiente. También no interactivo:
 `memorygraf doctor --install neural,lsp` (o `--install all`), y `--json` para solo reporte.
 
-Resúmenes de nodos: heurístico por defecto (offline); prosa real opcional vía **Ollama**
-local (privado, `memorygraf setup-ollama`) o una API compatible OpenAI.
+**Resúmenes de nodos** (controlados por la variable `MEMORYGRAF_SUMMARY_BACKEND`):
+
+| Backend | Qué hace | Cuándo |
+|---|---|---|
+| `heuristic` *(por defecto)* | Rápido, offline, sin IA | El `sync` diario; nunca sorprende |
+| `auto` | Usa Ollama **si está instalado**; si no, heurístico | opt-in; ⚠️ con Ollama en CPU y miles de nodos un `sync` puede tardar **horas** |
+| `ollama` | Prosa real con LLM **local y privado** | opt-in (`memorygraf setup-ollama`) |
+| `api` | Prosa vía API compatible OpenAI | opt-in (clave en `MEMORYGRAF_LLM_KEY`) |
+
+> El default es `heuristic`: Ollama es **opt-in** (por env, config o `backend=auto`), nunca
+> implícito solo por estar instalado — así un `sync` no se va a horas de CPU sin que lo pidas.
+
+Patrón recomendado — `sync` rápido y, si quieres prosa, en un paso aparte (con progreso `i/total`):
+```bash
+MEMORYGRAF_SUMMARY_BACKEND=heuristic memorygraf sync          # rápido, offline
+MEMORYGRAF_SUMMARY_BACKEND=ollama    memorygraf summarize --all   # prosa (lento en CPU)
+```
 
 Con Ollama, dos opt-in con **LLM local** (privado, fallback determinista si no está):
 narrativa más rica del co-cambio on-demand (`memorygraf compile --llm`, o `compiler.backend=ollama`

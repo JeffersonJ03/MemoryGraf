@@ -81,10 +81,19 @@ memorygraf decisions "base de datos"
 - **Entidades de dominio**: copia `memorygraf.entities.example.json` a tu proyecto como
   `memorygraf.entities.json` (o `.memorygraf/entities.json`), edítalo con tus entidades
   de negocio y `memorygraf sync`.
-- **Resúmenes en prosa (privados, con Ollama)**:
+- **Resúmenes de nodos** — los controla la variable `MEMORYGRAF_SUMMARY_BACKEND`:
+  - `heuristic` *(por defecto)* → rápido, offline, sin IA. El `sync` nunca se cuelga.
+  - `auto` → usa Ollama si está instalado; si no, heurístico. **Opt-in.**
+    ⚠️ Con Ollama en CPU y muchos nodos, el `sync` puede tardar **horas**.
+  - `ollama` / `api` → prosa real (opt-in).
+
+  Ollama es opt-in: nunca corre solo por estar instalado.
+
+  Patrón recomendado — `sync` rápido y, aparte, prosa cuando la quieras:
   ```bash
-  ollama pull qwen2.5-coder:3b
-  MEMORYGRAF_SUMMARY_BACKEND=ollama memorygraf summarize --all
+  MEMORYGRAF_SUMMARY_BACKEND=heuristic memorygraf sync          # rápido, offline
+  ollama pull qwen2.5-coder:3b                                  # una vez
+  MEMORYGRAF_SUMMARY_BACKEND=ollama memorygraf summarize --all  # prosa (lento; muestra progreso i/total)
   ```
 
 ## 7. Notas y resolución de problemas
@@ -93,6 +102,10 @@ memorygraf decisions "base de datos"
   cambios hechos desde Windows). Es automático; no requiere nada.
 - **Cambié código y la IA no lo ve**: corre `memorygraf sync` (o ten `watch` activo) y
   reinicia la sesión del cliente si hiciera falta.
+- **`sync` parece colgado en "ollama: arrancando servidor efímero…"**: no está colgado
+  — pediste el backend `ollama`/`auto` y, en CPU con muchos nodos, resumir tarda mucho.
+  Cancela (`Ctrl+C`) y usa el default rápido (`memorygraf sync` a secas). Reserva Ollama
+  para un `memorygraf summarize --all` aparte (muestra progreso `i/total`).
 - **El grafo (`*.db`, `graph.html`, `.memorygraf/`) NO se versiona** — es regenerable y
   está en `.gitignore`. Sí se versiona el código de la herramienta y los `.example`.
 - **Privacidad**: por defecto todo es local. Los backends de API (embeddings/resúmenes)

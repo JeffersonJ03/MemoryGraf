@@ -223,13 +223,17 @@ def _resolve_summary_settings(config: dict | None) -> dict:
     """Fusiona config (bloque `summary`) con env vars (override para casos puntuales).
 
     Precedencia: env var > config > default. `backend` ∈ auto|heuristic|ollama|api.
+
+    Default = `heuristic`: rápido, offline y sin sorpresas. Ollama es OPT-IN (por env,
+    por config, o con backend=auto), nunca implícito solo por estar instalado — así un
+    `sync` no se dispara a horas de generación en CPU sin que el usuario lo pida.
     """
     cfg = (config or {}).get("summary") or {}
     oll = cfg.get("ollama") or {}
     api = cfg.get("api") or {}
     env = os.environ.get
     return {
-        "backend": (env("MEMORYGRAF_SUMMARY_BACKEND") or cfg.get("backend") or "auto").lower(),
+        "backend": (env("MEMORYGRAF_SUMMARY_BACKEND") or cfg.get("backend") or "heuristic").lower(),
         "url": env("MEMORYGRAF_OLLAMA_URL") or oll.get("url") or _ollama.DEFAULT_URL,
         "model": env("MEMORYGRAF_OLLAMA_MODEL") or oll.get("model") or _ollama.DEFAULT_MODEL,
         "manage": bool(oll.get("manage", True)),
@@ -331,38 +335,50 @@ def summarize_all(store: Store, config=None, rebuild=False, only_missing=True,
             name = store.get_meta("summarizer") or "heuristic-v1"
         return {"summarizer": name, "generated": 0, "from_cache": 0, "skipped": 0}
     with _summarizer_ctx(config, log) as summarizer:
-        return _run_summaries(store, summarizer, config, rebuild, only_missing)
+        return _run_summaries(store, summarizer, config, rebuild, only_missing, log)
 
 
-def _run_summaries(store: Store, summarizer, config, rebuild, only_missing) -> dict:
+# Cada cuántos nodos procesados se emite una línea de progreso. Clave para que un
+# backend lento (Ollama en CPU sobre miles de nodos) no parezca colgado: el bucle
+# deja de ser una caja negra y se ve avanzar 'i/total'.
+_PROGRESS_EVERY = 25
+
+
+def _run_summaries(store: Store, summarizer, config, rebuild, only_missing,
+                   log=lambda m: None) -> dict:
     name = summarizer.name
     roots = {p["name"]: p["root"] for p in (config or {}).get("projects", [])}
     need_source = getattr(summarizer, "needs_source", False)
     nodes = store.all_nodes()
-    done, cached, skipped = 0, 0, 0
-    for node in nodes:
-        if node["type"] in ("external", "entity"):
-            skipped += 1
-            continue
-        if only_missing and (node.get("summary") or "").strip():
-            skipped += 1
-            continue
+    # Candidatos = nodos que sí se resumen (los external/entity y, con only_missing,
+    # los ya resueltos, se saltan). Precalcularlos da el 'total' para el progreso.
+    candidates = [n for n in nodes
+                  if n["type"] not in ("external", "entity")
+                  and not (only_missing and (n.get("summary") or "").strip())]
+    total = len(candidates)
+    skipped = len(nodes) - total
+    done, cached = 0, 0
+    if total:
+        log(f"resúmenes ({name}): {total} pendientes…")
+    for i, node in enumerate(candidates, 1):
         key = content_hash(f"{node['id']}|{node.get('content_hash')}|{name}")
         cached_sum = None if rebuild else store.get_summary(key, name)
         if cached_sum is not None:
             store.update_node_summary(node["id"], cached_sum)
             cached += 1
-            continue
-        ctx = _build_context(store, node, roots, need_source)
-        try:
-            summary = summarizer.summarize(node, ctx)
-        except Exception:
-            skipped += 1
-            continue
-        if summary:
-            store.set_summary(key, name, summary)
-            store.update_node_summary(node["id"], summary)
-            done += 1
+        else:
+            ctx = _build_context(store, node, roots, need_source)
+            try:
+                summary = summarizer.summarize(node, ctx)
+            except Exception:
+                summary = None
+                skipped += 1
+            if summary:
+                store.set_summary(key, name, summary)
+                store.update_node_summary(node["id"], summary)
+                done += 1
+        if i == total or i % _PROGRESS_EVERY == 0:
+            log(f"resúmenes ({name}): {i}/{total} · nuevos {done}, caché {cached}")
     store.set_meta("summarizer", name)
     store.commit()
     return {"summarizer": name, "generated": done, "from_cache": cached,

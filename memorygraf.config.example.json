@@ -18,9 +18,9 @@
 
   "_llm_comment": "Motor+modelo del LLM para resúmenes y compilador. Lo más fácil: 'memorygraf setup-llm' (interactivo) elige motor y modelo y escribe estos bloques. Motores: heuristic (offline) · ollama (local: model) · api (endpoint compatible OpenAI: {url, model}; la KEY va en la env MEMORYGRAF_LLM_KEY, nunca en este archivo).",
 
-  "_summary_comment": "backend: auto|heuristic|ollama|api. 'auto' usa Ollama si está instalado, si no, heurístico.",
+  "_summary_comment": "backend: heuristic|auto|ollama|api. Default 'heuristic' (rápido, offline, sin sorpresas). 'auto' usa Ollama si está instalado (⚠ puede tardar horas en CPU con muchos nodos); 'ollama'/'api' = prosa opt-in. Ollama nunca corre solo por estar instalado: hay que pedirlo aquí o por env MEMORYGRAF_SUMMARY_BACKEND.",
   "summary": {
-    "backend": "auto",
+    "backend": "heuristic",
     "ollama": {
       "model": "qwen2.5-coder:3b",
       "manage": true,

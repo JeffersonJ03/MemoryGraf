@@ -25,6 +25,54 @@ from .store import Store
 from . import workspace
 
 
+# Manual completo mostrado en `memorygraf -h` (epilog del parser raíz). Pensado para
+# alguien que llega de cero: inicio rápido copia-pega, multi-repo, uso diario, la
+# trampa de los resúmenes (auto→Ollama lento) y cómo pedir ayuda de cada comando.
+MANUAL = """\
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  MANUAL  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Qué es: un grafo local del proyecto que le da contexto a tu asistente de IA
+(vía MCP) trayendo SOLO lo relevante por tarea, en vez de volcar archivos.
+Corre 100% local; funciona con Claude y cualquier cliente MCP, y también sin IA.
+
+INICIO RÁPIDO  (copia y pega, dentro de tu proyecto)
+  memorygraf init                                   # crea .memorygraf/ (config + grafo)
+  MEMORYGRAF_SUMMARY_BACKEND=heuristic memorygraf sync   # construye el grafo (rápido, offline)
+  memorygraf install claude                         # conéctalo a Claude Code (MCP)
+  # reinicia el cliente MCP y listo
+
+VARIOS REPOS COMO UN SISTEMA  (enlace cross-project por endpoints HTTP)
+  memorygraf init --name sistema --project . --project "/ruta/a/otro-repo"
+  # Las comillas son OBLIGATORIAS si la ruta tiene espacios.
+  # --project se repite una vez por repo. Al hacer sync verás 'enlaces cross-project: N'.
+
+USO DIARIO
+  memorygraf sync                 # reindexa lo que cambió (incremental)
+  memorygraf watch                # o déjalo corriendo: mantiene el grafo al día solo
+  memorygraf overview             # panorama para orientarse
+  memorygraf search "login"       # busca en el grafo (semántico + léxico)
+  memorygraf impact <node_id>     # qué se rompería al tocar un nodo
+  memorygraf graph                # genera graph.html (lo que "ve" la IA)
+
+RESÚMENES: RÁPIDO vs PROSA
+  La variable MEMORYGRAF_SUMMARY_BACKEND controla cómo se resumen los nodos:
+    heuristic  (por defecto) Rápido, offline, sin IA. El sync nunca se cuelga.
+    auto       Usa Ollama si está instalado; si no, heurístico. OPT-IN.
+               ⚠ Con Ollama en CPU y miles de nodos, un sync puede tardar HORAS.
+    ollama     Prosa real con LLM local y privado (requiere 'memorygraf setup-ollama').
+    api        Prosa vía API compatible OpenAI (opt-in; la clave va en MEMORYGRAF_LLM_KEY).
+  Ollama es opt-in: nunca corre solo por estar instalado. Para prosa, pídela aparte:
+    memorygraf sync                                          # rápido (heurístico por defecto)
+    MEMORYGRAF_SUMMARY_BACKEND=ollama memorygraf summarize --all   # prosa; lento pero con progreso
+
+AYUDA DE CADA COMANDO
+  memorygraf <comando> -h         # ej.: 'memorygraf init -h', 'memorygraf search -h'
+  memorygraf doctor               # qué capacidades opcionales tienes activas y cómo activarlas
+
+Más detalle: README.md · ONBOARDING.md · DESIGN.md
+"""
+
+
 def _cfg_path(args):
     p = workspace.resolve_config_path(getattr(args, "config", None))
     if not p:
@@ -52,7 +100,11 @@ def _mcp_launch_command(config_path):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="memorygraf")
+    ap = argparse.ArgumentParser(
+        prog="memorygraf",
+        description="Grafo de conocimiento local de tu proyecto para asistentes de IA (MCP).",
+        epilog=MANUAL,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", help="Ruta a config (por defecto: autodetecta .memorygraf/)")
     ap.add_argument("--db", help="Ruta a la BD (por defecto: junto al config)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -73,8 +125,17 @@ def main(argv=None):
     p.add_argument("--dir", default=".", help="Dónde crear .memorygraf/ (def: directorio actual)")
     sub.add_parser("mcp", help="Lanza el servidor MCP (stdio)")
     sub.add_parser("mcp-config", help="Imprime el JSON de MCP para pegar en tu cliente")
-    p = sub.add_parser("install", help="Registra el MCP en un cliente")
-    p.add_argument("target", choices=["claude"]); p.add_argument("--scope", default="project")
+    p = sub.add_parser(
+        "install", help="Registra el MCP en un cliente",
+        description="Registra el servidor MCP de este grafo en tu cliente de IA.",
+        epilog="Ejemplos:\n"
+               "  memorygraf install claude                 # scope de proyecto (.mcp.json local)\n"
+               "  memorygraf install claude --scope user    # disponible en TODOS tus proyectos\n"
+               "\nTras instalar, reinicia/abre el cliente para que cargue el servidor.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("target", choices=["claude"], help="Cliente a configurar")
+    p.add_argument("--scope", default="project",
+                   help="Alcance del registro: 'project' (def, en .mcp.json) o 'user' (global)")
     p = sub.add_parser("setup-ollama",
                        help="Instala/configura Ollama para resúmenes en prosa (IA local, opcional)")
     p.add_argument("--model", default=None, help="Modelo a usar (def: qwen2.5-coder:3b)")
@@ -96,8 +157,18 @@ def main(argv=None):
     sub.add_parser("stats", help="Métricas del grafo: nodos/aristas por tipo y proyecto")
     p = sub.add_parser("overview", help="Panorama del proyecto para orientarse (respeta presupuesto)")
     p.add_argument("--scope"); p.add_argument("--budget", type=int, default=1500)
-    p = sub.add_parser("search", help="Búsqueda híbrida (semántica + léxica) en el grafo")
-    p.add_argument("query"); p.add_argument("--types"); p.add_argument("--budget", type=int, default=800)
+    p = sub.add_parser(
+        "search", help="Búsqueda híbrida (semántica + léxica) en el grafo",
+        description="Busca nodos por significado y por texto (fusión RRF). Cruza todos "
+                    "los proyectos del grafo.",
+        epilog="Ejemplos:\n"
+               "  memorygraf search \"autenticacion de usuarios\"\n"
+               "  memorygraf search \"orden\" --types symbol,file --budget 1200\n"
+               "  memorygraf search \"login\" --rerank            # reordena (determinista, local)",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("query", help="Texto a buscar (entre comillas si tiene espacios)")
+    p.add_argument("--types", help="Filtra por tipos de nodo separados por coma (p.ej. symbol,file)")
+    p.add_argument("--budget", type=int, default=800, help="Presupuesto de tokens del resultado (def: 800)")
     p.add_argument("--rerank", action="store_true", help="Reordena por relevancia (determinista, local)")
     p.add_argument("--rerank-llm", action="store_true", help="Reordena con LLM local (Ollama; latencia acotada + fallback)")
     p = sub.add_parser("neighbors", help="Vecinos de un nodo (relaciones entrantes/salientes)")
@@ -129,11 +200,31 @@ def main(argv=None):
     p.add_argument("--limit", type=int, default=10)
     p = sub.add_parser("report", help="Genera GRAPH_REPORT.md (reporte markdown del grafo)")
     p.add_argument("--out")
-    p = sub.add_parser("summarize", help="Genera resúmenes de los nodos (heurístico/Ollama/API)")
-    p.add_argument("--rebuild", action="store_true"); p.add_argument("--all", action="store_true")
+    p = sub.add_parser(
+        "summarize", help="Genera resúmenes de los nodos (heurístico/Ollama/API)",
+        description="Genera el resumen de una frase de cada nodo. El backend lo decide "
+                    "MEMORYGRAF_SUMMARY_BACKEND (heuristic/auto/ollama/api).",
+        epilog="Ejemplos:\n"
+               "  memorygraf summarize                    # solo los nodos que aún no tienen resumen\n"
+               "  MEMORYGRAF_SUMMARY_BACKEND=ollama memorygraf summarize --all   # prosa real, TODOS (lento)\n"
+               "\nOllama en CPU con miles de nodos tarda horas; verás el progreso 'i/total'.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--rebuild", action="store_true",
+                   help="Regenera aunque ya exista un resumen en caché")
+    p.add_argument("--all", action="store_true",
+                   help="Resume TODOS los nodos, no solo los que faltan")
     p = sub.add_parser("embed", help="(Re)genera los embeddings para la búsqueda semántica")
     p.add_argument("--rebuild", action="store_true")
-    sub.add_parser("sync", help="Construye/actualiza el grafo completo (incremental)")
+    sub.add_parser(
+        "sync", help="Construye/actualiza el grafo completo (incremental)",
+        description="Reconstruye todas las capas del grafo (índice, git, runtime, "
+                    "resúmenes, embeddings). Incremental: solo procesa lo que cambió.",
+        epilog="Ejemplos:\n"
+               "  memorygraf sync                                     # rápido (heurístico por defecto)\n"
+               "  MEMORYGRAF_SUMMARY_BACKEND=ollama memorygraf sync   # con prosa Ollama (lento en CPU)\n"
+               "\nPor defecto NO usa Ollama, así que no se cuelga. Solo si pides el backend\n"
+               "ollama/auto verás 'arrancando servidor efímero…' y la generación en CPU (horas).",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p = sub.add_parser("watch", help="Mantiene el grafo al día automáticamente al cambiar el código")
     p.add_argument("--interval", type=float, default=3.0)
     p = sub.add_parser("export", help="Exporta el grafo a JSON")
@@ -225,7 +316,8 @@ def main(argv=None):
         elif args.cmd == "summarize":
             from . import summarizer
             r = summarizer.summarize_all(store, config=_load_cfg(args),
-                                         rebuild=args.rebuild, only_missing=not args.all)
+                                         rebuild=args.rebuild, only_missing=not args.all,
+                                         log=lambda m: print("  " + m, file=sys.stderr))
             print(f"  summarizer: {r['summarizer']} | generados: {r['generated']} "
                   f"(cache {r['from_cache']})", file=sys.stderr)
             print(json.dumps(r, ensure_ascii=False))
