@@ -1,7 +1,8 @@
 # MemoryGraf — Documento de Diseño
 
-> **Estado:** v1.1 — implementado (Fases 0–5 completas). Ver §17 para el cierre.
-> **Fecha:** 2026-07-21 (diseño) · 2026-07-22 (cierre de implementación)
+> **Estado:** v1.1 — implementado (Fases 0–5 completas, §17). Evolución post-v1.1 (capas
+> contextuales Git/runtime/compilador + mejoras, incl. el prototipo M1): ver §18.
+> **Fecha:** 2026-07-21 (diseño) · 2026-07-22 (cierre v1.1) · 2026-07-24 (capas contextuales)
 > **Autor:** Jefferson J. Patiño Ortega (con Claude como copiloto de diseño)
 > **Propósito:** Documento de referencia que define la visión, las reglas, el alcance
 > y la arquitectura de MemoryGraf. Es la fuente de verdad del proyecto; se actualiza
@@ -479,3 +480,101 @@ Deja `memorygraf watch` corriendo para mantener el grafo al día.
 - **`calls` en modo regex** (sin tree-sitter) se omiten para evitar falsos positivos.
 - El **glosario de entidades** lo aporta y cura el proyecto; el bootstrap inicial es una
   propuesta, no una verdad absoluta.
+
+---
+
+## 18. Evolución post-v1.1: capas contextuales y mejoras (2026-07-24)
+
+Sobre el núcleo v1.1 (Fases 0–5) se añadieron tres **capas contextuales** y un conjunto de
+mejoras, todas fieles a §3 (portable, degradación elegante, procedencia, determinismo,
+presupuesto de tokens, trabajo pesado fuera del contexto del LLM). El estado detallado por
+mejora vive en `MEJORAS-FUTURAS.md`.
+
+### 18.1 Capa 1 · Temporal / Git (`git_layer.py`)
+
+Señales de historia que el AST no ve, derivadas de `.git` (caché regenerable, **nunca**
+fuente de verdad):
+
+- **Co-cambio** (`co_changes_with`, INFERRED): acoplamiento por co-edición. A nivel ARCHIVO
+  (historia completa vía `git log --numstat`) y a nivel SÍMBOLO (por blame).
+- **Churn, fragilidad (`fix`), autores, edad, top-commits** por nodo → consultas `history`,
+  `working-set`, `impact` (blast radius = llamadas ∪ co-cambio).
+- **Etiquetas de confianza** (`confidence.py`): EXTRACTED / INFERRED / AMBIGUOUS derivadas al
+  vuelo de (tipo, provenance, confidence).
+- **Escala (M6):** el `git blame` por símbolo paraleliza la LECTURA (pool de hilos acotado)
+  manteniendo la ESCRITURA a SQLite en el hilo principal (WAL a salvo). Determinista.
+
+### 18.2 Capa 2 · Verdad de runtime (`runtime/`)
+
+Parsea artefactos que el proyecto YA produce (no ejecuta nada):
+
+- **Cobertura** (`coverage.xml`) → `covered` / `coverage_ratio` por símbolo y archivo.
+- **`tested_by`** código→test: archivo→archivo por imports (INFERRED); y **símbolo→test**
+  (M2) desde CONTEXTOS de cobertura (`coverage json --show-contexts`), EXTRACTED.
+- **JUnit** → `last_test_status` por símbolo de test.
+- **LSP efímero** (`runtime --lsp`): `diagnostics` + `resolved_type` por símbolo y tipos por
+  **parámetro** (M4b). **Multi-lenguaje** (M4): Python (pyright/pylsp/jedi) y TS/JS
+  (`typescript-language-server`); pyright da la mejor calidad de tipos.
+
+### 18.3 Capa 3 · Compilador de contexto local (`context_compiler.py`)
+
+Un LLM pequeño y local (Ollama efímero) que **DESTILA y PLANIFICA, nunca razona la respuesta
+final** (guardarraíl de honestidad). Todo con **fallback determinista** si no hay Ollama:
+
+- **`digest`**: destila un log gigante (test/build) a lo esencial ligado a nodos. Formatos
+  lineales (traceback/pytest/mypy) y AGRUPADOS (M5: eslint stylish, jest, go test, tsc).
+- **Narrativa de co-cambio** (M3): el "por qué" de cada arista `co_changes_with` (archivo y
+  símbolo), cacheado por `content_hash`.
+- **Rerank** (M7): determinista por defecto (léxico + estructura + churn); con **LLM local
+  opt-in** (`--rerank-llm`): presupuesto de latencia estricto + caché + fallback.
+
+### 18.4 Co-cambio cross-project por símbolo (M8)
+
+Muy conservador: dos símbolos de proyectos distintos solo se enlazan si (1) comparten repo
+git, (2) superan umbrales más estrictos y (3) están CONFIRMADOS por `cross_link` (endpoints
+compartidos). Evita falsos positivos entre proyectos.
+
+### 18.5 M1 · Co-cambio por historia completa — prototipo medido y decisión de diseño
+
+**Problema.** El co-cambio por símbolo se deriva del BLAME, que atribuye cada línea a su
+ÚLTIMO commit: es un acoplamiento "de superficie". Si dos símbolos se co-editaron en commits
+viejos cuyas líneas luego se reescribieron, la señal se pierde (el de archivo sí usa historia
+completa).
+
+**Prototipo (`prototype_m1_history_cochange.py`, NO integrado).** Recorre el diff de cada
+commit (`git show --unified=0`) y re-extrae los símbolos de esa versión (AST, caché por
+(sha,path)) para contar co-ocurrencias reales. Su fin es MEDIR el coste antes de integrar
+(§10, §12), no ser código de producción:
+
+- **Beneficio confirmado:** capta el acoplamiento que el blame pierde (test dedicado).
+- **Coste medido:** ~14× (20 archivos × 30 commits) y ~23× (50 × 50) frente al `sync` con
+  blame. Domina `git show` + re-AST por (commit, archivo): O(commits × archivos).
+
+**Decisión (elección consciente).** En vez de pagar ese coste GLOBAL en cada `sync`, se
+integró la ruta **ON-DEMAND y ACOTADA** (`deep_history.py`), fiel a §3.3/§3.4 (el trabajo
+pesado fuera del hot path; pagar solo por lo que se consulta):
+
+- **A · `impact <símbolo> --deep`:** historia completa restringida al historial del ARCHIVO
+  del símbolo (`git log --follow -- <archivo>`) → coste proporcional a ese archivo, no al
+  repo. CLI y MCP (`deep:true`; resuelve las raíces desde el meta `git_roots`). Marca
+  `[NUEVO vs blame]` lo que el co-cambio del sync no vio.
+- **B · disparador heurístico:** si un símbolo vive en un archivo de churn alto (historia
+  completa) pero sin co-cambios registrados, `impact` sugiere `--deep`. Honesto: no "detecta"
+  lo que el blame no computó (imposible en global), reconoce la FORMA de una pérdida probable.
+- **C · narrativa:** el "por qué" del acoplamiento profundo con el LLM local si ya está
+  activo (sin cold-start sorpresa), si no heurístico (Capa 3). Degradación elegante.
+
+El **full-repo siempre-encendido** queda diferido; si alguna vez se integra, el camino es un
+acumulador incremental por SHA + tope de profundidad — y el prototipo es la evidencia que lo
+justificaría (o no) con datos.
+
+### 18.6 Estado actual
+
+- **Herramientas MCP (10):** `overview`, `search`, `neighbors`, `get`, `decisions`, `stats`,
+  `working_set`, `impact` (+ `deep`), `history`, `digest_log`.
+- **CLI adicional:** `runtime [--lsp]`, `analyze`, `report`, `compile [--llm]`,
+  `digest [--llm]`, `graph [--level symbol]`, `doctor`, `setup-ollama`.
+- **`memorygraf doctor`:** diagnostica e instala las dependencias opcionales (parsers,
+  neural, watch, lsp, **pyright**) según el entorno (pipx/venv, plataforma/WSL/distro), con
+  degradación; espejo "en vivo" del instalador.
+- **Suite:** 105 tests (`python -m unittest discover -s tests`), sin dependencias.

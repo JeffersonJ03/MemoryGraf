@@ -82,18 +82,28 @@ caché (`memorygraf search "<consulta>" --rerank-llm`; `--rerank` es la versión
 
 ## Cómo funciona
 
-1. **Indexa** el código a un grafo: nodos `file`/`symbol`/`entity`/`decision`/…, aristas
+MemoryGraf construye un grafo **por capas**; cada una degrada con elegancia si le falta una
+dependencia, y todas dejan **procedencia** (`archivo:línea`) y respetan un presupuesto de tokens.
+
+1. **Grafo base.** Nodos `file`/`symbol`/`entity`/`decision`/`convention` y aristas
    `defines`/`imports`/`calls` (intra y cross-archivo)/`implements`/`references`/`models`.
    Python vía `ast` (exacto); JS/TS/TSX vía tree-sitter. Incremental por hash, con
-   reconciliación de símbolos que cambian de archivo.
-2. **Enriquece**: decisiones y convenciones desde la documentación markdown; entidades de
-   dominio desde un glosario que aporta el proyecto; resúmenes; embeddings.
-3. **Expone** un servidor MCP (y CLI) con 6 herramientas que devuelven texto compacto
-   **con procedencia** (`archivo:línea`) y presupuesto de tokens.
+   reconciliación de símbolos movidos y enlace cross-project por endpoints HTTP.
+2. **Conocimiento de dominio.** Decisiones y convenciones desde markdown (`governs`);
+   entidades desde un glosario del proyecto (`models`); resúmenes (heurístico/Ollama/API) y
+   embeddings (TF-IDF/model2vec/API) para búsqueda híbrida (RRF).
+3. **Capa temporal (Git).** Co-cambio (acoplamiento oculto que el call-graph no ve), churn,
+   fragilidad, autores y el "por qué" de cada cambio → `history`, `working-set`, `impact`.
+4. **Verdad de runtime.** Cobertura por símbolo, `tested_by` código↔test (hasta **símbolo→test**
+   por contextos de cobertura), estado del último test, y diagnósticos + tipos vía **LSP**
+   (`runtime --lsp`, multi-lenguaje Python + TS/JS).
+5. **Compilador de contexto local.** Un LLM pequeño y local (Ollama, opcional) que **destila**
+   logs gigantes (`digest`), **narra** el co-cambio y **reordena** búsquedas — siempre con
+   fallback determinista.
 
-La fuente de verdad es un SQLite legible + export JSON; el índice vectorial es caché
-regenerable. Todo es portable y agnóstico del LLM. Ver [`DESIGN.md`](DESIGN.md) para la
-arquitectura completa y [`ONBOARDING.md`](ONBOARDING.md) para la guía de arranque.
+La fuente de verdad es un SQLite legible + export JSON; los índices (vectorial, Git, runtime)
+son caché regenerable. Todo es portable y agnóstico del LLM. Ver [`DESIGN.md`](DESIGN.md)
+(§18 para las capas contextuales) y [`ONBOARDING.md`](ONBOARDING.md) para el arranque.
 
 ## Herramientas MCP
 
@@ -103,6 +113,15 @@ arquitectura completa y [`ONBOARDING.md`](ONBOARDING.md) para la guía de arranq
 `impact` predice el "blast radius" (llamadas ∪ co-cambio). Con `--deep` (CLI) o `deep:true`
 (MCP) añade el co-cambio por **historia completa** acotado al archivo, que capta acoplamiento
 que el blame pierde; si un símbolo está muy tocado pero sin co-cambios, `impact` lo sugiere.
+
+## CLI (mismas capacidades, también sin IA)
+
+- **Consulta:** `overview` · `search [--rerank | --rerank-llm]` · `neighbors` · `get` ·
+  `decisions` · `stats` · `working-set` · `impact [--deep]` · `history` · `graph [--level symbol]`.
+- **Mantenimiento:** `init` · `sync` · `index` · `summarize` · `embed` · `runtime [--lsp]` ·
+  `compile [--llm]` · `digest [--llm]` · `analyze` · `report` · `watch` · `export`.
+- **Setup:** `install claude` / `mcp-config` · `doctor` (dependencias opcionales) ·
+  `setup-ollama` (LLM local).
 
 ## Desarrollo
 
