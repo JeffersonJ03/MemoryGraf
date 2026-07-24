@@ -57,9 +57,20 @@ def main(argv=None):
     ap.add_argument("--db", help="Ruta a la BD (por defecto: junto al config)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("init", help="Inicializa .memorygraf en el proyecto")
-    p.add_argument("--name"); p.add_argument("--project", action="append", default=[])
-    p.add_argument("--dir", default=".")
+    p = sub.add_parser(
+        "init", help="Inicializa .memorygraf en el proyecto",
+        description="Inicializa .memorygraf/ (config + grafo) en el proyecto.",
+        epilog=(
+            "Ejemplos:\n"
+            "  memorygraf init\n"
+            "  memorygraf init --name sistema --project . "
+            "--project \"/ruta/a/otro-repo\""),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--name", help="Nombre del grafo/sistema (def: nombre de la carpeta)")
+    p.add_argument("--project", action="append", default=[],
+                   help="Raíz de un proyecto a indexar. Repite la opción para un "
+                        "sistema multi-repo con enlace cross-project (def: .)")
+    p.add_argument("--dir", default=".", help="Dónde crear .memorygraf/ (def: directorio actual)")
     sub.add_parser("mcp", help="Lanza el servidor MCP (stdio)")
     sub.add_parser("mcp-config", help="Imprime el JSON de MCP para pegar en tu cliente")
     p = sub.add_parser("install", help="Registra el MCP en un cliente")
@@ -81,15 +92,20 @@ def main(argv=None):
     p.add_argument("--install", nargs="?", const="all", default=None,
                    help="Instala sin preguntar: 'all' o claves por coma (p.ej. neural,lsp)")
 
-    sub.add_parser("index")
-    sub.add_parser("stats")
-    p = sub.add_parser("overview"); p.add_argument("--scope"); p.add_argument("--budget", type=int, default=1500)
-    p = sub.add_parser("search"); p.add_argument("query"); p.add_argument("--types"); p.add_argument("--budget", type=int, default=800)
+    sub.add_parser("index", help="Solo indexa el grafo base (símbolos/llamadas/imports)")
+    sub.add_parser("stats", help="Métricas del grafo: nodos/aristas por tipo y proyecto")
+    p = sub.add_parser("overview", help="Panorama del proyecto para orientarse (respeta presupuesto)")
+    p.add_argument("--scope"); p.add_argument("--budget", type=int, default=1500)
+    p = sub.add_parser("search", help="Búsqueda híbrida (semántica + léxica) en el grafo")
+    p.add_argument("query"); p.add_argument("--types"); p.add_argument("--budget", type=int, default=800)
     p.add_argument("--rerank", action="store_true", help="Reordena por relevancia (determinista, local)")
     p.add_argument("--rerank-llm", action="store_true", help="Reordena con LLM local (Ollama; latencia acotada + fallback)")
-    p = sub.add_parser("neighbors"); p.add_argument("node_id"); p.add_argument("--types"); p.add_argument("--budget", type=int, default=800)
-    p = sub.add_parser("get"); p.add_argument("node_id")
-    p = sub.add_parser("decisions"); p.add_argument("topic", nargs="?"); p.add_argument("--budget", type=int, default=1200)
+    p = sub.add_parser("neighbors", help="Vecinos de un nodo (relaciones entrantes/salientes)")
+    p.add_argument("node_id"); p.add_argument("--types"); p.add_argument("--budget", type=int, default=800)
+    p = sub.add_parser("get", help="Muestra un nodo por su id (detalle + procedencia)")
+    p.add_argument("node_id")
+    p = sub.add_parser("decisions", help="Decisiones y convenciones del proyecto (opcional: por tema)")
+    p.add_argument("topic", nargs="?"); p.add_argument("--budget", type=int, default=1200)
     # CAPA 1 · Temporal/Git
     p = sub.add_parser("working-set", help="Qué se está tocando ahora (Git)")
     p.add_argument("--budget", type=int, default=800); p.add_argument("--limit", type=int, default=20)
@@ -113,11 +129,15 @@ def main(argv=None):
     p.add_argument("--limit", type=int, default=10)
     p = sub.add_parser("report", help="Genera GRAPH_REPORT.md (reporte markdown del grafo)")
     p.add_argument("--out")
-    p = sub.add_parser("summarize"); p.add_argument("--rebuild", action="store_true"); p.add_argument("--all", action="store_true")
-    p = sub.add_parser("embed"); p.add_argument("--rebuild", action="store_true")
-    sub.add_parser("sync")
-    p = sub.add_parser("watch"); p.add_argument("--interval", type=float, default=3.0)
-    p = sub.add_parser("export"); p.add_argument("--out")
+    p = sub.add_parser("summarize", help="Genera resúmenes de los nodos (heurístico/Ollama/API)")
+    p.add_argument("--rebuild", action="store_true"); p.add_argument("--all", action="store_true")
+    p = sub.add_parser("embed", help="(Re)genera los embeddings para la búsqueda semántica")
+    p.add_argument("--rebuild", action="store_true")
+    sub.add_parser("sync", help="Construye/actualiza el grafo completo (incremental)")
+    p = sub.add_parser("watch", help="Mantiene el grafo al día automáticamente al cambiar el código")
+    p.add_argument("--interval", type=float, default=3.0)
+    p = sub.add_parser("export", help="Exporta el grafo a JSON")
+    p.add_argument("--out")
     p = sub.add_parser("graph", help="Genera un HTML visual del grafo (lo que ve la IA)")
     p.add_argument("--out"); p.add_argument("--level", choices=["file", "symbol"], default="file")
     p.add_argument("--scope"); p.add_argument("--max", type=int, default=400)
