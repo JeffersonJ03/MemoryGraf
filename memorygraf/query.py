@@ -34,6 +34,13 @@ def _runtime_line(rt: dict) -> str:
         parts.append(f"último test: {rt['last_test_status']}")
     if rt.get("resolved_type"):
         parts.append(f"tipo: {rt['resolved_type']}")
+    if rt.get("param_types"):
+        try:
+            pt = _json.loads(rt["param_types"])
+            if pt:
+                parts.append("params: " + ", ".join(f"{k}: {v}" for k, v in pt.items()))
+        except (ValueError, TypeError):
+            pass
     diags = rt.get("diagnostics")
     if diags:
         try:

@@ -1237,6 +1237,31 @@ class TestRuntimeLsp(Base):
         self.assertEqual(r["reason"], "sin archivos soportados")
         store.close()
 
+    def test_param_offsets_def_and_usage(self):
+        # M4b: cada param trae posición de DEFINICIÓN y de PRIMER USO (candidatas de hover)
+        from memorygraf.extractors import python_ast as pa
+        po = pa.param_offsets("def suma(a: int, b: int) -> int:\n    return a + b\n")
+        self.assertEqual([n for n, _ in po["suma"]], ["a", "b"])
+        a_pos = dict(po["suma"])["a"]
+        self.assertIn((0, 9), a_pos)                       # definición en la firma
+        self.assertTrue(any(line == 1 for line, _ in a_pos))   # uso en el cuerpo
+
+    def test_param_offsets_skips_self(self):
+        from memorygraf.extractors import python_ast as pa
+        po = pa.param_offsets("class C:\n    def m(self, x):\n        return x\n")
+        self.assertEqual([n for n, _ in po["C.m"]], ["x"])   # self omitido
+
+    def test_param_types_rendered_in_get(self):
+        # render determinista (sin LSP): inyecta param_types y verifica get()
+        import json
+        self.write("a.py", "def f(a, b):\n    return a\n")
+        store, _ = self.index()
+        store.runtime_node_update("proj/a.py::f",
+                                  param_types=json.dumps({"a": "int", "b": "str"}))
+        store.commit()
+        self.assertIn("params: a: int, b: str", Query(store).get("proj/a.py::f"))
+        store.close()
+
 
 class TestBenchmark(Base):
     """El benchmark corre, produce números coherentes y EXCLUYE lo ilustrativo del total.
@@ -1544,6 +1569,20 @@ class TestLspResolvedType(Base):
         # anti-staleness: re-correr limpia y repuebla, no acumula basura
         r2 = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
         self.assertTrue(r2["enabled"])
+        store.close()
+
+    def test_hover_populates_param_types(self):
+        # M4b: tipos por parámetro (best-effort; la calidad depende del servidor LSP).
+        import json
+        from memorygraf.runtime import lsp
+        self.write("typed.py", "def suma(a: int, b: int) -> int:\n    return a + b\n")
+        store, _ = self.index()
+        lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
+        pt = (store.runtime_node_get("proj/typed.py::suma") or {}).get("param_types")
+        # si el servidor resolvió params, el tipo de 'a' menciona int (pyright: limpio;
+        # jedi: vía uso, más verboso). Si no resolvió, no se exige (degradación).
+        if pt:
+            self.assertIn("int", json.loads(pt).get("a", ""))
         store.close()
 
     def test_parse_hover_and_position_are_pure(self):

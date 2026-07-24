@@ -30,7 +30,7 @@ verificación en vivo antes de dar por buena.
 | ~~M6~~ | ✅ **Implementado** · Escala: `git blame` **paralelo** (lectura) en repos grandes | Medio | Medio | Medio |
 | ~~M7~~ | ✅ **Implementado** · Narrativa/rerank con **LLM local** opt-in (Ollama) | Bajo | Bajo | Bajo |
 | ~~M8~~ | ✅ **Implementado** · Co-cambio **cross-project** por símbolo, gateado y conservador | Bajo | Medio | Medio |
-| M4b | `resolved_type` de **params/variables individuales** (hover por offset) — pendiente de M4 | Bajo | Medio | Medio |
+| ~~M4b~~ | ✅ **Implementado** (params Python) · `resolved_type` de **params individuales** (hover por offset) | Bajo | Medio | Medio |
 
 ---
 
@@ -314,14 +314,29 @@ distintas que cambian juntos (monorepo lógico) necesitaban un enlace honesto y 
 
 ---
 
-## M4b · `resolved_type` de params/variables individuales  (pendiente de M4)
+## M4b · `resolved_type` de params individuales  ✅ IMPLEMENTADO (params Python)
 
-**Contexto.** M4 dejó el multi-lenguaje. Sigue pendiente el punto 3 de su plan: tipos de
-**parámetros y variables individuales**, no solo la firma de la definición. Hoy
-`_collect_types` hace UN hover por símbolo (en su identificador de definición) y guarda un
-único `resolved_type`. Para código bien tipado la firma YA trae los tipos de params/retorno
-(p.ej. `def suma(a: int, b: int) -> int`), así que el valor NUEVO se concentra en
-**variables locales inferidas** y en **params de código sin anotaciones**.
+**Estado (2026-07-23).** Hecho para **parámetros** (Python). `python_ast.param_offsets(source)`
+devuelve, por función/método, posiciones candidatas de cada param: su DEFINICIÓN en la firma
+y su PRIMER USO en el cuerpo. `runtime/lsp.py` (proveedor por lenguaje en `_LANGUAGES`) hace
+hover en esas posiciones (def primero, uso como respaldo) y guarda `param_types` (JSON) en
+`runtime_node` (columna nueva + migración idempotente `ALTER TABLE`). `query.get()` lo
+renderiza (`params: a: int, ...`). Respeta el presupuesto de hover y el toggle
+`runtime.param_types`. Tests: offsets (def+uso, salta self), render determinista, y E2E
+guardado.
+
+**Veredicto honesto (medido).** El mecanismo funciona, pero: (1) para código **anotado** el
+tipo del param YA está en la firma (`resolved_type`), así que `param_types` es en buena parte
+**redundante**; (2) el valor NUEVO (params **inferidos** sin anotación) depende del servidor:
+**pyright** resuelve en la definición y da un tipo limpio (`(parameter) a: int`); **pylsp/jedi**
+resuelve en el uso y devuelve algo más verboso (docstring del tipo) o nada. Es decir: útil
+sobre todo con pyright; con jedi el retorno es ruidoso. **Variables locales** (no params)
+quedan fuera (muchísimas, valor marginal). **Pendiente opcional:** offsets de params para
+TS/JS (hoy solo Python tiene proveedor).
+
+**Contexto.** M4 dejó el multi-lenguaje. Faltaba el punto 3 de su plan: tipos de parámetros
+individuales, no solo la firma. `_collect_types` hacía UN hover por símbolo (definición) y
+guardaba un único `resolved_type`.
 
 **Plan de implementación.**
 1. Extractores (`python_ast.py`, `js_ts.py`, `ts_treesitter.py`): capturar y persistir los

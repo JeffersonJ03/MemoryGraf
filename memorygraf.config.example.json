@@ -6,7 +6,7 @@
   ],
   "excludes": [],
 
-  "_runtime_comment": "Opcional (autodescubre en reports/, coverage/, ...). 'memorygraf runtime' ingiere coverage.xml (cobertura por símbolo) y junit.xml (estado de tests). Para tested_by SÍMBOLO→test, genera coverage.json con contextos: pytest --cov-context=test && coverage json --show-contexts.",
+  "_runtime_comment": "Opcional (autodescubre en reports/, coverage/, ...). 'memorygraf runtime' ingiere coverage.xml (cobertura por símbolo) y junit.xml (estado de tests). Para tested_by SÍMBOLO→test, genera coverage.json con contextos: pytest --cov-context=test && coverage json --show-contexts. Con --lsp: diagnósticos + resolved_type; 'param_types':false desactiva el hover por parámetro (M4b, mejor con pyright).",
 
   "_git_comment": "Opcional. Ajustes de la capa Git. 'blame_workers': hilos para el 'git blame' (I/O-bound) en repos grandes; 0=auto (min(8, cpu+2)), 1=secuencial. Co-cambio CROSS-PROJECT por símbolo (M8, muy conservador): solo enlaza símbolos de proyectos que comparten repo git, superando umbrales estrictos (cochange_cross_min, cochange_cross_threshold) y CONFIRMADOS por cross_link/endpoints (cochange_cross_confirm=true). Pon cochange_cross_confirm=false para permitirlo sin endpoints compartidos (solo umbral).",
   "git": {

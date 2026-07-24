@@ -121,8 +121,9 @@ CREATE TABLE IF NOT EXISTS runtime_node (
     covered INTEGER,           -- 1/0/NULL: ¿alguna línea del span cubierta?
     coverage_ratio REAL,       -- fracción de líneas cubiertas del span
     last_test_status TEXT,     -- passed | failed | error | skipped
-    resolved_type TEXT,        -- tipo resuelto por LSP (hover)
-    diagnostics TEXT           -- JSON: [{severity, message, line}]
+    resolved_type TEXT,        -- tipo resuelto por LSP (hover) de la definición
+    diagnostics TEXT,          -- JSON: [{severity, message, line}]
+    param_types TEXT           -- JSON: {param: tipo} resueltos por LSP (M4b)
 );
 """
 
@@ -139,8 +140,15 @@ class Store:
         except sqlite3.OperationalError:
             pass
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.fts = self._init_fts()
         self.conn.commit()
+
+    def _migrate(self):
+        """Migraciones idempotentes para BDs creadas por versiones anteriores."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(runtime_node)")}
+        if "param_types" not in cols:      # M4b: tipos por parámetro (LSP)
+            self.conn.execute("ALTER TABLE runtime_node ADD COLUMN param_types TEXT")
 
     def _init_fts(self) -> bool:
         try:
@@ -408,7 +416,7 @@ class Store:
 
     # --- CAPA 2 · verdad de runtime (caché regenerable desde tests/cobertura/LSP) ---
     _RUNTIME_COLS = ("covered", "coverage_ratio", "last_test_status",
-                     "resolved_type", "diagnostics")
+                     "resolved_type", "diagnostics", "param_types")
 
     def runtime_node_get(self, node_id: str) -> Optional[dict]:
         row = self.conn.execute(

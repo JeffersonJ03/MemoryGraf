@@ -30,6 +30,52 @@ def _signature(node) -> str:
         return node.name
 
 
+def param_offsets(source: str) -> dict:
+    """{qualname: [(param, [(line0, char0), ...]), ...]} de parámetros por función/método (M4b).
+
+    Mismos qualnames que `extract()` (top-level `f`, métodos `Clase.m`). Salta self/cls.
+    Cada param trae VARIAS posiciones candidatas (0-based, estilo LSP): su DEFINICIÓN en la
+    firma (pyright resuelve ahí) y su PRIMER USO en el cuerpo (jedi/pylsp resuelve ahí). El
+    LSP prueba en orden. Best-effort: si el fuente no parsea, {}."""
+    if source[:1] == "﻿":
+        source = source[1:]
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+
+    def _params(fn):
+        a = fn.args
+        allargs = list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs)
+        if a.vararg:
+            allargs.append(a.vararg)
+        if a.kwarg:
+            allargs.append(a.kwarg)
+        names = [arg.arg for arg in allargs if arg.arg not in ("self", "cls")]
+        pos = {arg.arg: [(arg.lineno - 1, arg.col_offset)]
+               for arg in allargs if arg.arg in names}
+        # primer USO (Load) de cada param dentro del cuerpo -> posición de respaldo
+        for n in ast.walk(fn):
+            if (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                    and n.id in pos and len(pos[n.id]) == 1):
+                pos[n.id].append((n.lineno - 1, n.col_offset))
+        return [(name, pos[name]) for name in names]
+
+    out: dict = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            p = _params(node)
+            if p:
+                out[node.name] = p
+        elif isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    p = _params(sub)
+                    if p:
+                        out[f"{node.name}.{sub.name}"] = p
+    return out
+
+
 def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list, list, dict]:
     nodes, edges, raw_imports = [], [], []
     fid = file_id(rel_path)

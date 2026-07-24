@@ -25,6 +25,8 @@ import subprocess
 import threading
 import time
 
+from ..extractors import python_ast
+
 # Registro POR LENGUAJE (M4). Cada lenguaje declara:
 #   - servers : candidatos (binario, [args stdio]); se usa el primero disponible
 #   - ext_lang: extensión -> languageId LSP (tsserver distingue ts/tsx/js/jsx)
@@ -35,6 +37,7 @@ _LANGUAGES = [
         "servers": [("pyright-langserver", ["--stdio"]), ("pylsp", []),
                     ("jedi-language-server", [])],
         "ext_lang": {".py": "python"},
+        "params": python_ast.param_offsets,   # M4b: offsets de params para hover por posición
     },
     {
         "name": "typescript",
@@ -135,14 +138,16 @@ def _parse_hover(result) -> str | None:
     return None
 
 
-def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None) -> int:
+def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None,
+                   param_provider=None) -> int:
     """Puebla `resolved_type` por símbolo vía hover (best-effort, con presupuesto).
 
     Dos pasadas: los servidores tipo jedi devuelven null en los PRIMEROS hovers
     (analizan en frío); una 2ª pasada reintenta los nulos con el server ya caliente.
 
-    NO limpia `resolved_type` (lo hace `sync` UNA vez): en multi-lenguaje cada lenguaje
-    solo AÑADE los tipos de SUS archivos (los del `opened` que recibe).
+    M4b: si `param_provider` está (offsets de params del lenguaje), además hace hover por
+    PARÁMETRO y guarda `param_types` (JSON) por símbolo. NO limpia (lo hace `sync` UNA vez):
+    en multi-lenguaje cada lenguaje solo AÑADE los tipos de SUS archivos.
     """
     syms_by_file: dict[str, list] = {}
     for s in store.all_nodes(types=["symbol"]):
@@ -150,6 +155,7 @@ def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None) ->
             syms_by_file.setdefault(s["path"], []).append(s)
     timeout = float(rt.get("hover_timeout", 3))
     deadline = time.time() + float(rt.get("hover_budget", 30))
+    want_params = bool(param_provider) and rt.get("param_types", True)
     time.sleep(float(rt.get("hover_settle", 0.5)))     # warm-up del analizador
 
     def _hover(uri, line, char):
@@ -164,18 +170,38 @@ def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None) ->
         lines = file_lines.get(fid)
         if not lines:
             continue
+        params_by_qual = {}
+        if want_params:
+            try:
+                params_by_qual = param_provider("\n".join(lines)) or {}
+            except Exception:
+                params_by_qual = {}
         for sym in syms_by_file.get(fid, []):
             if time.time() > deadline:
                 return typed
             pos = _hover_position(lines, sym["span_start"], sym.get("name", ""))
-            if pos is None:
-                continue
-            t = _hover(uri, pos[0], pos[1])
-            if t:
-                store.runtime_node_update(sym["id"], resolved_type=t)
-                typed += 1
-            else:
-                pending.append((sym["id"], uri, pos[0], pos[1]))
+            if pos is not None:
+                t = _hover(uri, pos[0], pos[1])
+                if t:
+                    store.runtime_node_update(sym["id"], resolved_type=t)
+                    typed += 1
+                else:
+                    pending.append((sym["id"], uri, pos[0], pos[1]))
+            # M4b: tipo por parámetro (hover en el offset de cada param)
+            plist = params_by_qual.get(sym.get("name"))
+            if plist:
+                ptypes = {}
+                for pname, positions in plist:
+                    if time.time() > deadline:
+                        break
+                    for pline, pchar in positions:     # def (pyright) -> uso (jedi)
+                        pt = _hover(uri, pline, pchar + len(pname) // 2)
+                        if pt:
+                            ptypes[pname] = pt
+                            break
+                if ptypes:
+                    store.runtime_node_update(
+                        sym["id"], param_types=json.dumps(ptypes, ensure_ascii=False))
     for sym_id, uri, line, char in pending:   # 2ª pasada (server caliente)
         if time.time() > deadline:
             break
@@ -283,7 +309,7 @@ def _uri(path: str) -> str:
     return "file://" + os.path.abspath(path).replace("\\", "/")
 
 
-def _run_language(store, server, files, roots, rt, log) -> tuple:
+def _run_language(store, server, files, roots, rt, log, param_provider=None) -> tuple:
     """Ciclo LSP efímero para UN lenguaje: abre sus archivos, mapea diagnósticos y
     puebla tipos. Devuelve (archivos_abiertos, diagnósticos, tipos). Solo AÑADE al
     store (los `runtime_clear` los hace `sync` una vez, antes de todos los lenguajes)."""
@@ -337,7 +363,8 @@ def _run_language(store, server, files, roots, rt, log) -> tuple:
         typed = 0
         if rt.get("hover", True):
             try:
-                typed = _collect_types(store, client, opened, file_lines, rt, log)
+                typed = _collect_types(store, client, opened, file_lines, rt, log,
+                                       param_provider=param_provider)
             except Exception:
                 typed = 0
         return len(opened), total, typed
@@ -391,10 +418,12 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
     # limpia UNA vez: en multi-lenguaje cada lenguaje solo AÑADE sus resultados
     store.runtime_clear("diagnostics")
     store.runtime_clear("resolved_type")
+    store.runtime_clear("param_types")
     tot_files = tot_diags = tot_types = 0
     langs = []
     for spec, srv, files in runnable:
-        f, d, t = _run_language(store, srv, files, roots, rt, log)
+        f, d, t = _run_language(store, srv, files, roots, rt, log,
+                                param_provider=spec.get("params"))
         tot_files += f
         tot_diags += d
         tot_types += t
