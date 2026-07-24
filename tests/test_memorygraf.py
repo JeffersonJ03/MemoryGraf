@@ -695,6 +695,58 @@ class TestCrossProjectCochange(Base):
         store.close()
 
 
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestM1Prototype(_GitRepo, Base):
+    """M1 (PROTOTIPO, no integrado): co-cambio símbolo por HISTORIA COMPLETA capta lo que
+    el blame pierde. Valida el beneficio; el coste se mide aparte (documentado en backlog)."""
+
+    def test_finds_cochange_that_blame_misses(self):
+        import prototype_m1_history_cochange as m1
+        self._init_repo()
+        # c1 crea ambos, c2 edita ambos (co-ocurren 2 veces)...
+        self.write("a.py", "def fa():\n    v = 1\n    return v\n")
+        self.write("b.py", "def fb():\n    w = 1\n    return w\n")
+        self._commit("c1 crea ambos")
+        self.write("a.py", "def fa():\n    v = 2\n    return v\n")
+        self.write("b.py", "def fb():\n    w = 2\n    return w\n")
+        self._commit("c2 edita ambos")
+        # ...y luego se REESCRIBEN por completo (incl. la firma) -> el blame pierde c1/c2
+        self.write("a.py", "def fa(x):\n    return 100\n")
+        self._commit("c3 reescribe a")
+        self.write("b.py", "def fb(y):\n    return 200\n")
+        self._commit("c4 reescribe b")
+
+        store, _ = self.index()
+        self._sync_git(store)
+        sym_ids = {n["id"] for n in store.all_nodes(types=["symbol"])}
+        fa, fb = "proj/a.py::fa", "proj/b.py::fb"
+        # BLAME (enfoque actual) NO ve el acoplamiento (líneas viejas reescritas)
+        blame = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["type"] == EDGE_CO_CHANGES}
+        self.assertNotIn((fa, fb), blame)
+        # HISTORIA COMPLETA (prototipo) SÍ lo capta (co-ocurrieron en c1 y c2)
+        hist = m1.historical_symbol_cochange(self.proj, "proj", sym_ids)
+        self.assertGreaterEqual(hist.get((fa, fb), 0), 2)
+        store.close()
+
+    def test_deterministic(self):
+        import prototype_m1_history_cochange as m1
+        self._init_repo()
+        self.write("a.py", "def fa():\n    return 1\n")
+        self.write("b.py", "def fb():\n    return 1\n")
+        self._commit("c1")
+        self.write("a.py", "def fa():\n    return 2\n")
+        self.write("b.py", "def fb():\n    return 2\n")
+        self._commit("c2")
+        store, _ = self.index()
+        sym_ids = {n["id"] for n in store.all_nodes(types=["symbol"])}
+        r1 = m1.historical_symbol_cochange(self.proj, "proj", sym_ids)
+        r2 = m1.historical_symbol_cochange(self.proj, "proj", sym_ids)
+        self.assertEqual(r1, r2)                       # dos corridas -> mismas aristas
+        self.assertGreaterEqual(r1.get(("proj/a.py::fa", "proj/b.py::fb"), 0), 2)
+        store.close()
+
+
 class TestContextCompiler(Base):
     """CAPA 3 · Compilador local. Rutas heurísticas (offline, deterministas)."""
 

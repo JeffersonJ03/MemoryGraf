@@ -22,7 +22,7 @@ verificación en vivo antes de dar por buena.
 
 | # | Mejora | Valor | Riesgo | Esfuerzo |
 |---|---|---|---|---|
-| M1 | Co-cambio por símbolo con **historia completa** (diff, no solo blame) | Alto | Alto | Alto |
+| M1 | Co-cambio por símbolo con **historia completa** (diff, no solo blame) — 🔬 **prototipo medido** (integración pendiente) | Alto | Alto | Alto |
 | ~~M2~~ | ✅ **Implementado** · `tested_by` a nivel **símbolo→test** (contextos de cobertura) | Alto | Medio | Medio |
 | ~~M3~~ | ✅ **Implementado** · Narrar el "por qué" del co-cambio de **símbolos** | Medio | Bajo | Bajo |
 | ~~M4~~ | ✅ **Implementado** (multi-lenguaje TS/JS) · `resolved_type` + params/vars *(params/vars pend.)* | Medio | Medio | Medio |
@@ -35,6 +35,26 @@ verificación en vivo antes de dar por buena.
 ---
 
 ## M1 · Co-cambio por símbolo con historia completa
+
+**Estado (2026-07-23) — 🔬 PROTOTIPO MEDIDO (no integrado).** Prototipo en
+`prototype_m1_history_cochange.py` (raíz del repo, NO importado por el paquete). Sigue la
+opción (b): por cada commit, `git show --unified=0` para los rangos post-image + `git show
+<sha>:<path>` y **re-extracción AST** de esa versión, con caché por (sha,path). Los ids que
+produce el extractor ya son `{project}/{path}::{qn}`, así que casan con el grafo actual sin
+mapeo extra.
+
+- **Beneficio CONFIRMADO.** Test `TestM1Prototype.test_finds_cochange_that_blame_misses`:
+  dos funciones co-editadas en commits viejos y luego reescritas por completo → el prototipo
+  emite el par (cnt=2); el blame actual NO (aristas 0). Determinismo verificado.
+- **Coste MEDIDO (veredicto).** Frente al `sync` actual (blame): **~14x** (20 archivos ×
+  30 commits) y **~23x** (50 × 50). Domina el `git show`+re-AST por cada (commit, archivo).
+  Es O(commits × archivos-tocados), 1-2 órdenes de magnitud más caro que el blame.
+- **Recomendación:** NO integrar tal cual. Para integrarlo haría falta: (1) **acumulador
+  incremental por SHA** persistido (procesar solo commits nuevos cada sync — amortiza el
+  walk único), (2) **batching** de `git show`/AST, (3) **tope de profundidad** de historia.
+  El prototipo aísla el riesgo y da el dato para decidir: hoy el blame (M2/M3 ya entregados)
+  cubre el caso común; la historia completa solo compensa si aparece necesidad concreta de
+  acoplamiento "profundo" que el blame pierda.
 
 **Contexto.** Hoy el co-cambio por símbolo (`git_layer._rebuild_symbol_cochange`) se deriva
 del **blame**, que atribuye cada línea a su ÚLTIMO commit. Es un acoplamiento "de
