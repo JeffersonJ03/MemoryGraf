@@ -49,22 +49,57 @@ def _settings(config: dict | None) -> dict:
 # --------------------------------------------------------------------------- #
 # Cliente LLM local (reusa el ciclo de vida efímero de ollama.py)
 # --------------------------------------------------------------------------- #
-class _LocalLLM:
-    """Envuelve la generación local. `.available` indica si hay modelo servible."""
+def _api_chat(url: str, key: str, model: str, prompt: str,
+              max_tokens: int = 120, timeout: float = 60) -> str | None:
+    """Generación vía endpoint compatible con OpenAI (/v1/chat/completions). None si falla."""
+    import json as _json
+    import urllib.request
+    payload = _json.dumps({
+        "model": model, "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens, "temperature": 0.1}).encode()
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = _json.loads(r.read())
+        return (data["choices"][0]["message"]["content"] or "").strip()
+    except Exception:
+        return None
 
-    def __init__(self, url: str | None, model: str, keep_alive=None):
+
+class _LocalLLM:
+    """Envuelve la generación por LLM. `.available` indica si hay modelo servible. Soporta
+    Ollama local (`url`+`model`) o una API compatible con OpenAI (`api`=(url,key,model))."""
+
+    def __init__(self, url: str | None = None, model: str | None = None,
+                 keep_alive=None, api: tuple | None = None):
         self.url, self.model, self.keep_alive = url, model, keep_alive
-        self.available = bool(url)
-        self.name = f"ollama:{model}" if url else "heuristic"
+        self.api = api                       # (url, key, model) OpenAI-compatible, o None
+        self.available = bool(url or api)
+        self.name = (f"api:{api[2]}" if api else (f"ollama:{model}" if url else "heuristic"))
 
     def generate(self, prompt: str, num_predict: int = 120,
                  timeout: float | None = None) -> str | None:
+        if self.api:
+            return _api_chat(*self.api, prompt, max_tokens=num_predict,
+                             timeout=timeout or 60)
         if not self.url:
             return None
         kw = {"num_predict": num_predict, "keep_alive": self.keep_alive}
         if timeout is not None:      # presupuesto de latencia ESTRICTO (rerank en consulta)
             kw["timeout"] = timeout
         return _ollama.generate(self.url, self.model, prompt, **kw)
+
+
+def _api_settings(config: dict | None) -> tuple | None:
+    """(url, key, model) del LLM por API para el compilador, o None si falta URL/KEY.
+    La KEY vive SOLO en env (secreto); url/model pueden venir de la config o de env."""
+    api = (config or {}).get("compiler", {}).get("api") or {}
+    url = os.environ.get("MEMORYGRAF_LLM_URL") or api.get("url")
+    key = os.environ.get("MEMORYGRAF_LLM_KEY") or os.environ.get("MEMORYGRAF_SUMMARY_KEY")
+    model = (os.environ.get("MEMORYGRAF_LLM_MODEL") or api.get("model") or "gpt-4o-mini")
+    return (url, key, model) if url and key else None
 
 
 @contextmanager
@@ -75,6 +110,14 @@ def local_llm(config: dict | None, log=lambda m: None):
     s = _settings(config)
     if s["backend"] in ("off", "heuristic") or not s["enabled"]:
         yield _LocalLLM(None, s["model"])
+        return
+    if s["backend"] == "api":            # LLM vía API compatible con OpenAI
+        api = _api_settings(config)
+        if api:
+            yield _LocalLLM(api=api)
+        else:
+            log("compiler: backend=api sin URL/KEY (MEMORYGRAF_LLM_*); usando heurístico")
+            yield _LocalLLM(None, s["model"])
         return
     binary = _ollama.find_binary()
     url_cfg = (config or {}).get("compiler", {}).get("url") or _ollama.DEFAULT_URL

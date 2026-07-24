@@ -69,6 +69,12 @@ def main(argv=None):
     p.add_argument("--model", default=None, help="Modelo a usar (def: qwen2.5-coder:3b)")
     p.add_argument("--no-pull", action="store_true", help="No descargar el modelo ahora")
     p.add_argument("--no-config", action="store_true", help="No escribir el bloque 'summary' en la config")
+    p = sub.add_parser("setup-llm",
+                       help="Configura el motor LLM (ollama/api/heuristic) y su modelo (interactivo)")
+    p.add_argument("--engine", choices=["ollama", "api", "heuristic"],
+                   help="No interactivo: motor a configurar")
+    p.add_argument("--model", help="Modelo (nombre Ollama, ruta .gguf, o modelo de la API)")
+    p.add_argument("--url", help="URL del endpoint API (motor api) o de Ollama")
     p = sub.add_parser("doctor",
                        help="Reporta capacidades y (interactivo) instala las que falten")
     p.add_argument("--json", action="store_true", help="Salida legible por máquina (solo reporte)")
@@ -156,6 +162,14 @@ def main(argv=None):
             do_pull=not args.no_pull,
             write_config=not args.no_config,
             config_path=workspace.resolve_config_path(getattr(args, "config", None)),
+            log=lambda m: print(m, file=sys.stderr))
+        sys.exit(rc)
+
+    if args.cmd == "setup-llm":
+        from . import llm_setup
+        rc = llm_setup.run(
+            config_path=workspace.resolve_config_path(getattr(args, "config", None)),
+            engine=args.engine, model=args.model, url=args.url,
             log=lambda m: print(m, file=sys.stderr))
         sys.exit(rc)
 

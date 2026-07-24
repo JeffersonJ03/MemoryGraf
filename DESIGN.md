@@ -528,6 +528,12 @@ final** (guardarraíl de honestidad). Todo con **fallback determinista** si no h
 - **Rerank** (M7): determinista por defecto (léxico + estructura + churn); con **LLM local
   opt-in** (`--rerank-llm`): presupuesto de latencia estricto + caché + fallback.
 
+**Motor de LLM configurable (`setup-llm`).** Resúmenes y compilador aceptan tres motores con
+degradación: `heuristic` (offline), `ollama` (local; elige/descarga modelo o importa un GGUF)
+y `api` (endpoint compatible con OpenAI). `memorygraf setup-llm` los configura de forma
+interactiva y escribe la config; la API key vive solo en `MEMORYGRAF_LLM_KEY` (nunca en el
+archivo). Así el sistema es agnóstico del LLM también en la generación, no solo en el acceso.
+
 ### 18.4 Co-cambio cross-project por símbolo (M8)
 
 Muy conservador: dos símbolos de proyectos distintos solo se enlazan si (1) comparten repo

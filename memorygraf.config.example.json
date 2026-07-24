@@ -16,7 +16,9 @@
     "cochange_cross_threshold": 0.5
   },
 
-  "_summary_comment": "Opcional. backend: auto|heuristic|ollama|api. 'auto' usa Ollama si está instalado, si no, heurístico. Configúralo con: memorygraf setup-ollama",
+  "_llm_comment": "Motor+modelo del LLM para resúmenes y compilador. Lo más fácil: 'memorygraf setup-llm' (interactivo) elige motor y modelo y escribe estos bloques. Motores: heuristic (offline) · ollama (local: model) · api (endpoint compatible OpenAI: {url, model}; la KEY va en la env MEMORYGRAF_LLM_KEY, nunca en este archivo).",
+
+  "_summary_comment": "backend: auto|heuristic|ollama|api. 'auto' usa Ollama si está instalado, si no, heurístico.",
   "summary": {
     "backend": "auto",
     "ollama": {
@@ -26,7 +28,7 @@
     }
   },
 
-  "_compiler_comment": "Opcional (M7). Narrativa del 'por qué' del co-cambio. En el sync, 'auto' usa el HEURÍSTICO (barato, no arranca el modelo); pon backend='ollama' para narrativas del LLM local en cada sync, o hazlo on-demand con 'memorygraf compile --llm'. Rerank de búsqueda con LLM: 'memorygraf search <q> --rerank-llm' (latencia acotada + fallback determinista + caché).",
+  "_compiler_comment": "Opcional (M7). Narrativa del co-cambio + rerank. En el sync, 'auto' usa el HEURÍSTICO (barato); backend='ollama'/'api' para LLM en cada sync, o on-demand con 'memorygraf compile --llm' y 'memorygraf search <q> --rerank-llm' (latencia acotada + fallback + caché).",
   "compiler": {
     "backend": "auto"
   }

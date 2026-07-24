@@ -126,7 +126,12 @@ que el blame pierde; si un símbolo está muy tocado pero sin co-cambios, `impac
 - **Mantenimiento:** `init` · `sync` · `index` · `summarize` · `embed` · `runtime [--lsp]` ·
   `compile [--llm]` · `digest [--llm]` · `analyze` · `report` · `watch` · `export`.
 - **Setup:** `install claude` / `mcp-config` · `doctor` (dependencias opcionales) ·
-  `setup-ollama` (LLM local).
+  `setup-ollama` (instala Ollama) · **`setup-llm`** (elige motor+modelo de LLM, interactivo).
+
+`memorygraf setup-llm` configura el LLM de resúmenes y compilador de forma interactiva y
+escribe la config sola. Motores: **heuristic** (offline), **ollama** (local — elige/descarga
+un modelo, o importa un `.gguf` propio) o **api** (endpoint compatible con OpenAI: LM Studio,
+vLLM, llama.cpp server o nube; la API key va en `MEMORYGRAF_LLM_KEY`, nunca en el archivo).
 
 ## Desarrollo
 

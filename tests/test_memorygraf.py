@@ -949,6 +949,110 @@ class TestRerankLlm(Base):
         store.close()
 
 
+class TestLlmSetup(Base):
+    """`setup-llm`: configura motor (ollama/api/heuristic) + modelo en la config."""
+
+    def _cfg(self):
+        import json
+        p = os.path.join(self.tmp, "config.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"projects": [{"name": "p", "root": self.proj}]}, f)
+        return p
+
+    def _read(self, p):
+        import json
+        return json.load(open(p, encoding="utf-8"))
+
+    def test_configure_ollama(self):
+        from memorygraf import llm_setup
+        p = self._cfg()
+        self.assertEqual(llm_setup.configure(p, "ollama", model="llama3.2", log=lambda m: None), 0)
+        cfg = self._read(p)
+        self.assertEqual(cfg["summary"]["backend"], "ollama")
+        self.assertEqual(cfg["summary"]["ollama"]["model"], "llama3.2")
+        self.assertEqual(cfg["compiler"]["backend"], "ollama")
+        self.assertEqual(cfg["compiler"]["model"], "llama3.2")
+
+    def test_configure_api_writes_url_and_model(self):
+        from memorygraf import llm_setup
+        p = self._cfg()
+        rc = llm_setup.configure(p, "api", model="mm", url="http://h/v1/chat/completions",
+                                 log=lambda m: None)
+        self.assertEqual(rc, 0)
+        cfg = self._read(p)
+        self.assertEqual(cfg["summary"]["api"], {"url": "http://h/v1/chat/completions", "model": "mm"})
+        self.assertEqual(cfg["compiler"]["api"], {"url": "http://h/v1/chat/completions", "model": "mm"})
+
+    def test_configure_api_requires_url(self):
+        from memorygraf import llm_setup
+        self.assertEqual(llm_setup.configure(self._cfg(), "api", model="m", log=lambda m: None), 1)
+
+    def test_configure_heuristic(self):
+        from memorygraf import llm_setup
+        p = self._cfg()
+        llm_setup.configure(p, "heuristic", log=lambda m: None)
+        cfg = self._read(p)
+        self.assertEqual(cfg["summary"]["backend"], "heuristic")
+        self.assertEqual(cfg["compiler"]["backend"], "heuristic")
+
+    def test_configure_without_config_file(self):
+        from memorygraf import llm_setup
+        self.assertEqual(llm_setup.configure(os.path.join(self.tmp, "nope.json"),
+                                             "heuristic", log=lambda m: None), 1)
+
+    def test_run_heuristic_non_interactive(self):
+        from memorygraf import llm_setup
+        p = self._cfg()
+        self.assertEqual(llm_setup.run(p, engine="heuristic", log=lambda m: None), 0)
+        self.assertEqual(self._read(p)["compiler"]["backend"], "heuristic")
+
+    def test_interactive_api(self):
+        from memorygraf import llm_setup
+        answers = iter(["2", "http://h/v1", "mistral"])
+        eng, model, url = llm_setup._interactive("cfg", log=lambda m: None,
+                                                 ask=lambda _p: next(answers))
+        self.assertEqual((eng, url, model), ("api", "http://h/v1", "mistral"))
+
+    def test_interactive_cancel_on_bad_choice(self):
+        from memorygraf import llm_setup
+        eng, _m, _u = llm_setup._interactive("cfg", log=lambda m: None, ask=lambda _p: "x")
+        self.assertIsNone(eng)
+
+
+class TestCompilerApiBackend(Base):
+    """El compilador (digest/rerank/narrativa) también habla API compatible OpenAI (M7+)."""
+
+    def test_local_llm_api_backend_generates(self):
+        import unittest.mock as mock
+        from memorygraf import context_compiler as cc
+        cfg = {"compiler": {"backend": "api",
+                            "api": {"url": "http://h/v1/chat/completions", "model": "m"}}}
+        with mock.patch.dict(os.environ, {"MEMORYGRAF_LLM_KEY": "sk-test"}):
+            with cc.local_llm(cfg) as llm:
+                self.assertTrue(llm.available)
+                self.assertEqual(llm.name, "api:m")
+                with mock.patch.object(cc, "_api_chat", return_value="hola") as m:
+                    self.assertEqual(llm.generate("prompt"), "hola")
+                    m.assert_called_once()
+
+    def test_api_backend_without_key_degrades(self):
+        import unittest.mock as mock
+        from memorygraf import context_compiler as cc
+        cfg = {"compiler": {"backend": "api", "api": {"url": "http://h/v1", "model": "m"}}}
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with cc.local_llm(cfg) as llm:
+                self.assertFalse(llm.available)      # sin KEY -> degrada a heurístico
+
+    def test_summary_reads_api_from_config(self):
+        import unittest.mock as mock
+        from memorygraf import summarizer as sm
+        cfg = {"summary": {"backend": "api", "api": {"url": "http://y/v1", "model": "mm"}}}
+        with mock.patch.dict(os.environ, {}, clear=True):
+            s = sm._resolve_summary_settings(cfg)
+        self.assertEqual(s["api_url"], "http://y/v1")
+        self.assertEqual(s["api_model"], "mm")
+
+
 @unittest.skipUnless(_git_available(), "git no disponible")
 class TestCompilerCochange(_GitRepo, Base):
     """Narrativa del 'por qué' del co-cambio (heurística) + surfacing en impact."""

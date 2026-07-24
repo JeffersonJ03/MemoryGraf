@@ -226,6 +226,7 @@ def _resolve_summary_settings(config: dict | None) -> dict:
     """
     cfg = (config or {}).get("summary") or {}
     oll = cfg.get("ollama") or {}
+    api = cfg.get("api") or {}
     env = os.environ.get
     return {
         "backend": (env("MEMORYGRAF_SUMMARY_BACKEND") or cfg.get("backend") or "auto").lower(),
@@ -234,9 +235,11 @@ def _resolve_summary_settings(config: dict | None) -> dict:
         "manage": bool(oll.get("manage", True)),
         "auto_pull": bool(oll.get("auto_pull", False)),
         "keep_alive": oll.get("keep_alive"),  # None => default de Ollama
-        "api_url": env("MEMORYGRAF_SUMMARY_URL"),
-        "api_key": env("MEMORYGRAF_SUMMARY_KEY"),
-        "api_model": env("MEMORYGRAF_SUMMARY_MODEL") or "gpt-4o-mini",
+        # API compatible OpenAI: url/model de config o env; KEY solo por env (secreto).
+        "api_url": env("MEMORYGRAF_SUMMARY_URL") or env("MEMORYGRAF_LLM_URL") or api.get("url"),
+        "api_key": env("MEMORYGRAF_SUMMARY_KEY") or env("MEMORYGRAF_LLM_KEY"),
+        "api_model": (env("MEMORYGRAF_SUMMARY_MODEL") or env("MEMORYGRAF_LLM_MODEL")
+                      or api.get("model") or "gpt-4o-mini"),
     }
 
 
