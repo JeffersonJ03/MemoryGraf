@@ -27,6 +27,11 @@ git clone <este-repo> memorygraf && cd memorygraf
 
 Deja disponible el comando **`memorygraf`** (vía `pipx` si está, o un venv local).
 
+> **Estado de plataformas (honesto).** Validado end-to-end en **Linux / WSL**. El núcleo es
+> cross-platform por diseño (solo stdlib) y hay soporte específico para Windows/macOS
+> (instaladores, rutas, `setup-ollama` con winget/brew), pero **Windows nativo y macOS aún no
+> están probados end-to-end**. Ver `E2E-INTEGRATION-TEST.md` y `MEJORAS-FUTURAS.md` §9.
+
 ## Uso en cualquier proyecto
 
 ```bash
