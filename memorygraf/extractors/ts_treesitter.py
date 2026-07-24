@@ -41,6 +41,108 @@ def _parser(lang: str):
     return get_parser(lang)
 
 
+def param_offsets(source: str, ext: str | None = None) -> dict:
+    """{qualname: [(param, [(line0, char0)]), ...]} de parámetros por función/método (M4b, TS/JS).
+
+    Mismos qualnames que `extract()` (top-level `f`, métodos `Clase.m`, arrow asignada a var).
+    Posición 0-based (estilo LSP) del identificador del parámetro, para hover por posición
+    (typescript-language-server resuelve el tipo en la definición). Salta `this` y destructuring
+    (sin un único nombre). Best-effort: sin tree-sitter o si no parsea, {}."""
+    if not available():
+        return {}
+    lang = _LANG_BY_EXT.get((ext or "ts").lower(), "typescript")
+    src = source.encode("utf-8", "replace")
+    try:
+        root = _parser(lang).parse(src).root_node
+    except Exception:
+        return {}
+
+    def text(n):
+        return src[n.start_byte:n.end_byte].decode("utf-8", "replace")
+
+    def name_of(n):
+        f = n.child_by_field_name("name")
+        return text(f) if f else None
+
+    def _pname(param):
+        """Nodo identifier del NOMBRE del parámetro, o None (destructuring/rest sin nombre)."""
+        t = param.type
+        if t == "identifier":
+            return param
+        if t in ("required_parameter", "optional_parameter"):
+            pat = param.child_by_field_name("pattern")
+            return _pname(pat) if pat else None
+        if t == "assignment_pattern":                 # a = 1
+            left = param.child_by_field_name("left")
+            return _pname(left) if left else None
+        if t == "rest_pattern":                        # ...args
+            for c in param.children:
+                if c.type == "identifier":
+                    return c
+        return None                                    # object_pattern/array_pattern -> skip
+
+    def _params(params_node):
+        res = []
+        if params_node is None:
+            return res
+        if params_node.type == "identifier":          # arrow sin paréntesis: x => ...
+            nm = text(params_node)
+            if nm not in ("this",):
+                res.append((nm, [(params_node.start_point[0], params_node.start_point[1])]))
+            return res
+        for p in params_node.children:
+            idn = _pname(p)
+            if idn is None:
+                continue
+            nm = text(idn)
+            if nm in ("this", "self", "cls"):
+                continue
+            res.append((nm, [(idn.start_point[0], idn.start_point[1])]))
+        return res
+
+    def _params_for(fn):
+        return _params(fn.child_by_field_name("parameters")
+                       or fn.child_by_field_name("parameter"))
+
+    out: dict = {}
+
+    def collect(node):
+        for ch in node.children:
+            t = ch.type
+            if t in ("function_declaration", "generator_function_declaration"):
+                nm = name_of(ch)
+                if nm:
+                    p = _params_for(ch)
+                    if p:
+                        out[nm] = p
+            elif t in ("class_declaration", "abstract_class_declaration"):
+                cnm = name_of(ch)
+                body = ch.child_by_field_name("body")
+                if cnm and body:
+                    for m in body.children:
+                        if m.type == "method_definition":
+                            mnm = name_of(m)
+                            if mnm:
+                                p = _params_for(m)
+                                if p:
+                                    out[f"{cnm}.{mnm}"] = p
+            elif t in ("lexical_declaration", "variable_declaration"):
+                for d in ch.children:
+                    if d.type != "variable_declarator":
+                        continue
+                    val = d.child_by_field_name("value")
+                    nmn = d.child_by_field_name("name")
+                    if val and nmn and val.type in ("arrow_function", "function",
+                                                    "function_expression"):
+                        p = _params_for(val)
+                        if p:
+                            out[text(nmn)] = p
+            collect(ch)                                # export_statement, namespaces, bloques
+
+    collect(root)
+    return out
+
+
 def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list]:
     ext = rel_path.rsplit(".", 1)[-1].lower()
     lang = _LANG_BY_EXT.get(ext, "javascript")

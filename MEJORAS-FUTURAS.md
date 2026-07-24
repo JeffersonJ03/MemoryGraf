@@ -30,7 +30,7 @@ verificación en vivo antes de dar por buena.
 | ~~M6~~ | ✅ **Implementado** · Escala: `git blame` **paralelo** (lectura) en repos grandes | Medio | Medio | Medio |
 | ~~M7~~ | ✅ **Implementado** · Narrativa/rerank con **LLM local** opt-in (Ollama) | Bajo | Bajo | Bajo |
 | ~~M8~~ | ✅ **Implementado** · Co-cambio **cross-project** por símbolo, gateado y conservador | Bajo | Medio | Medio |
-| ~~M4b~~ | ✅ **Implementado** (params Python) · `resolved_type` de **params individuales** (hover por offset) | Bajo | Medio | Medio |
+| ~~M4b~~ | ✅ **Implementado** (params Python **y TS/JS**) · `resolved_type` de **params individuales** (hover por offset) | Bajo | Medio | Medio |
 
 ---
 
@@ -334,25 +334,29 @@ distintas que cambian juntos (monorepo lógico) necesitaban un enlace honesto y 
 
 ---
 
-## M4b · `resolved_type` de params individuales  ✅ IMPLEMENTADO (params Python)
+## M4b · `resolved_type` de params individuales  ✅ IMPLEMENTADO (Python y TS/JS)
 
-**Estado (2026-07-23).** Hecho para **parámetros** (Python). `python_ast.param_offsets(source)`
-devuelve, por función/método, posiciones candidatas de cada param: su DEFINICIÓN en la firma
-y su PRIMER USO en el cuerpo. `runtime/lsp.py` (proveedor por lenguaje en `_LANGUAGES`) hace
-hover en esas posiciones (def primero, uso como respaldo) y guarda `param_types` (JSON) en
-`runtime_node` (columna nueva + migración idempotente `ALTER TABLE`). `query.get()` lo
-renderiza (`params: a: int, ...`). Respeta el presupuesto de hover y el toggle
-`runtime.param_types`. Tests: offsets (def+uso, salta self), render determinista, y E2E
-guardado.
+**Estado (2026-07-24).** Hecho para **parámetros** en **Python y TS/JS**. Proveedor por
+lenguaje en `_LANGUAGES` con contrato `param_offsets(source, ext) -> {qualname: [(param,
+[posiciones])]}`:
+- **Python** (`python_ast.param_offsets`, vía `ast`): posiciones candidatas = DEFINICIÓN en la
+  firma (pyright resuelve ahí) + PRIMER USO en el cuerpo (jedi/pylsp resuelve ahí).
+- **TS/JS** (`ts_treesitter.param_offsets`, vía tree-sitter): posición del identificador del
+  param en la firma (typescript-language-server resuelve ahí); cubre función/método/arrow
+  (con y sin paréntesis), params opcionales y `rest`; salta `this` y destructuring (sin nombre
+  único). El `ext` elige el parser (ts/tsx/js).
 
-**Veredicto honesto (medido).** El mecanismo funciona, pero: (1) para código **anotado** el
-tipo del param YA está en la firma (`resolved_type`), así que `param_types` es en buena parte
-**redundante**; (2) el valor NUEVO (params **inferidos** sin anotación) depende del servidor:
-**pyright** resuelve en la definición y da un tipo limpio (`(parameter) a: int`); **pylsp/jedi**
-resuelve en el uso y devuelve algo más verboso (docstring del tipo) o nada. Es decir: útil
-sobre todo con pyright; con jedi el retorno es ruidoso. **Variables locales** (no params)
-quedan fuera (muchísimas, valor marginal). **Pendiente opcional:** offsets de params para
-TS/JS (hoy solo Python tiene proveedor).
+`runtime/lsp.py` hace hover en esas posiciones (def primero) y guarda `param_types` (JSON) en
+`runtime_node` (columna + migración idempotente `ALTER TABLE`). `query.get()` lo renderiza
+(`params: a: int, ...`). Respeta el presupuesto de hover y el toggle `runtime.param_types`.
+Tests: offsets Python (def+uso, salta self) y TS/JS (func/método/arrow/rest, salta
+destructuring), render determinista, y E2E guardados (Python + TS).
+
+**Veredicto honesto (medido).** El mecanismo funciona, pero para código **anotado** el tipo
+del param YA está en la firma (`resolved_type`), así que `param_types` es en buena parte
+**redundante**; el valor NUEVO (params **inferidos** sin anotación) depende del servidor
+(**pyright** limpio en la definición; **pylsp/jedi** vía uso, más verboso; **tsserver** limpio
+en la definición). **Variables locales** (no params) quedan fuera (muchísimas, valor marginal).
 
 **Contexto.** M4 dejó el multi-lenguaje. Faltaba el punto 3 de su plan: tipos de parámetros
 individuales, no solo la firma. `_collect_types` hacía UN hover por símbolo (definición) y

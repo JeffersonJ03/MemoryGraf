@@ -30,13 +30,14 @@ def _signature(node) -> str:
         return node.name
 
 
-def param_offsets(source: str) -> dict:
+def param_offsets(source: str, ext: str | None = None) -> dict:
     """{qualname: [(param, [(line0, char0), ...]), ...]} de parámetros por función/método (M4b).
 
     Mismos qualnames que `extract()` (top-level `f`, métodos `Clase.m`). Salta self/cls.
     Cada param trae VARIAS posiciones candidatas (0-based, estilo LSP): su DEFINICIÓN en la
     firma (pyright resuelve ahí) y su PRIMER USO en el cuerpo (jedi/pylsp resuelve ahí). El
-    LSP prueba en orden. Best-effort: si el fuente no parsea, {}."""
+    LSP prueba en orden. `ext` se ignora (Python siempre); existe por uniformidad de contrato
+    con el proveedor de TS/JS. Best-effort: si el fuente no parsea, {}."""
     if source[:1] == "﻿":
         source = source[1:]
     try:

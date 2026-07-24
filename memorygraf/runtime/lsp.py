@@ -25,7 +25,7 @@ import subprocess
 import threading
 import time
 
-from ..extractors import python_ast
+from ..extractors import python_ast, ts_treesitter
 
 # Registro POR LENGUAJE (M4). Cada lenguaje declara:
 #   - servers : candidatos (binario, [args stdio]); se usa el primero disponible
@@ -45,6 +45,7 @@ _LANGUAGES = [
         "ext_lang": {".ts": "typescript", ".tsx": "typescriptreact",
                      ".js": "javascript", ".jsx": "javascriptreact",
                      ".mjs": "javascript", ".cjs": "javascript"},
+        "params": ts_treesitter.param_offsets,   # M4b: offsets de params TS/JS (tree-sitter)
     },
 ]
 
@@ -172,8 +173,9 @@ def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None,
             continue
         params_by_qual = {}
         if want_params:
+            ext = fid.rsplit(".", 1)[-1].lower() if "." in fid else ""
             try:
-                params_by_qual = param_provider("\n".join(lines)) or {}
+                params_by_qual = param_provider("\n".join(lines), ext) or {}
             except Exception:
                 params_by_qual = {}
         for sym in syms_by_file.get(fid, []):

@@ -1325,6 +1325,31 @@ class TestRuntimeLsp(Base):
         po = pa.param_offsets("class C:\n    def m(self, x):\n        return x\n")
         self.assertEqual([n for n, _ in po["C.m"]], ["x"])   # self omitido
 
+    def test_ts_param_offsets(self):
+        # M4b (TS/JS): offsets de params por función/método/arrow; salta destructuring/this
+        from memorygraf.extractors import ts_treesitter as ts
+        if not ts.available():
+            self.skipTest("sin tree-sitter (parsers)")
+        src = ("export function suma(a: number, b: number): number { return a + b; }\n"
+               "class Caja {\n  guarda(x: string, n?: number) { return x; }\n}\n"
+               "const doble = (v: number) => v * 2;\n"
+               "const solo = w => w;\n"
+               "function rest(first: string, ...args: number[]) { return first; }\n"
+               "function destruct({a, b}: any) { return a; }\n")
+        po = ts.param_offsets(src, "ts")
+        self.assertEqual([n for n, _ in po["suma"]], ["a", "b"])
+        self.assertEqual([n for n, _ in po["Caja.guarda"]], ["x", "n"])   # opcional incluido
+        self.assertEqual([n for n, _ in po["doble"]], ["v"])              # arrow con paréntesis
+        self.assertEqual([n for n, _ in po["solo"]], ["w"])              # arrow sin paréntesis
+        self.assertEqual([n for n, _ in po["rest"]], ["first", "args"])  # rest incluido
+        self.assertNotIn("destruct", po)                                 # destructuring: sin nombre único
+        a_line, a_char = po["suma"][0][1][0]                             # posición 0-based del identificador
+        self.assertEqual(a_line, 0)
+        self.assertGreater(a_char, 20)
+        # y en .js (sin tipos) también
+        self.assertEqual([n for n, _ in ts.param_offsets("function f(a, b){return a}\n", "js")["f"]],
+                         ["a", "b"])
+
     def test_param_types_rendered_in_get(self):
         # render determinista (sin LSP): inyecta param_types y verifica get()
         import json
@@ -1689,6 +1714,20 @@ class TestLspTypeScript(Base):
         self.assertIsNotNone(rt)
         self.assertIsNotNone(rt.get("resolved_type"))
         self.assertIn("number", rt["resolved_type"])
+        store.close()
+
+    def test_typescript_param_types(self):
+        # M4b (TS/JS): tipos por parámetro vía hover en el offset (tree-sitter + tsserver)
+        import json
+        from memorygraf.runtime import lsp
+        self.write("calc.ts",
+                   "export function suma(a: number, b: number): number {\n"
+                   "  return a + b;\n}\n")
+        store, _ = self.index()
+        lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
+        pt = (store.runtime_node_get("proj/calc.ts::suma") or {}).get("param_types")
+        if pt:                                    # tsserver resuelve en la definición
+            self.assertIn("number", json.loads(pt).get("a", ""))
         store.close()
 
 
