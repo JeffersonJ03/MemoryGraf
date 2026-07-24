@@ -97,7 +97,12 @@ arquitectura completa y [`ONBOARDING.md`](ONBOARDING.md) para la guía de arranq
 
 ## Herramientas MCP
 
-`overview` · `search` · `neighbors` · `get` · `decisions` · `stats`
+`overview` · `search` · `neighbors` · `get` · `decisions` · `stats` · `working_set` ·
+`impact` · `history` · `digest_log`
+
+`impact` predice el "blast radius" (llamadas ∪ co-cambio). Con `--deep` (CLI) o `deep:true`
+(MCP) añade el co-cambio por **historia completa** acotado al archivo, que capta acoplamiento
+que el blame pierde; si un símbolo está muy tocado pero sin co-cambios, `impact` lo sugiere.
 
 ## Desarrollo
 

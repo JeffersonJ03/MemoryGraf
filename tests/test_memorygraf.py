@@ -756,6 +756,71 @@ class TestM1Prototype(_GitRepo, Base):
         store.close()
 
 
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestDeepImpact(_GitRepo, Base):
+    """M1 integrado bajo demanda: impact --deep (A), disparador heurístico (B),
+    narrativa con LLM/heurística (C, con degradación)."""
+
+    def _repo_blame_misses(self):
+        # fa y fb co-editados en 2 commits viejos; luego a.py se reescribe 5 veces
+        # (borra el rastro del blame) -> churn de archivo alto, sin co-cambio de símbolo
+        self._init_repo()
+        self.write("a.py", "def fa():\n    v = 1\n    return v\n")
+        self.write("b.py", "def fb():\n    x = 1\n    return x\n")
+        self._commit("feat: login token")
+        self.write("a.py", "def fa():\n    v = 2\n    return v\n")
+        self.write("b.py", "def fb():\n    x = 2\n    return x\n")
+        self._commit("fix: token refresh")
+        for k in range(5):
+            self.write("a.py", f"def fa(z{k}):\n    return {k}\n")
+            self._commit(f"refactor a {k}")
+        store, _ = self.index()
+        self._sync_git(store)
+        return store
+
+    def test_A_deep_finds_coupling_blame_missed(self):
+        store = self._repo_blame_misses()
+        normal = Query(store).impact("proj/a.py::fa")
+        self.assertNotIn("b.py::fb", normal)            # el blame no lo ve
+        deep = Query(store).impact("proj/a.py::fa", deep=True,
+                                   config={**self.config, "compiler": {"backend": "heuristic"}})
+        self.assertIn("co-cambio PROFUNDO", deep)
+        self.assertIn("fb", deep)
+        self.assertIn("NUEVO vs blame", deep)
+        store.close()
+
+    def test_B_heuristic_suggests_deep(self):
+        store = self._repo_blame_misses()
+        out = Query(store).impact("proj/a.py::fa")      # sin --deep
+        self.assertIn("--deep", out)                    # disparador B (churn de archivo alto)
+        store.close()
+
+    def test_C_degrades_to_heuristic_without_llm(self):
+        store = self._repo_blame_misses()
+        deep = Query(store).impact("proj/a.py::fa", deep=True,
+                                   config={**self.config, "compiler": {"backend": "heuristic"}})
+        self.assertIn("co-cambian por", deep)           # narrativa heurística (sin LLM)
+        store.close()
+
+    def test_deep_cochange_deterministic_with_evidence(self):
+        from memorygraf import deep_history
+        store = self._repo_blame_misses()
+        r1 = deep_history.deep_cochange(store, "proj/a.py::fa", self.config)
+        r2 = deep_history.deep_cochange(store, "proj/a.py::fa", self.config)
+        self.assertEqual(r1, r2)
+        fb = [(o, c, s) for o, c, s in r1 if o == "proj/b.py::fb"]
+        self.assertTrue(fb and fb[0][1] >= 2 and fb[0][2])   # cnt>=2 + subjects (evidencia)
+        store.close()
+
+    def test_deep_resolves_root_from_git_roots_meta(self):
+        # el MCP no pasa config -> deep_cochange usa el meta git_roots del sync
+        from memorygraf import deep_history
+        store = self._repo_blame_misses()
+        r = deep_history.deep_cochange(store, "proj/a.py::fa", config=None)
+        self.assertTrue(any(o == "proj/b.py::fb" for o, _c, _s in r))
+        store.close()
+
+
 class TestContextCompiler(Base):
     """CAPA 3 · Compilador local. Rutas heurísticas (offline, deterministas)."""
 

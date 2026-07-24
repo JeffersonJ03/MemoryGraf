@@ -134,6 +134,10 @@ TOOLS = [
                 "node_id": {"type": "string"},
                 "depth": {"type": "integer", "default": 1},
                 "budget_tokens": {"type": "integer", "default": 800},
+                "deep": {"type": "boolean", "default": False,
+                         "description": "Co-cambio por HISTORIA COMPLETA (acotado al archivo): "
+                                        "capta acoplamiento que el blame pierde. Úsalo si "
+                                        "sospechas acoplados ocultos no listados."},
             },
             "required": ["node_id"],
         },
@@ -216,8 +220,11 @@ class Server:
             return q.working_set(budget_tokens=int(args.get("budget_tokens", 800)),
                                  limit=int(args.get("limit", 20)))
         if name == "impact":
+            # config=None: deep_cochange resuelve las raíces desde el meta `git_roots`
+            # (persistido en el sync), así el MCP funciona sin la config del proyecto.
             return q.impact(args["node_id"], depth=int(args.get("depth", 1)),
-                            budget_tokens=int(args.get("budget_tokens", 800)))
+                            budget_tokens=int(args.get("budget_tokens", 800)),
+                            deep=bool(args.get("deep", False)))
         if name == "history":
             return q.history(args["node_id"],
                              budget_tokens=int(args.get("budget_tokens", 800)))

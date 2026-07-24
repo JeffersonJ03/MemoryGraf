@@ -89,6 +89,7 @@ def main(argv=None):
     p.add_argument("--budget", type=int, default=800); p.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("impact", help="Impacto de cambiar un nodo (llamadas ∪ co-cambio)")
     p.add_argument("node_id"); p.add_argument("--depth", type=int, default=1); p.add_argument("--budget", type=int, default=800)
+    p.add_argument("--deep", action="store_true", help="Co-cambio por historia completa (acotado al archivo; capta lo que el blame pierde)")
     p = sub.add_parser("history", help="Historia de un nodo: churn, fragilidad, autores, commits")
     p.add_argument("node_id"); p.add_argument("--budget", type=int, default=800)
     # CAPA 3 · Compilador de contexto local
@@ -272,7 +273,8 @@ def main(argv=None):
             elif args.cmd == "working-set":
                 print(q.working_set(budget_tokens=args.budget, limit=args.limit))
             elif args.cmd == "impact":
-                print(q.impact(args.node_id, depth=args.depth, budget_tokens=args.budget))
+                print(q.impact(args.node_id, depth=args.depth, budget_tokens=args.budget,
+                               deep=args.deep, config=_load_cfg(args) if args.deep else None))
             elif args.cmd == "history":
                 print(q.history(args.node_id, budget_tokens=args.budget))
     finally:

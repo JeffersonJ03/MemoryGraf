@@ -22,7 +22,7 @@ verificación en vivo antes de dar por buena.
 
 | # | Mejora | Valor | Riesgo | Esfuerzo |
 |---|---|---|---|---|
-| M1 | Co-cambio por símbolo con **historia completa** (diff, no solo blame) — 🔬 **prototipo medido** (integración pendiente) | Alto | Alto | Alto |
+| M1 | Co-cambio por símbolo con **historia completa** — ✅ **on-demand** (`impact --deep` + disparador + LLM); 🔬 full-repo diferido | Alto | Alto | Alto |
 | ~~M2~~ | ✅ **Implementado** · `tested_by` a nivel **símbolo→test** (contextos de cobertura) | Alto | Medio | Medio |
 | ~~M3~~ | ✅ **Implementado** · Narrar el "por qué" del co-cambio de **símbolos** | Medio | Bajo | Bajo |
 | ~~M4~~ | ✅ **Implementado** (multi-lenguaje TS/JS) · `resolved_type` + params/vars *(params/vars pend.)* | Medio | Medio | Medio |
@@ -36,7 +36,27 @@ verificación en vivo antes de dar por buena.
 
 ## M1 · Co-cambio por símbolo con historia completa
 
-**Estado (2026-07-23) — 🔬 PROTOTIPO MEDIDO (no integrado).** Prototipo en
+**Estado (2026-07-23) — ✅ INTEGRADO BAJO DEMANDA (A+B+C).** En vez de pagar el coste
+global en cada `sync` (medido en ~14-23x, ver más abajo), se integró la ruta **on-demand y
+acotada** — más barata, honesta y alineada con la filosofía "paga por lo que consultas":
+
+- **A · `impact <símbolo> --deep`** (`memorygraf/deep_history.py::deep_cochange`): co-cambio
+  por historia completa restringido al **historial del archivo** del símbolo (`git log
+  --follow -- <archivo>`), así el walk es proporcional a ESE archivo, no al repo. Expuesto en
+  CLI (`impact --deep`) y MCP (parám. `deep`; resuelve la raíz desde el meta `git_roots`, así
+  funciona sin config). Marca `[NUEVO vs blame]` lo que el co-cambio del sync no vio.
+- **B · disparador heurístico** (`Query._suggest_deep`): si un símbolo vive en un archivo de
+  **churn alto** (historia completa, numstat) pero **no tiene co-cambios** registrados,
+  `impact` sugiere `--deep`. No es certeza: reconoce la FORMA de una pérdida probable (honesto
+  — no se puede "detectar" globalmente lo que el blame no computó).
+- **C · narrativa** (`deep_history.explain`): el "por qué" del acoplamiento profundo con el
+  LLM local si YA está activo (sin cold-start sorpresa), si no heurístico (reusa M3). Degrada.
+
+Tests: `TestDeepImpact` (A halla lo que el blame pierde, B sugiere, C degrada, determinismo +
+evidencia, resolución por `git_roots`). El **full-repo siempre-encendido** queda diferido (el
+prototipo de abajo mide su coste y por qué no compensa integrarlo global).
+
+**Prototipo full-repo (medido, no integrado).** Prototipo en
 `prototype_m1_history_cochange.py` (raíz del repo, NO importado por el paquete). Sigue la
 opción (b): por cada commit, `git show --unified=0` para los rangos post-image + `git show
 <sha>:<path>` y **re-extracción AST** de esa versión, con caché por (sha,path). Los ids que

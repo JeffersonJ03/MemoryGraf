@@ -294,7 +294,8 @@ class Query:
         return _budget("\n".join(lines), budget_tokens)
 
     # --- impact: llamadas estáticas ∪ co-cambio (predice mejor el impacto) ---
-    def impact(self, node_id: str, depth: int = 1, budget_tokens: int = 800) -> str:
+    def impact(self, node_id: str, depth: int = 1, budget_tokens: int = 800,
+               deep: bool = False, config: dict | None = None) -> str:
         node = self.store.get_node(node_id)
         if not node:
             return f"(nodo no encontrado: {node_id})"
@@ -325,28 +326,77 @@ class Query:
             if not frontier:
                 break
         why.pop(node_id, None)
-        if not why:
-            return (f"# impact: {node['name']} @{_loc(node)}\n"
-                    "(sin dependencias estáticas ni co-cambios registrados)")
         # co-cambio primero (es la señal que el call-graph no ve)
         def _rank(item):
             nid, reasons = item
             has_co = any(r.startswith("co-cambio") for r in reasons)
             return (0 if has_co else 1, nid)
-        lines = [f"# impact: {node['name']} @{_loc(node)}  ({len(why)} nodos, prof {depth})",
-                 "# unión de llamadas/imports estáticos ∪ co-cambio (Git)"]
-        from . import context_compiler
-        for nid, reasons in sorted(why.items(), key=_rank):
-            tgt = self.store.get_node(nid)
-            nm = tgt["name"] if tgt else nid
-            loc = _loc(tgt) if tgt else ""
-            tag = _runtime_tag(self.store, nid)   # ¿seguro de cambiar el afectado?
-            lines.append(f"- {nm}  @{loc}  [{', '.join(sorted(reasons))}]{tag}")
-            if any(r.startswith("co-cambio") for r in reasons):
-                note = context_compiler.cochange_note(self.store, node_id, nid)
+        if why:
+            lines = [f"# impact: {node['name']} @{_loc(node)}  ({len(why)} nodos, prof {depth})",
+                     "# unión de llamadas/imports estáticos ∪ co-cambio (Git)"]
+            from . import context_compiler
+            for nid, reasons in sorted(why.items(), key=_rank):
+                tgt = self.store.get_node(nid)
+                nm = tgt["name"] if tgt else nid
+                loc = _loc(tgt) if tgt else ""
+                tag = _runtime_tag(self.store, nid)   # ¿seguro de cambiar el afectado?
+                lines.append(f"- {nm}  @{loc}  [{', '.join(sorted(reasons))}]{tag}")
+                if any(r.startswith("co-cambio") for r in reasons):
+                    note = context_compiler.cochange_note(self.store, node_id, nid)
+                    if note:
+                        lines.append(f"    ↳ {note}")
+        else:
+            lines = [f"# impact: {node['name']} @{_loc(node)}",
+                     "(sin dependencias estáticas ni co-cambios registrados)"]
+        # B · disparador heurístico: churn alto + sin co-cambios -> sugiere la mirada profunda
+        if not deep and self._suggest_deep(node_id, node):
+            lines.append(f"⚠ churn alto sin co-cambios registrados — prueba "
+                         f"`impact {node['name']} --deep` (historia completa; el blame "
+                         "puede haber perdido acoplamiento)")
+        # A + C · co-cambio profundo on-demand (historia completa, acotado al archivo)
+        if deep:
+            lines += self._deep_section(node_id, config, set(why))
+        return _budget("\n".join(lines), budget_tokens)
+
+    def _suggest_deep(self, node_id: str, node: dict) -> bool:
+        """B: ¿huele a acoplamiento que el blame perdió? (archivo muy tocado, símbolo sin
+        co-cambios). No es certeza — reconoce la FORMA de una pérdida probable y ofrece
+        profundizar. Usa el churn del ARCHIVO (historia completa vía numstat), no el del
+        símbolo (que viene del blame y se deflacta justo cuando las líneas se reescriben)."""
+        if node.get("type") != "symbol" or not node.get("path"):
+            return False
+        fg = self.store.git_node_get(node["path"]) or {}
+        if (fg.get("churn") or 0) < 5:
+            return False
+        co = self.store.neighbors(node_id, edge_types=["co_changes_with"], direction="out")
+        return len(co) == 0
+
+    def _deep_section(self, node_id: str, config, shown: set) -> list:
+        """A: co-cambio por HISTORIA COMPLETA acotado al archivo del símbolo. C: narrativa
+        con LLM local si YA está activo (sin cold-start sorpresa), si no heurística."""
+        from . import deep_history, context_compiler as cc, ollama as _oll
+        results = deep_history.deep_cochange(self.store, node_id, config)
+        if not results:
+            return ["", "# co-cambio PROFUNDO (historia completa): sin acoplamiento adicional"]
+        s = cc._settings(config)
+        url = (config or {}).get("compiler", {}).get("url") or _oll.DEFAULT_URL
+        use_llm = (s["enabled"] and s["backend"] != "off"
+                   and (s["backend"] == "ollama"
+                        or (s["backend"] == "auto" and _oll.server_up(url))))
+        import contextlib
+        cm = cc.local_llm(config) if use_llm else contextlib.nullcontext(None)
+        lines = ["", "# co-cambio PROFUNDO (historia completa; capta lo que el blame pierde)"]
+        with cm as llm:
+            for other, cnt, subjects in results[:8]:
+                on = self.store.get_node(other)
+                nm = on["name"] if on else other
+                loc = _loc(on) if on else ""
+                new = "" if other in shown else "  [NUEVO vs blame]"
+                lines.append(f"- {nm}  @{loc}  (×{cnt}){new}")
+                note = deep_history.explain(subjects, cnt, llm)
                 if note:
                     lines.append(f"    ↳ {note}")
-        return _budget("\n".join(lines), budget_tokens)
+        return lines
 
     # --- history: churn + fragilidad + "por qué" compacto ---
     def history(self, node_id: str, budget_tokens: int = 800) -> str:
