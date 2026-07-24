@@ -13,9 +13,15 @@ from .model import (
     Node, Edge, content_hash, NODE_EXTERNAL, EDGE_IMPORTS, EDGE_DEPENDS_ON, EDGE_CALLS,
 )
 from .store import Store
-from .extractors import python_ast, js_ts, ts_treesitter
+from .extractors import python_ast, js_ts, ts_treesitter, ts_generic
 
-EXT_LANG = {".py": "py", ".ts": "ts", ".tsx": "tsx", ".js": "js", ".jsx": "jsx"}
+# Python (ast) y JS/TS (tree-sitter, con calls/imports) tienen extractor propio.
+_TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
+# El resto (C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly) usa el extractor genérico
+# (símbolos + defines) cuando tree-sitter está disponible.
+_GENERIC_EXTS = {"." + e for e in ts_generic._GRAMMAR_BY_EXT}
+EXT_LANG = ({".py": "py", ".ts": "ts", ".tsx": "tsx", ".js": "js", ".jsx": "jsx"}
+            | {e: ts_generic._GRAMMAR_BY_EXT[e[1:]] for e in _GENERIC_EXTS})
 
 DEFAULT_EXCLUDES = {
     "node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build",
@@ -196,11 +202,20 @@ class Indexer:
         ext = os.path.splitext(abspath)[1].lower()
         if ext == ".py":
             return python_ast.extract(rel_id, project, source)
-        if self.use_treesitter:
+        if ext in _TS_EXTS:
+            if self.use_treesitter:
+                try:
+                    return ts_treesitter.extract(rel_id, project, source)
+                except Exception:
+                    pass  # ante cualquier fallo del parser, regex como red de seguridad
+            return js_ts.extract(rel_id, project, source)
+        if ext in _GENERIC_EXTS:
+            # C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly (símbolos + defines). Degrada solo
+            # a nodo `file` si no hay tree-sitter (no cae al regex JS, que los malinterpretaría).
             try:
-                return ts_treesitter.extract(rel_id, project, source)
+                return ts_generic.extract(rel_id, project, source)
             except Exception:
-                pass  # ante cualquier fallo del parser, regex como red de seguridad
+                pass
         return js_ts.extract(rel_id, project, source)
 
     def _resolve_imports(self):

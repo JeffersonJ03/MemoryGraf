@@ -534,6 +534,21 @@ y `api` (endpoint compatible con OpenAI). `memorygraf setup-llm` los configura d
 interactiva y escribe la config; la API key vive solo en `MEMORYGRAF_LLM_KEY` (nunca en el
 archivo). Así el sistema es agnóstico del LLM también en la generación, no solo en el acceso.
 
+### 18.7 Indexado multi-lenguaje (`extractors/ts_generic.py`)
+
+La extracción estructural dejó de ser solo Python + JS/TS. Un extractor GENÉRICO dirigido por
+config sobre tree-sitter cubre **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic y Assembly**:
+emite `symbol` (funciones, clases/tipos, métodos `Clase.m`) + aristas `defines`, con extracción
+de nombre por-gramática (campo `name`; casos especiales: declarator en C/C++, `type_spec` en Go,
+`impl` en Rust, asignación en R, bloque en VB, `label` en asm). El indexador rutea por extensión:
+Python→`python_ast` (exacto, con calls), JS/TS→`ts_treesitter` (exacto, con calls/imports
+cross-file), el resto→`ts_generic`. Degrada a nodo `file` sin tree-sitter.
+
+**Alcance honesto:** los lenguajes nuevos aportan **símbolos + `defines`** (potencian `overview`,
+`search`, `get`, `neighbors`, `graph`, `report`, y el co-cambio a nivel símbolo de la Capa 1).
+Los `calls`/`imports` cross-file de alta fidelidad siguen siendo de Python y JS/TS; extenderlos a
+más lenguajes es una ampliación acotada por gramática (aún no hecha).
+
 ### 18.4 Co-cambio cross-project por símbolo (M8)
 
 Muy conservador: dos símbolos de proyectos distintos solo se enlazan si (1) comparten repo
@@ -583,4 +598,6 @@ justificaría (o no) con datos.
 - **`memorygraf doctor`:** diagnostica e instala las dependencias opcionales (parsers,
   neural, watch, lsp, **pyright**) según el entorno (pipx/venv, plataforma/WSL/distro), con
   degradación; espejo "en vivo" del instalador.
-- **Suite:** 105 tests (`python -m unittest discover -s tests`), sin dependencias.
+- **Indexado multi-lenguaje (§18.7):** Python + JS/TS (completo) y C/C++/Java/C#/Go/Rust/PHP/
+  R/VB/Assembly (símbolos + `defines`).
+- **Suite:** 121 tests (`python -m unittest discover -s tests`), sin dependencias.

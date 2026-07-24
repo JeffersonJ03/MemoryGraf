@@ -1835,6 +1835,75 @@ class TestLspTypeScript(Base):
         store.close()
 
 
+def _generic_ts_available() -> bool:
+    from memorygraf.extractors import ts_generic
+    return ts_generic.available()
+
+
+@unittest.skipUnless(_generic_ts_available(), "sin tree-sitter (parsers)")
+class TestMultiLanguage(Base):
+    """Extracción de símbolos + `defines` multi-lenguaje (C/C++/Java/C#/Go/Rust/PHP/R/VB/asm)."""
+
+    _CASES = {
+        "add.c": ('int add(int a){return a+1;}\nstruct Point{int x;};\n',
+                  {"add", "Point"}),
+        "shape.cpp": ('namespace geo{\nclass Shape{public:\n int area(int w){return w;}\n};\n'
+                      'int helper(){return 0;}\n}\n',
+                      {"Shape", "Shape.area", "helper"}),
+        "App.java": ('class App{ int run(int n){return n;} }\ninterface Runner{ void go(); }\n',
+                     {"App", "App.run", "Runner", "Runner.go"}),
+        "Svc.cs": ('namespace N{ class Svc{ int Handle(int a){return a;} } }\n',
+                   {"Svc", "Svc.Handle"}),
+        "main.go": ('package main\nfunc Add(a int) int { return a }\ntype Server struct{}\n',
+                    {"Add", "Server"}),
+        "lib.rs": ('pub fn add(a:i32)->i32{a}\nstruct S{}\nimpl S{ fn method(&self){} }\n',
+                   {"add", "S", "S.method"}),
+        "api.php": ('<?php\nfunction handle($r){return $r;}\nclass Ctrl{ function index($q){return $q;} }\n',
+                    {"handle", "Ctrl", "Ctrl.index"}),
+        "stats.r": ('mean_sq <- function(x){ x*x }\nnormalize = function(v){ v }\n',
+                    {"mean_sq", "normalize"}),
+        "Mod.vb": ('Class Calc\nFunction Add(a As Integer) As Integer\nEnd Function\nEnd Class\n',
+                   {"Calc", "Calc.Add"}),
+        "boot.s": ('.global _start\n_start:\n  ret\ncleanup:\n  ret\n',
+                   {"_start", "cleanup"}),
+    }
+
+    def test_symbols_per_language(self):
+        for fn, (code, _expected) in self._CASES.items():
+            self.write(fn, code)
+        store, _ = self.index()
+        got = {}
+        for n in store.all_nodes(types=["symbol"]):
+            got.setdefault(n["path"].split("/", 1)[1], set()).add(n["name"])
+        for fn, (_code, expected) in self._CASES.items():
+            self.assertTrue(expected <= got.get(fn, set()),
+                            f"{fn}: faltan {expected - got.get(fn, set())}")
+        # `defines` desde el archivo/clase hacia sus símbolos
+        defines = {(e["source"], e["target"]) for e in store.all_edges()
+                   if e["type"] == "defines"}
+        self.assertIn(("proj/shape.cpp::Shape", "proj/shape.cpp::Shape.area"), defines)
+        self.assertIn(("proj/App.java", "proj/App.java::App"), defines)
+        store.close()
+
+    def test_extensions_are_indexed(self):
+        from memorygraf.indexer import EXT_LANG
+        for ext in (".go", ".rs", ".c", ".cpp", ".java", ".cs", ".php", ".r", ".vb", ".s"):
+            self.assertIn(ext, EXT_LANG)
+
+
+class TestMultiLanguageDegradation(Base):
+    """Sin tree-sitter, un lenguaje genérico se indexa como archivo (sin símbolos), no crashea."""
+
+    def test_generic_degrades_to_file_node(self):
+        import unittest.mock as mock
+        from memorygraf.extractors import ts_generic
+        with mock.patch.object(ts_generic, "available", return_value=False):
+            nodes, edges, imports, calls, binds = ts_generic.extract(
+                "proj/main.go", "proj", "package main\nfunc F(){}\n")
+        self.assertEqual([n.type for n in nodes], ["file"])   # solo el nodo file
+        self.assertEqual(edges, [])
+
+
 class TestExtractorRobustness(Base):
     """Un archivo con BOM o sintaxis inválida NO debe tumbar el sync entero
     (la rama de error del extractor debe respetar la aridad de 5)."""

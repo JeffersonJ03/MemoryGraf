@@ -64,7 +64,8 @@ hay **degradación elegante** al modo portable.
 
 | Capacidad | Portable (sin extra) | Potencia (con extra) | Extra |
 |---|---|---|---|
-| Símbolos/`calls`/`implements` JS/TS | regex (aprox.) | **tree-sitter** (exacto) | `parsers` |
+| Símbolos JS/TS (`calls`/`implements`) | regex (aprox.) | **tree-sitter** (exacto) | `parsers` |
+| Símbolos C/C++/Java/C#/Go/Rust/PHP/R/VB/asm | — (se omite) | **tree-sitter** (símbolos + `defines`) | `parsers` |
 | Búsqueda semántica | TF-IDF | **model2vec** neural (cross-idioma) | `neural` |
 | `watch` | polling | **watchdog** (eventos nativos) | `watch` |
 | Diagnósticos + tipos por símbolo (`runtime --lsp`) | — (se omite) | **python-lsp-server** (o **pyright**, mejor calidad — `memorygraf doctor` lo instala); **TS/JS** con `typescript-language-server` | `lsp` |
@@ -92,8 +93,11 @@ dependencia, y todas dejan **procedencia** (`archivo:línea`) y respetan un pres
 
 1. **Grafo base.** Nodos `file`/`symbol`/`entity`/`decision`/`convention` y aristas
    `defines`/`imports`/`calls` (intra y cross-archivo)/`implements`/`references`/`models`.
-   Python vía `ast` (exacto); JS/TS/TSX vía tree-sitter. Incremental por hash, con
-   reconciliación de símbolos movidos y enlace cross-project por endpoints HTTP.
+   **Multi-lenguaje** vía tree-sitter: **Python** (`ast`) y **JS/TS/TSX** con extracción
+   completa (símbolos + `calls`/`imports` cross-archivo); **C, C++, Java, C#, Go, Rust, PHP,
+   R, Visual Basic y Assembly** con símbolos + `defines` (funciones, clases/tipos, métodos).
+   Incremental por hash, con reconciliación de símbolos movidos y enlace cross-project por
+   endpoints HTTP.
 2. **Conocimiento de dominio.** Decisiones y convenciones desde markdown (`governs`);
    entidades desde un glosario del proyecto (`models`); resúmenes (heurístico/Ollama/API) y
    embeddings (TF-IDF/model2vec/API) para búsqueda híbrida (RRF).
