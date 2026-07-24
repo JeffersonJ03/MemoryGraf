@@ -29,7 +29,7 @@ verificación en vivo antes de dar por buena.
 | ~~M5~~ | ✅ **Implementado** · `digest`: formatos **agrupados** (eslint stylish, jest, go test, tsc) | Medio | Medio | Medio |
 | ~~M6~~ | ✅ **Implementado** · Escala: `git blame` **paralelo** (lectura) en repos grandes | Medio | Medio | Medio |
 | ~~M7~~ | ✅ **Implementado** · Narrativa/rerank con **LLM local** opt-in (Ollama) | Bajo | Bajo | Bajo |
-| M8 | Co-cambio **cross-project** por símbolo (hoy dentro de un proyecto) | Bajo | Medio | Medio |
+| ~~M8~~ | ✅ **Implementado** · Co-cambio **cross-project** por símbolo, gateado y conservador | Bajo | Medio | Medio |
 | M4b | `resolved_type` de **params/variables individuales** (hover por offset) — pendiente de M4 | Bajo | Medio | Medio |
 
 ---
@@ -261,11 +261,25 @@ LLM era opt-in por coste). El rerank en consulta era determinista (LLM diferido 
 
 ---
 
-## M8 · Co-cambio cross-project por símbolo
+## M8 · Co-cambio cross-project por símbolo  ✅ IMPLEMENTADO
 
-**Contexto.** El co-cambio (archivo y símbolo) se computa dentro de cada proyecto. En
-workspaces multi-proyecto, dos símbolos de repos distintos que cambian juntos (monorepo
-lógico) no se enlazan por co-cambio.
+**Estado (2026-07-23).** Hecho, y además CORRIGE un comportamiento previo poco honesto:
+`_rebuild_symbol_cochange` agrupa por SHA global, así que en un repo COMPARTIDO ya formaba
+pares cross-project **sin gating** (mismo umbral laxo → falsos positivos: cualquier commit
+que tocara ambos proyectos los enlazaba). Ahora un par cross-project solo se emite si (1)
+los dos proyectos comparten la MISMA raíz de repo git (historia común real), (2) supera
+umbrales MÁS ESTRICTOS (`cochange_cross_min`=3, `cochange_cross_threshold`=0.5), y (3) están
+CONFIRMADOS por `cross_link` (endpoints compartidos → aristas `references` cross-project),
+salvo que se ponga `cochange_cross_confirm=false`. Provenance distinta `git-cochange-sym-xproj`
+(identificable). El co-cambio de ARCHIVO sigue intra-proyecto (bump por proyecto). Tests:
+suprimido sin confirmación, formado con endpoint compartido, `confirm=false` solo-umbral, y
+umbral estricto que suprime. El resto queda como registro del plan (los "commits
+correlacionados" entre repos DISTINTOS quedan fuera: SHAs disjuntos, señal demasiado
+especulativa). 
+
+**Contexto.** El co-cambio de ARCHIVO se computa dentro de cada proyecto. El de SÍMBOLO
+cruzaba proyectos accidentalmente (SHA global) sin validación; dos símbolos de repos/carpetas
+distintas que cambian juntos (monorepo lógico) necesitaban un enlace honesto y acotado.
 
 **Plan de implementación.**
 1. Cuando varios proyectos comparten repo git (o commits correlacionados), permitir pares

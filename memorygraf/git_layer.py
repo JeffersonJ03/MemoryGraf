@@ -29,7 +29,7 @@ import re
 import subprocess
 from datetime import datetime, timezone
 
-from .model import Edge, EDGE_CO_CHANGES
+from .model import Edge, EDGE_CO_CHANGES, EDGE_REFERENCES
 
 # RS/US: separadores de registro/campo poco probables en asuntos de commit.
 _RS, _US = "\x1e", "\x1f"
@@ -45,6 +45,10 @@ _DEFAULTS = {
     "top_commits": 3,            # commits guardados por nodo (el "por qué")
     "max_authors": 5,            # autores guardados por nodo (bus factor)
     "blame_workers": 0,          # hilos para el blame (I/O-bound); 0=auto, 1=secuencial
+    # Co-cambio CROSS-PROJECT por símbolo (M8): muy conservador por defecto.
+    "cochange_cross_confirm": True,   # exige confirmación de cross_link (endpoints compartidos)
+    "cochange_cross_min": 3,          # co-ocurrencias mínimas cross-project (más estricto)
+    "cochange_cross_threshold": 0.5,  # peso mínimo cross-project (más estricto)
 }
 
 
@@ -214,7 +218,7 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
     # símbolo↔símbolo (recompute desde blame). El de archivo BORRA todas y añade; el
     # de símbolo solo AÑADE -> el orden importa.
     edges = _rebuild_cochange_edges(store, file_ids, st)
-    sym_edges = _rebuild_symbol_cochange(store, st)
+    sym_edges = _rebuild_symbol_cochange(store, st, repos)
 
     store.prune_git_layer()
     store.commit()
@@ -468,7 +472,25 @@ def _rebuild_cochange_edges(store, file_ids, st) -> int:
     return count
 
 
-def _rebuild_symbol_cochange(store, st) -> int:
+def _project_of(node_id: str) -> str:
+    """Prefijo de proyecto de un node id (`{proyecto}/{path}[::sym]`)."""
+    return node_id.split("/", 1)[0]
+
+
+def _related_project_pairs(store, project_names: set) -> set:
+    """Pares de proyectos CONFIRMADOS como relacionados por cross_link: comparten un
+    endpoint -> aristas `references` cross-project (M8). Señal para no cruzar ruido."""
+    related = set()
+    for e in store.all_edges():
+        if e.get("type") != EDGE_REFERENCES:
+            continue
+        pa, pb = _project_of(e["source"]), _project_of(e["target"])
+        if pa != pb and pa in project_names and pb in project_names:
+            related.add(frozenset((pa, pb)))
+    return related
+
+
+def _rebuild_symbol_cochange(store, st, repos) -> int:
     """Aristas co_changes_with a nivel SÍMBOLO (INFERRED), recompute total.
 
     Señal: símbolos cuyo código ACTUAL fue tocado por commits comunes (blame). Recompute
@@ -476,10 +498,18 @@ def _rebuild_symbol_cochange(store, st) -> int:
     correr DESPUÉS de _rebuild_cochange_edges (que borra todas las co_changes_with) y solo
     AÑADE. Honestidad: blame colapsa a la atribución de HOY, así que es un acoplamiento
     más 'de superficie' que el de archivo (historia completa); por eso va acotado.
-    """
+
+    CROSS-PROJECT (M8): un par de proyectos distintos solo se enlaza si (1) comparten la
+    MISMA raíz de repo git (historia común real), (2) supera umbrales MÁS ESTRICTOS, y
+    (3) están CONFIRMADOS por cross_link (endpoints compartidos), salvo que se desactive
+    `cochange_cross_confirm`. Provenance distinta -> identificable. Muy conservador."""
     sym_ids = {n["id"] for n in store.all_nodes(types=["symbol"])}
     by_sha = store.git_symbol_commit_by_sha()
     max_syms = st.get("cochange_max_symbols", 20)
+    # cross-project: raíz de repo por proyecto + confirmación por cross_link
+    top_by_proj = {name: top for name, (_root, top, _head) in repos.items()}
+    related = (_related_project_pairs(store, set(top_by_proj))
+               if st.get("cochange_cross_confirm", True) else None)
     pair_cnt: dict = {}
     for _sha, syms in by_sha.items():
         uniq = sorted({s for s in syms if s in sym_ids})   # solo símbolos vigentes
@@ -492,7 +522,21 @@ def _rebuild_symbol_cochange(store, st) -> int:
     churn: dict = {}
     count = 0
     for (a, b), cnt in pair_cnt.items():
-        if cnt < st["min_cochange"]:
+        pa, pb = _project_of(a), _project_of(b)
+        if pa != pb:                                   # --- par CROSS-PROJECT (gating M8) ---
+            top = top_by_proj.get(pa)
+            if not top or top != top_by_proj.get(pb):  # (1) misma raíz de repo git
+                continue
+            if related is not None and frozenset((pa, pb)) not in related:
+                continue                               # (3) sin confirmación de cross_link
+            min_co = st.get("cochange_cross_min", 3)   # (2) umbrales más estrictos
+            thr = st.get("cochange_cross_threshold", 0.5)
+            prov = "git-cochange-sym-xproj"
+        else:                                          # --- par intra-proyecto (igual que antes) ---
+            min_co = st["min_cochange"]
+            thr = st["cochange_threshold"]
+            prov = "git-cochange-sym"
+        if cnt < min_co:
             continue
         for nid in (a, b):
             if nid not in churn:
@@ -502,10 +546,10 @@ def _rebuild_symbol_cochange(store, st) -> int:
         if denom <= 0:
             continue
         weight = round(min(1.0, cnt / denom), 3)
-        if weight < st["cochange_threshold"]:
+        if weight < thr:
             continue
-        store.upsert_edge(Edge(a, b, EDGE_CO_CHANGES, weight, "git-cochange-sym"))
-        store.upsert_edge(Edge(b, a, EDGE_CO_CHANGES, weight, "git-cochange-sym"))
+        store.upsert_edge(Edge(a, b, EDGE_CO_CHANGES, weight, prov))
+        store.upsert_edge(Edge(b, a, EDGE_CO_CHANGES, weight, prov))
         count += 1
     return count
 

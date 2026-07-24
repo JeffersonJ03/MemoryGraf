@@ -622,6 +622,79 @@ class TestBlameParallel(_GitRepo, Base):
         store.close()
 
 
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestCrossProjectCochange(Base):
+    """M8 · co-cambio SÍMBOLO cross-project: solo con repo compartido + umbral estricto
+    + confirmación de cross_link (endpoints). Muy conservador (evita falsos positivos)."""
+
+    def _mono(self, shared_endpoint: bool) -> dict:
+        # un solo repo git, dos proyectos (svcA, svcB); f() co-editada línea a línea
+        repo = os.path.join(self.tmp, "mono")
+        for sub in ("svcA", "svcB"):
+            os.makedirs(os.path.join(repo, sub))
+
+        def g(*a):
+            subprocess.run(["git", *a], cwd=repo, check=True, capture_output=True)
+        g("init", "-q"); g("config", "user.email", "t@t.io")
+        g("config", "user.name", "T"); g("config", "commit.gpgsign", "false")
+
+        ep = '"/api/orders"' if shared_endpoint else '"local"'   # literal que ve cross_link
+        def body(x, y, z):
+            return f"def f():\n    x = {x}\n    y = {y}\n    return {ep}, {z}\n"
+        # cada commit edita UNA línea distinta de AMBAS -> >=3 SHAs por símbolo (cnt alto)
+        for k, (x, y, z) in enumerate([(0, 0, 0), (1, 0, 0), (1, 1, 0), (1, 1, 1)]):
+            for sub in ("svcA", "svcB"):
+                with open(os.path.join(repo, sub, "m.py"), "w", encoding="utf-8") as fh:
+                    fh.write(body(x, y, z))
+            g("add", "-A"); g("commit", "-q", "-m", f"c{k}")
+        return {"projects": [{"name": "svcA", "root": os.path.join(repo, "svcA")},
+                             {"name": "svcB", "root": os.path.join(repo, "svcB")}]}
+
+    def _run(self, cfg):
+        from memorygraf import cross_link
+        store = Store(os.path.join(self.tmp, "g.db"))
+        Indexer(store, cfg).index_all()
+        cross_link.link(store, cfg)          # como en el pipeline real (antes de git sync)
+        git_layer.sync(store, cfg)
+        return store
+
+    def _xproj(self, store) -> set:
+        return {(e["source"], e["target"]) for e in store.all_edges()
+                if e["type"] == EDGE_CO_CHANGES
+                and e["source"].split("/", 1)[0] != e["target"].split("/", 1)[0]}
+
+    def test_suppressed_without_confirmation(self):
+        # repo compartido pero SIN endpoint compartido -> no se confirma -> no cruza
+        store = self._run(self._mono(shared_endpoint=False))
+        self.assertEqual(self._xproj(store), set())
+        store.close()
+
+    def test_forms_with_endpoint_confirmation(self):
+        store = self._run(self._mono(shared_endpoint=True))
+        x = self._xproj(store)
+        self.assertIn(("svcA/m.py::f", "svcB/m.py::f"), x)
+        self.assertIn(("svcB/m.py::f", "svcA/m.py::f"), x)     # simétrica
+        e = next(e for e in store.all_edges()
+                 if e["source"] == "svcA/m.py::f" and e["target"] == "svcB/m.py::f"
+                 and e["type"] == EDGE_CO_CHANGES)
+        self.assertEqual(e["provenance"], "git-cochange-sym-xproj")   # identificable
+        store.close()
+
+    def test_confirm_off_allows_without_endpoint(self):
+        cfg = self._mono(shared_endpoint=False)
+        cfg["git"] = {"cochange_cross_confirm": False}   # solo umbral estricto, sin confirmación
+        store = self._run(cfg)
+        self.assertIn(("svcA/m.py::f", "svcB/m.py::f"), self._xproj(store))
+        store.close()
+
+    def test_stricter_threshold_suppresses(self):
+        cfg = self._mono(shared_endpoint=False)
+        cfg["git"] = {"cochange_cross_confirm": False, "cochange_cross_min": 99}
+        store = self._run(cfg)
+        self.assertEqual(self._xproj(store), set())      # cnt < 99 -> no cruza
+        store.close()
+
+
 class TestContextCompiler(Base):
     """CAPA 3 · Compilador local. Rutas heurísticas (offline, deterministas)."""
 
