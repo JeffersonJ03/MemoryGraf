@@ -287,15 +287,24 @@ class TestDoctor(Base):
         from memorygraf import doctor
         data = doctor.collect()
         keys = {c["key"] for c in data["capabilities"]}
-        self.assertEqual(keys, {"parsers", "neural", "watch", "lsp"})
+        self.assertEqual(keys, {"parsers", "neural", "watch", "lsp", "pyright"})
         # cada capacidad activa no lleva comando; cada faltante sí, con el intérprete real
         for c in data["capabilities"]:
             if c["active"]:
                 self.assertIsNone(c["install"])
             else:
                 self.assertTrue("pip install" in c["install"]
-                                or "pipx inject" in c["install"])
+                                or "pipx inject" in c["install"]
+                                or "pipx install" in c["install"])
         self.assertIn(data["environment"], {"pipx", "venv", "sistema"})
+
+    def test_pyright_install_command(self):
+        from memorygraf import doctor
+        cmd = doctor._pyright_install_command()
+        self.assertEqual(cmd[-1], "pyright")
+        # pipx install pyright  |  <python> -m pip install pyright  (nunca 'inject')
+        self.assertTrue(cmd == ["pipx", "install", "pyright"]
+                        or cmd[1:4] == ["-m", "pip", "install"])
 
     def test_run_report_is_offline_and_succeeds(self):
         from memorygraf import doctor

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -91,6 +92,17 @@ def _hint_str(pkgs: list[str]) -> str:
     return " ".join(_shq(a) for a in _install_command(pkgs))
 
 
+def _cap_command(cap: dict) -> list[str]:
+    """Comando de instalación de una capacidad: el suyo propio (`install_cmd`) o el pip
+    por defecto sobre sus `pkgs`."""
+    fn = cap.get("install_cmd")
+    return fn() if fn else _install_command(cap["pkgs"])
+
+
+def _cap_hint(cap: dict) -> str:
+    return " ".join(_shq(a) for a in _cap_command(cap))
+
+
 # --------------------------------------------------------------------------- #
 # Detección por capacidad (reusa las funciones reales del runtime)
 # --------------------------------------------------------------------------- #
@@ -118,6 +130,19 @@ def _has_lsp() -> bool:
         return True
     except Exception:
         return False
+
+
+def _has_pyright() -> bool:
+    """pyright es un binario (no un import): se detecta como lo hará el runtime LSP."""
+    return shutil.which("pyright-langserver") is not None
+
+
+def _pyright_install_command() -> list[str]:
+    """pyright es una app CLI: bajo pipx se instala como app PROPIA (expone su binario en
+    el PATH); en venv/sistema, con el pip del intérprete. El paquete PyPI trae el binario."""
+    if _in_pipx():
+        return ["pipx", "install", "pyright"]
+    return [sys.executable, "-m", "pip", "install", "pyright"]
 
 
 def _has_ollama() -> tuple[bool, str]:
@@ -154,9 +179,17 @@ _CAPS = [
     {
         "key": "lsp", "pkgs": ["python-lsp-server>=1.7"],
         "detect": _has_lsp,
-        "on": "`runtime --lsp`: diagnósticos + tipos por símbolo",
+        "on": "`runtime --lsp`: diagnósticos + tipos por símbolo (Python, vía pylsp)",
         "off": "`runtime --lsp` se omite (sin diagnósticos/tipos)",
         "after": "memorygraf runtime --lsp   # ya disponible",
+    },
+    {
+        "key": "pyright", "pkgs": ["pyright"],
+        "detect": _has_pyright,
+        "install_cmd": _pyright_install_command,
+        "on": "LSP de mayor calidad: pyright (tipos/diagnósticos + params M4b limpios)",
+        "off": "LSP con pylsp/jedi si está (tipos de params más pobres)",
+        "after": "memorygraf runtime --lsp   # el runtime prefiere pyright automáticamente",
     },
 ]
 
@@ -173,7 +206,7 @@ def collect() -> dict:
             "active": active,
             "enables": c["on"],
             "fallback": c["off"],
-            "install": None if active else _hint_str(c["pkgs"]),
+            "install": None if active else _cap_hint(c),
         })
     ollama_ok, ollama_bin = _has_ollama()
     return {
@@ -195,8 +228,7 @@ def collect() -> dict:
 # --------------------------------------------------------------------------- #
 # Instalación (consciente del entorno)
 # --------------------------------------------------------------------------- #
-def _pip_install(pkgs: list[str], log=print) -> bool:
-    cmd = _install_command(pkgs)
+def _run_install(cmd: list[str], log=print) -> bool:
     log(f"==> {' '.join(_shq(a) for a in cmd)}")
     try:
         rc = subprocess.call(cmd)
@@ -216,20 +248,31 @@ def _pip_install(pkgs: list[str], log=print) -> bool:
 
 
 def install_keys(keys: list[str], log=print) -> int:
-    """Instala las capacidades indicadas (por clave) en el entorno detectado."""
+    """Instala las capacidades indicadas (por clave) en el entorno detectado.
+
+    Agrupa las extras pip por defecto en UN comando; las que traen `install_cmd` propio
+    (p.ej. pyright: app pipx) se ejecutan aparte."""
     keys = [k for k in keys if k in _CAP_BY_KEY]
     if not keys:
         log("==> Nada que instalar.")
         return 0
 
-    pkgs: list[str] = []
+    default_pkgs: list[str] = []
+    commands: list[list[str]] = []
     for k in keys:
-        pkgs += _CAP_BY_KEY[k]["pkgs"]
+        cap = _CAP_BY_KEY[k]
+        if cap.get("install_cmd"):
+            commands.append(_cap_command(cap))
+        else:
+            default_pkgs += cap["pkgs"]
+    if default_pkgs:
+        commands.insert(0, _install_command(default_pkgs))
 
     log("")
     log(f"==> Entorno: {_environment()}  ·  plataforma: {_platform_label()}")
     log(f"==> Activando: {', '.join(keys)}")
-    if not _pip_install(pkgs, log=log):
+    ok = all([_run_install(cmd, log=log) for cmd in commands])
+    if not ok:
         return 1
 
     # Verificación + paso de "configuración" (qué correr para que surta efecto).
