@@ -31,6 +31,7 @@ verificación en vivo antes de dar por buena.
 | ~~M7~~ | ✅ **Implementado** · Narrativa/rerank con **LLM local** opt-in (Ollama) | Bajo | Bajo | Bajo |
 | ~~M8~~ | ✅ **Implementado** · Co-cambio **cross-project** por símbolo, gateado y conservador | Bajo | Medio | Medio |
 | ~~M4b~~ | ✅ **Implementado** (params Python **y TS/JS**) · `resolved_type` de **params individuales** (hover por offset) | Bajo | Medio | Medio |
+| M9 | `calls`/`imports` **cross-file** para los lenguajes nuevos (C/C++/Java/C#/Go/Rust/PHP/R/VB) | Medio | Medio | Alto |
 
 ---
 
@@ -378,6 +379,35 @@ guardaba un único `resolved_type`.
 **Riesgo.** Medio: toca cada extractor por lenguaje (offsets) y añade peticiones LSP.
 **Recomendación:** hacer solo si aparece necesidad concreta de tipos de locales/vars
 inferidas; el 80% del valor (firma con tipos) ya se entregó en M4.
+
+---
+
+## M9 · `calls`/`imports` cross-file para los lenguajes nuevos
+
+**Contexto.** El indexado multi-lenguaje (§18.7 de DESIGN, `extractors/ts_generic.py`) entrega
+para C/C++/Java/C#/Go/Rust/PHP/R/VB: símbolos + `defines` + `calls` **intra-archivo**. Falta el
+`calls`/`imports` **cross-file** de alta fidelidad, que hoy solo tienen Python (`ast`) y JS/TS
+(`ts_treesitter`, vía `bindings` de import + resolución diferida en el indexador).
+
+**Plan de implementación.**
+1. Por gramática, parsear los **imports** y construir `raw_imports` (módulos) y `bindings`
+   (nombre local → módulo/símbolo): Go `import_spec`, Java `import_declaration` (scoped), Rust
+   `use_declaration`, C/C++ `preproc_include`, C# `using_directive`, PHP `use`/`require`, R
+   `library()`/`source()`, VB `imports_statement`.
+2. Emitir `calls_out` (llamadas no resueltas localmente) desde `ts_generic` — ya se detecta el
+   callee en el pase intra-archivo; basta propagar los no resueltos con el alias del objeto.
+3. Reusar la resolución cross-file del indexador (la misma que usa JS/TS) para atar
+   `calls_out` + `bindings` → aristas `calls`/`imports` entre archivos.
+4. Mapear módulos a nodos `file`/`external` por lenguaje (rutas relativas vs paquetes).
+
+**Pruebas post-implementación.**
+- Por lenguaje: `f` en `a` importa y llama a `g` de `b` → arista `calls` cross-file + `imports`.
+- No-regresión: intra-archivo y los lenguajes actuales (Python/JS/TS) intactos.
+- Degradación: import no resoluble → se omite (sin aristas colgantes).
+
+**Riesgo.** Medio, esfuerzo Alto: la sintaxis de import y la resolución de módulos difiere mucho
+por lenguaje (rutas relativas en C/Go/Rust vs paquetes en Java/C#). Empezar por 1–2 lenguajes
+de import simple (Go, Java) como prueba, y extender.
 
 ---
 

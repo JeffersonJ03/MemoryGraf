@@ -1890,6 +1890,25 @@ class TestMultiLanguage(Base):
         for ext in (".go", ".rs", ".c", ".cpp", ".java", ".cs", ".php", ".r", ".vb", ".s"):
             self.assertIn(ext, EXT_LANG)
 
+    def test_intra_file_calls(self):
+        # f llama a g dentro del mismo archivo -> arista calls (varios lenguajes)
+        cases = {
+            "c.c": ('int g(){return 1;}\nint f(){ return g(); }\n', ("c.c::f", "c.c::g")),
+            "m.go": ('package m\nfunc g() int {return 1}\nfunc f() int { return g() }\n',
+                     ("m.go::f", "m.go::g")),
+            "l.rs": ('fn g()->i32{1}\nfn f()->i32{ g() }\n', ("l.rs::f", "l.rs::g")),
+            "J.java": ('class C{ int g(){return 1;} int f(){ return g(); } }\n',
+                       ("J.java::C.f", "J.java::C.g")),
+        }
+        for fn, (code, _e) in cases.items():
+            self.write(fn, code)
+        store, _ = self.index()
+        calls = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["type"] == "calls"}
+        for fn, (_code, (src, tgt)) in cases.items():
+            self.assertIn((f"proj/{src}", f"proj/{tgt}"), calls, f"{fn}: falta calls")
+        store.close()
+
 
 class TestMultiLanguageDegradation(Base):
     """Sin tree-sitter, un lenguaje genérico se indexa como archivo (sin símbolos), no crashea."""

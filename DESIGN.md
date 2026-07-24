@@ -538,16 +538,19 @@ archivo). Así el sistema es agnóstico del LLM también en la generación, no s
 
 La extracción estructural dejó de ser solo Python + JS/TS. Un extractor GENÉRICO dirigido por
 config sobre tree-sitter cubre **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic y Assembly**:
-emite `symbol` (funciones, clases/tipos, métodos `Clase.m`) + aristas `defines`, con extracción
-de nombre por-gramática (campo `name`; casos especiales: declarator en C/C++, `type_spec` en Go,
-`impl` en Rust, asignación en R, bloque en VB, `label` en asm). El indexador rutea por extensión:
+emite `symbol` (funciones, clases/tipos, métodos `Clase.m`) + aristas `defines` + `calls`
+INTRA-archivo (callee resuelto por nombre local), con extracción de nombre por-gramática
+(campo `name`; casos especiales: declarator en C/C++, `type_spec` en Go, `impl` en Rust,
+asignación en R, bloque en VB, `label` en asm). El indexador rutea por extensión:
 Python→`python_ast` (exacto, con calls), JS/TS→`ts_treesitter` (exacto, con calls/imports
 cross-file), el resto→`ts_generic`. Degrada a nodo `file` sin tree-sitter.
 
-**Alcance honesto:** los lenguajes nuevos aportan **símbolos + `defines`** (potencian `overview`,
-`search`, `get`, `neighbors`, `graph`, `report`, y el co-cambio a nivel símbolo de la Capa 1).
-Los `calls`/`imports` cross-file de alta fidelidad siguen siendo de Python y JS/TS; extenderlos a
-más lenguajes es una ampliación acotada por gramática (aún no hecha).
+**Alcance honesto:** los lenguajes nuevos aportan **símbolos + `defines` + `calls` intra-archivo**
+(potencian `overview`, `search`, `get`, `neighbors`, `graph`, `report`, y el co-cambio a nivel
+símbolo de la Capa 1). Los `calls`/`imports` **cross-file** de alta fidelidad siguen siendo de
+Python y JS/TS; extenderlos a más lenguajes es una ampliación por-gramática documentada en el
+roadmap (`MEJORAS-FUTURAS.md` §M9): requiere parsear los imports de cada lenguaje y resolver los
+*bindings* (nombre local → módulo/símbolo) para el callee cross-file.
 
 ### 18.4 Co-cambio cross-project por símbolo (M8)
 

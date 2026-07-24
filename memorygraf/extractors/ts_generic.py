@@ -14,9 +14,24 @@ from __future__ import annotations
 from typing import Tuple
 
 from ..model import (
-    Node, Edge, NODE_FILE, NODE_SYMBOL, EDGE_DEFINES, symbol_id, file_id,
+    Node, Edge, NODE_FILE, NODE_SYMBOL, EDGE_DEFINES, EDGE_CALLS, symbol_id, file_id,
 )
 from .ts_treesitter import available, _parser  # reutiliza detección + get_parser
+
+# Llamadas INTRA-archivo por gramática: (tipos de nodo de llamada, campo del callee).
+# El callee cross-file (bindings de imports) es roadmap por-lenguaje (ver MEJORAS-FUTURAS).
+_CALLS = {
+    "c":     ({"call_expression"}, "function"),
+    "cpp":   ({"call_expression"}, "function"),
+    "go":    ({"call_expression"}, "function"),
+    "rust":  ({"call_expression"}, "function"),
+    "csharp": ({"invocation_expression"}, "function"),
+    "php":   ({"function_call_expression", "member_call_expression",
+               "scoped_call_expression"}, "function"),
+    "r":     ({"call"}, "function"),
+    "java":  ({"method_invocation"}, "name"),
+    "vb":    ({"invocation"}, None),     # sin campo: primer identificador del callee
+}
 
 # extensión -> gramática de tree-sitter
 _GRAMMAR_BY_EXT = {
@@ -86,24 +101,34 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     def text(n):
         return src[n.start_byte:n.end_byte].decode("utf-8", "replace")
 
+    spans: list = []          # (start_byte, end_byte, sid) para ubicar el llamante
+    by_short: dict = {}       # nombre corto -> sid (resolución intra-archivo del callee)
+
     def add(qual, kind, node, parent_id):
         sid = symbol_id(rel_path, qual)
         nodes.append(Node(id=sid, type=NODE_SYMBOL, name=qual, project=project,
                           path=rel_path, span_start=node.start_point[0] + 1,
                           span_end=node.end_point[0] + 1, tags=[grammar, kind]))
         edges.append(Edge(parent_id, sid, EDGE_DEFINES, 1.0, "tree-sitter"))
+        spans.append((node.start_byte, node.end_byte, sid))
+        by_short[qual.split(".")[-1]] = sid
         return sid
 
-    # --- lenguajes con forma propia (no encajan en el modelo def-node -> name) ---
+    # --- símbolos: lenguajes con forma propia + genérico ---
     if grammar == "r":
         _extract_r(root, text, rel_path, project, fid, add)
-        return nodes, edges, [], [], {}
-    if grammar == "asm":
+    elif grammar == "asm":
         _extract_asm(root, text, rel_path, project, fid, add)
-        return nodes, edges, [], [], {}
+    else:
+        _walk_defs(root, _SPEC[grammar], grammar, text, src, rel_path, fid, add)
 
-    spec = _SPEC[grammar]
+    # --- llamadas INTRA-archivo (callee resuelto por nombre local) ---
+    if grammar in _CALLS and by_short:
+        _find_calls(root, grammar, text, spans, by_short, edges)
+    return nodes, edges, [], [], {}
 
+
+def _walk_defs(root, spec, grammar, text, src, rel_path, fid, add):
     def name_of(node):
         t = node.type
         if grammar in ("c", "cpp") and t == "function_definition":
@@ -150,12 +175,65 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
                 walk(ch, container, parent_id)
 
     walk(root, None, fid)
-    return nodes, edges, [], [], {}
 
 
 # --------------------------------------------------------------------------- #
-# Helpers de extracción de nombre
+# Llamadas intra-archivo + helpers de extracción de nombre
 # --------------------------------------------------------------------------- #
+def _short_ident(s: str) -> str:
+    """Último segmento identificador de un callee (`a.b.c` -> `c`, `A::m` -> `m`)."""
+    for sep in ("::", "->", ".", "\\"):
+        if sep in s:
+            s = s.rsplit(sep, 1)[-1]
+    out = []
+    for ch in s.strip():
+        if ch.isalnum() or ch == "_":
+            out.append(ch)
+        else:
+            break
+    return "".join(out)
+
+
+def _first_ident(node, text):
+    for c in node.children:
+        if c.type in ("identifier", "name", "field_identifier", "simple_name"):
+            return text(c)
+        deep = _first_ident(c, text)
+        if deep:
+            return deep
+    return None
+
+
+def _find_calls(root, grammar, text, spans, by_short, edges):
+    """Aristas `calls` INTRA-archivo: llamante (por contención de bytes) -> callee
+    resuelto por nombre corto contra los símbolos del propio archivo."""
+    call_types, field = _CALLS[grammar]
+    ordered = sorted(spans, key=lambda s: s[1] - s[0])   # el span más pequeño (interno) 1º
+
+    def enclosing(byte):
+        for a, b, sid in ordered:
+            if a <= byte <= b:
+                return sid
+        return None
+
+    seen = set()
+
+    def walk(n):
+        if n.type in call_types:
+            callee_node = n.child_by_field_name(field) if field else None
+            name = (text(callee_node) if callee_node is not None
+                    else _first_ident(n, text) or "")
+            caller = enclosing(n.start_byte)
+            callee = by_short.get(_short_ident(name))
+            if caller and callee and callee != caller and (caller, callee) not in seen:
+                seen.add((caller, callee))
+                edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+
+
 def _first_child(node, type_name):
     for c in node.children:
         if c.type == type_name:
