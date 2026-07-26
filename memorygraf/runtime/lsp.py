@@ -38,6 +38,7 @@ _LANGUAGES = [
                     ("jedi-language-server", [])],
         "ext_lang": {".py": "python"},
         "params": python_ast.param_offsets,   # M4b: offsets de params para hover por posición
+        "locals": python_ast.local_var_offsets,  # M4b-vars (opt-in): offsets de vars locales
     },
     {
         "name": "typescript",
@@ -140,7 +141,7 @@ def _parse_hover(result) -> str | None:
 
 
 def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None,
-                   param_provider=None) -> int:
+                   param_provider=None, local_provider=None) -> int:
     """Puebla `resolved_type` por símbolo vía hover (best-effort, con presupuesto).
 
     Dos pasadas: los servidores tipo jedi devuelven null en los PRIMEROS hovers
@@ -157,6 +158,9 @@ def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None,
     timeout = float(rt.get("hover_timeout", 3))
     deadline = time.time() + float(rt.get("hover_budget", 30))
     want_params = bool(param_provider) and rt.get("param_types", True)
+    # M4b-vars (OPT-IN, default OFF): tipos de variables locales. Muchas y de valor marginal
+    # (el tipo suele estar en la asignación), por eso apagado salvo runtime.local_var_types.
+    want_locals = bool(local_provider) and rt.get("local_var_types", False)
     time.sleep(float(rt.get("hover_settle", 0.5)))     # warm-up del analizador
 
     def _hover(uri, line, char):
@@ -172,12 +176,18 @@ def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None,
         if not lines:
             continue
         params_by_qual = {}
+        locals_by_qual = {}
+        ext = fid.rsplit(".", 1)[-1].lower() if "." in fid else ""
         if want_params:
-            ext = fid.rsplit(".", 1)[-1].lower() if "." in fid else ""
             try:
                 params_by_qual = param_provider("\n".join(lines), ext) or {}
             except Exception:
                 params_by_qual = {}
+        if want_locals:
+            try:
+                locals_by_qual = local_provider("\n".join(lines), ext) or {}
+            except Exception:
+                locals_by_qual = {}
         for sym in syms_by_file.get(fid, []):
             if time.time() > deadline:
                 return typed
@@ -204,6 +214,21 @@ def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None,
                 if ptypes:
                     store.runtime_node_update(
                         sym["id"], param_types=json.dumps(ptypes, ensure_ascii=False))
+            # M4b-vars (opt-in): tipo por variable local (hover en el offset del binding)
+            llist = locals_by_qual.get(sym.get("name"))
+            if llist:
+                ltypes = {}
+                for lname, positions in llist:
+                    if time.time() > deadline:
+                        break
+                    for lline, lchar in positions:
+                        lt = _hover(uri, lline, lchar + len(lname) // 2)
+                        if lt:
+                            ltypes[lname] = lt
+                            break
+                if ltypes:
+                    store.runtime_node_update(
+                        sym["id"], local_types=json.dumps(ltypes, ensure_ascii=False))
     for sym_id, uri, line, char in pending:   # 2ª pasada (server caliente)
         if time.time() > deadline:
             break
@@ -311,7 +336,8 @@ def _uri(path: str) -> str:
     return "file://" + os.path.abspath(path).replace("\\", "/")
 
 
-def _run_language(store, server, files, roots, rt, log, param_provider=None) -> tuple:
+def _run_language(store, server, files, roots, rt, log, param_provider=None,
+                  local_provider=None) -> tuple:
     """Ciclo LSP efímero para UN lenguaje: abre sus archivos, mapea diagnósticos y
     puebla tipos. Devuelve (archivos_abiertos, diagnósticos, tipos). Solo AÑADE al
     store (los `runtime_clear` los hace `sync` una vez, antes de todos los lenguajes)."""
@@ -366,7 +392,8 @@ def _run_language(store, server, files, roots, rt, log, param_provider=None) -> 
         if rt.get("hover", True):
             try:
                 typed = _collect_types(store, client, opened, file_lines, rt, log,
-                                       param_provider=param_provider)
+                                       param_provider=param_provider,
+                                       local_provider=local_provider)
             except Exception:
                 typed = 0
         return len(opened), total, typed
@@ -421,11 +448,13 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
     store.runtime_clear("diagnostics")
     store.runtime_clear("resolved_type")
     store.runtime_clear("param_types")
+    store.runtime_clear("local_types")
     tot_files = tot_diags = tot_types = 0
     langs = []
     for spec, srv, files in runnable:
         f, d, t = _run_language(store, srv, files, roots, rt, log,
-                                param_provider=spec.get("params"))
+                                param_provider=spec.get("params"),
+                                local_provider=spec.get("locals"))
         tot_files += f
         tot_diags += d
         tot_types += t

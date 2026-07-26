@@ -6,7 +6,9 @@ re-indexa incrementalmente por hash y resuelve los imports a nodos internos
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 from datetime import datetime, timezone
 
 from .model import (
@@ -43,6 +45,138 @@ def _iter_files(root: str, excludes: set):
                 yield os.path.join(dirpath, fn)
 
 
+def _loads_jsonc(text: str):
+    """json.loads tolerante a JSONC (comentarios // y /* */, comas colgantes).
+
+    tsconfig.json casi siempre trae comentarios; el json estricto falla. Degrada a
+    {} si ni así parsea (mejor perder los alias que reventar el indexado)."""
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    out, i, n, in_str, esc = [], 0, len(text), False, False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+        elif c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+        elif c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+        elif c == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    cleaned = re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return {}
+
+
+def _load_ts_aliases(root: str):
+    """Lee compilerOptions.paths de tsconfig/jsconfig -> [(prefijo, con_estrella, [dest,...])].
+
+    Los destinos van normalizados relativos a la raíz del proyecto (baseUrl incluido),
+    igual formato que las claves de path_index. Así 'import x from "@app/foo"' se
+    resuelve al archivo interno en vez de tratarse como dependencia externa falsa."""
+    for fn in ("tsconfig.json", "jsconfig.json"):
+        p = os.path.join(root, fn)
+        if not os.path.isfile(p):
+            continue
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                data = _loads_jsonc(f.read())
+        except OSError:
+            return []
+        co = (data or {}).get("compilerOptions") or {}
+        base = (co.get("baseUrl") or ".").strip()
+        paths = co.get("paths") or {}
+        aliases = []
+        for pattern, targets in paths.items():
+            if not isinstance(targets, list):
+                continue
+            prefix, star = (pattern.split("*", 1)[0], "*" in pattern)
+            dests = []
+            for t in targets:
+                tp = t.split("*", 1)[0]
+                joined = os.path.normpath(os.path.join(base, tp)).replace("\\", "/")
+                dests.append(joined.lstrip("./") or joined)
+            aliases.append((prefix, star, dests))
+        return aliases
+    return []
+
+
+def _load_go_module(root: str):
+    """Nombre de módulo de go.mod (`module miapp/x`). Prefijo de los import paths
+    internos: `import "miapp/x/util"` -> paquete interno `util`."""
+    p = os.path.join(root, "go.mod")
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("module "):
+                    return line[len("module "):].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _load_php_psr4(root: str):
+    r"""Mapeo PSR-4 de composer.json: [(prefijo_namespace, dir_base),...].
+
+    autoload.psr-4 {"App\\": "src/"} -> `use App\Foo\Bar` vive en src/Foo/Bar.php."""
+    p = os.path.join(root, "composer.json")
+    if not os.path.isfile(p):
+        return []
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            data = _loads_jsonc(f.read())
+    except OSError:
+        return []
+    out = []
+    for key in ("autoload", "autoload-dev"):
+        psr4 = ((data or {}).get(key) or {}).get("psr-4") or {}
+        for prefix, base in psr4.items():
+            base = (base[0] if isinstance(base, list) and base else base) or ""
+            out.append((prefix, str(base).strip("/")))
+    return out
+
+
+_RE_CS_NS = re.compile(r'\bnamespace\s+([A-Za-z_][\w.]*)')
+_RE_CS_USING = re.compile(r'\busing\s+([A-Za-z_][\w.]*)\s*;')
+_RE_VB_NS = re.compile(r'(?i)\bNamespace\s+([A-Za-z_][\w.]*)')
+_RE_VB_IMPORTS = re.compile(r'(?i)^\s*Imports\s+([A-Za-z_][\w.]*)', re.MULTILINE)
+
+
+def _cs_vb_namespaces(source: str, ext: str):
+    """(namespaces declarados, namespaces usados) de un archivo C#/VB (M9 2b/2c).
+
+    Regex (no tree-sitter): barato y suficiente para 'namespace X'/'using X;' (C#) y
+    'Namespace X'/'Imports X' (VB). El 'scope' visible = declarados + usados."""
+    if ext == ".cs":
+        return set(_RE_CS_NS.findall(source)), set(_RE_CS_USING.findall(source))
+    if ext == ".vb":
+        return set(_RE_VB_NS.findall(source)), set(_RE_VB_IMPORTS.findall(source))
+    return set(), set()
+
+
 def _py_module_key(project: str, relpath: str) -> str:
     """miapp/paquete/modulo.py -> paquete.modulo  (clave de import interno)."""
     p = relpath
@@ -62,8 +196,33 @@ class Indexer:
         self.pending_calls = []    # (file_id, project, ext, base_dir, calls_out, bindings)
         self.py_module_index = {}  # (project, dotted) -> file_id
         self.path_index = {}       # (project, normalized_relpath_no_ext) -> file_id
+        # alias de tsconfig/jsconfig (compilerOptions.paths) por proyecto
+        self.js_aliases = {}       # project -> [(prefijo, con_estrella, [dest,...])]
+        # M9: config por-proyecto para resolver imports de Go y PHP
+        self.go_module = {}        # project -> nombre de módulo (go.mod)
+        self.go_pkg_index = {}     # (project, dir_paquete) -> [file_id,...]
+        self.php_psr4 = {}         # project -> [(prefijo_namespace, dir_base),...]
+        self.ns_index = {}         # (project, namespace) -> [file_id,...]  (C#/VB)
+        self.file_ns_scope = {}    # file_id -> set(namespaces visibles: declarados+usados)
+        for proj in config["projects"]:
+            name, root = proj["name"], proj["root"]
+            al = _load_ts_aliases(root)
+            if al:
+                self.js_aliases[name] = al
+            mod = _load_go_module(root)
+            if mod:
+                self.go_module[name] = mod
+            psr4 = _load_php_psr4(root)
+            if psr4:
+                self.php_psr4[name] = psr4
         # tree-sitter para JS/TS si está instalado; si no, regex (degradación elegante)
         self.use_treesitter = ts_treesitter.available()
+        # M9: desambiguación LLM OPT-IN de calls cross-file ambiguas (>1 candidato).
+        # Por defecto OFF (portabilidad); requiere Ollama y este flag. Fallback: sin arista.
+        self.xlink_llm = (str(os.environ.get("MEMORYGRAF_XLINK_LLM", "")).lower()
+                          in ("1", "true", "yes", "on")
+                          or bool((config.get("resolver") or {}).get("llm")))
+        self._ambiguous = []       # [(caller_sid, callee_name, [cand_sid,...])]
 
     def index_all(self) -> dict:
         counters = {"files": 0, "skipped": 0, "nodes": 0, "removed": 0, "reconciled": 0}
@@ -112,6 +271,16 @@ class Indexer:
                 counters["removed"] += 1
         self._resolve_imports()
         counters["xcalls"] = self._resolve_calls()
+        # M9: desambiguación LLM opcional de las calls ambiguas recolectadas (opt-in).
+        # confidence baja + provenance 'llm'; sin LLM disponible no añade nada (fallback).
+        if self.xlink_llm and self._ambiguous:
+            from . import context_compiler
+            roots = {p["name"]: p["root"] for p in self.config["projects"]}
+            picked = context_compiler.disambiguate_calls(
+                self.store, self.config, self._ambiguous, roots)
+            for caller, chosen in picked:
+                self.store.upsert_edge(Edge(caller, chosen, EDGE_CALLS, 0.55, "llm"))
+            counters["xcalls_llm"] = len(picked)
         counters["reconciled"] = self._reconcile(pre_symbols)
         self.store.set_meta("indexed_at", _now())
         self.store.set_meta("projects", ",".join(p["name"] for p in self.config["projects"]))
@@ -125,23 +294,73 @@ class Indexer:
         Precisión alta: solo enlaza si el nombre llamado fue importado de un módulo
         interno que define ese símbolo. Activa la reconciliación al mover símbolos.
         """
-        # (file_id, nombre_simple) -> symbol_id  (solo símbolos top-level)
+        # (file_id, nombre_simple) -> symbol_id  (top-level; modelo Python/JS)
         sym_index = {}
+        # (file_id, nombre_corto) -> [symbol_id]  (todos; genéricos: Clase.m -> "m")
+        short_index = {}
+        # nombre_corto -> [(file_id, symbol_id)]  (para C/C++: resolución por nombre único)
+        short_all = {}
+        # (file_id, nombre_cualificado) -> symbol_id  (para C#/VB: "Clase.metodo")
+        name_index = {}
         for n in self.store.all_nodes(types=["symbol"]):
-            if "." not in n["name"] and n.get("path"):
-                sym_index[(n["path"], n["name"])] = n["id"]
+            path, name = n.get("path"), n["name"]
+            if not path:
+                continue
+            short = name.rsplit(".", 1)[-1]
+            if "." not in name:
+                sym_index[(path, name)] = n["id"]
+            short_index.setdefault((path, short), []).append(n["id"])
+            short_all.setdefault(short, []).append((path, n["id"]))
+            name_index[(path, name)] = n["id"]
         count = 0
         for file_id_, project, ext, base_dir, calls_out, bindings in self.pending_calls:
+            generic = ext != ".py" and ext not in _TS_EXTS
             for caller, callee_name, via in calls_out:
+                if generic and via is None and EXT_LANG.get(ext) in ("c", "cpp", "r"):
+                    # M9 (1c-ii/2a): llamada libre C/C++/R. Candidatos = símbolos con el
+                    # mismo nombre corto en archivos cuyo stem coincide con un #include
+                    # (C/C++) o source() (R) directo. Enlaza SOLO si es único -> sin falsos.
+                    cands = self._c_call_candidates(file_id_, callee_name, short_all, caller)
+                    if len(cands) == 1:
+                        self.store.upsert_edge(Edge(caller, cands[0], EDGE_CALLS, 0.8, "xfile"))
+                        count += 1
+                    elif len(cands) > 1 and self.xlink_llm:
+                        self._ambiguous.append((caller, callee_name, cands))
+                    continue
+                if generic and via and EXT_LANG.get(ext) in ("csharp", "vb"):
+                    # M9 (2b/2c): 'Receptor.metodo' -> símbolo "Receptor.metodo" en archivos
+                    # de los namespaces visibles del llamante. Único -> enlaza (sin falsos).
+                    qual = f"{via}.{callee_name}"
+                    files = {f for ns in self.file_ns_scope.get(file_id_, ())
+                             for f in self.ns_index.get((project, ns), ())}
+                    cands = list(dict.fromkeys(
+                        name_index[(f, qual)] for f in files
+                        if (f, qual) in name_index and name_index[(f, qual)] != caller))
+                    if len(cands) == 1:
+                        self.store.upsert_edge(Edge(caller, cands[0], EDGE_CALLS, 0.8, "xfile"))
+                        count += 1
+                    elif len(cands) > 1 and self.xlink_llm:
+                        self._ambiguous.append((caller, callee_name, cands))
+                    continue
                 b = bindings.get(via or callee_name)
                 if not b:
                     continue
                 module, imported = b
+                if generic:
+                    # M9 (1c): receptor->import->archivo(s); match por nombre corto.
+                    # Enlaza SOLO si es inequívoco (1 candidato) -> alta precisión.
+                    files = self._resolve_generic_files(project, ext, base_dir, module)
+                    cands = [c for tf in files
+                             for c in short_index.get((tf, callee_name), []) if c != caller]
+                    if len(cands) == 1:
+                        self.store.upsert_edge(Edge(caller, cands[0], EDGE_CALLS, 0.85, "xfile"))
+                        count += 1
+                    elif len(cands) > 1 and self.xlink_llm:
+                        self._ambiguous.append((caller, callee_name, cands))
+                    continue
                 target_name = imported or callee_name
-                if ext == ".py":
-                    target_file = self._resolve_py(project, module)
-                else:
-                    target_file = self._resolve_js(project, base_dir, module)
+                target_file = (self._resolve_py(project, module, base_dir) if ext == ".py"
+                               else self._resolve_js(project, base_dir, module))
                 if not target_file:
                     continue
                 tgt = sym_index.get((target_file, target_name))
@@ -149,6 +368,28 @@ class Indexer:
                     self.store.upsert_edge(Edge(caller, tgt, EDGE_CALLS, 0.9, "xfile"))
                     count += 1
         return count
+
+    def _c_call_candidates(self, file_id_, name, short_all, caller):
+        """Candidatos para una llamada libre de C/C++ (M9 1c-ii). Restringe a símbolos
+        en archivos cuyo stem == stem de un `#include` DIRECTO del llamante; así el par
+        header/impl (`x.h`/`x.c`) comparte stem y se cubre solo, sin falsos por convención."""
+        stems = {e["target"].rsplit(".", 1)[0]
+                 for e in self.store.neighbors(file_id_, edge_types=[EDGE_IMPORTS],
+                                               direction="out")}
+        return [sid for (f, sid) in short_all.get(name, [])
+                if sid != caller and f.rsplit(".", 1)[0] in stems]
+
+    def _resolve_generic_files(self, project, ext, base_dir, module):
+        """Archivos candidatos de un import genérico (M9). Go: todos los del paquete
+        (un paquete = dir con varios archivos); el resto: el único archivo resuelto."""
+        if EXT_LANG.get(ext) == "go":
+            pkg = module
+            mod = self.go_module.get(project)
+            if mod and (module == mod or module.startswith(mod + "/")):
+                pkg = module[len(mod):].lstrip("/")
+            return list(self.go_pkg_index.get((project, pkg), []))
+        f = self._resolve_generic(project, ext, base_dir, module)
+        return [f] if f else []
 
     def _reconcile(self, pre_symbols: dict) -> int:
         """Re-enlaza aristas cuyos extremos se movieron de archivo (§6.4).
@@ -192,6 +433,17 @@ class Indexer:
         ext = os.path.splitext(relpath)[1].lower()
         if ext == ".py":
             self.py_module_index[(project, _py_module_key(project, relpath))] = rel_id
+        if ext == ".go":
+            # Go: paquete = directorio. Índice dir->archivos para resolver imports.
+            pkgdir = os.path.dirname(relpath)
+            self.go_pkg_index.setdefault((project, pkgdir), []).append(rel_id)
+        if ext in (".cs", ".vb"):
+            # C#/VB: namespace = espacio lógico (varios archivos). Índice ns->archivos
+            # y el scope visible del archivo (declarados + using/Imports) para M9 2b/2c.
+            declared, used = _cs_vb_namespaces(source, ext)
+            for ns in declared:
+                self.ns_index.setdefault((project, ns), []).append(rel_id)
+            self.file_ns_scope[rel_id] = declared | used
         no_ext = relpath.rsplit(".", 1)[0]
         self.path_index[(project, no_ext)] = rel_id
         # index/ resoluciones tipo carpeta
@@ -227,9 +479,11 @@ class Indexer:
             for raw in raws:
                 target = None
                 if ext == ".py":
-                    target = self._resolve_py(project, raw)
-                else:
+                    target = self._resolve_py(project, raw, base_dir)
+                elif ext in _TS_EXTS:
                     target = self._resolve_js(project, base_dir, raw)
+                else:
+                    target = self._resolve_generic(project, ext, base_dir, raw)
                 if target:
                     self.store.upsert_edge(Edge(
                         source=file_id_, target=target, type=EDGE_IMPORTS,
@@ -253,26 +507,120 @@ class Indexer:
                         confidence=0.8, provenance="regex"))
                     self._import_edge_count += 1
 
-    def _resolve_py(self, project, raw):
-        key = raw.lstrip(".")
-        # coincidencia exacta o por prefijo de módulo
-        if (project, key) in self.py_module_index:
+    def _resolve_py(self, project, raw, base_dir=""):
+        if raw.startswith("."):
+            # Import RELATIVO ('from .', 'from ..pkg'): se resuelve contra el paquete
+            # del archivo actual, no contra la raíz del proyecto. Antes se hacía
+            # raw.lstrip('.') y se perdía el nivel -> resolvía al módulo equivocado
+            # o a nada (arista perdida). base_dir es el dir relativo del importador.
+            level = len(raw) - len(raw.lstrip("."))
+            suffix = raw.lstrip(".")
+            pkg = [p for p in base_dir.split("/") if p]
+            up = level - 1                 # 1 punto = paquete actual; +1 por cada punto extra
+            if up > len(pkg):
+                return None                # sube más allá de la raíz del proyecto
+            base = pkg[:len(pkg) - up]
+            key = ".".join(base + (suffix.split(".") if suffix else []))
+        else:
+            key = raw
+        # coincidencia exacta o por prefijo de módulo (from package import submodule)
+        if key and (project, key) in self.py_module_index:
             return self.py_module_index[(project, key)]
-        # from package import submodule -> intentar package
-        parts = key.split(".")
+        parts = key.split(".") if key else []
         for i in range(len(parts), 0, -1):
             cand = ".".join(parts[:i])
             if (project, cand) in self.py_module_index:
                 return self.py_module_index[(project, cand)]
         return None
 
+    @staticmethod
+    def _strip_js_ext(p: str) -> str:
+        """Quita la extensión JS/TS de un especificador de import.
+
+        path_index guarda claves SIN extensión (ver _index_file). Los imports ESM
+        llevan la extensión explícita y OBLIGATORIA ('./x.js'), así que hay que
+        recortarla o el lookup falla y la arista se pierde en silencio.
+        """
+        root, ext = os.path.splitext(p)
+        return root if ext.lower() in _TS_EXTS else p
+
+    def _resolve_js_alias(self, project, raw):
+        """Resuelve un import por los alias de tsconfig.paths (@app/foo, ~/x, etc.)."""
+        for prefix, star, dests in self.js_aliases.get(project, []):
+            rest = None
+            if star and raw.startswith(prefix):
+                rest = raw[len(prefix):]
+            elif not star and raw == prefix.rstrip("/"):
+                rest = ""
+            if rest is None:
+                continue
+            for dest in dests:
+                cand = self._strip_js_ext(("/".join([dest, rest])).strip("/") if rest else dest)
+                hit = self.path_index.get((project, cand)) or \
+                    self.path_index.get((project, cand + "/index"))
+                if hit:
+                    return hit
+        return None
+
     def _resolve_js(self, project, base_dir, raw):
         if not raw.startswith("."):
-            # alias tipo "@/..." -> tratar como interno si el resto matchea
+            # 1) alias de tsconfig/jsconfig (compilerOptions.paths)
+            hit = self._resolve_js_alias(project, raw)
+            if hit:
+                return hit
+            # 2) alias "@/..." por convención (proyectos sin tsconfig)
             if raw.startswith("@/"):
-                cand = raw[2:]
+                cand = self._strip_js_ext(raw[2:])
                 return self.path_index.get((project, cand)) or \
                        self.path_index.get((project, "src/" + cand))
             return None
         norm = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
-        return self.path_index.get((project, norm))
+        return self.path_index.get((project, self._strip_js_ext(norm)))
+
+    def _resolve_generic(self, project, ext, base_dir, raw):
+        r"""Resuelve un import de los lenguajes genéricos a un archivo interno (M9).
+
+        Determinista (sin LLM). Cada lenguaje mapea distinto:
+          java: paquete `a.b.C` -> ruta `a/b/C` (progresivo para static/inner).
+          c/cpp: `#include "x.h"` -> ruta relativa al archivo.
+          rust: `mod x;` -> archivo hermano `x.rs` o `x/mod.rs`.
+          go:   import path -> (quita prefijo de go.mod) -> dir de paquete -> 1 archivo.
+          php:  `use App\Foo\Bar` -> PSR-4 (composer.json) -> src/Foo/Bar.php."""
+        g = EXT_LANG.get(ext)
+        if g == "java":
+            parts = raw.replace(".", "/").split("/")
+            for i in range(len(parts), 0, -1):     # progresivo: static imports / inner classes
+                hit = self.path_index.get((project, "/".join(parts[:i])))
+                if hit:
+                    return hit
+            return None
+        if g in ("c", "cpp", "r"):
+            # C/C++: #include relativo; R: source("path") relativo (ambos por ruta)
+            norm = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
+            return self.path_index.get((project, os.path.splitext(norm)[0]))
+        if g == "rust":
+            for suffix in (raw, raw + "/mod"):
+                cand = os.path.normpath(os.path.join(base_dir, suffix)).replace("\\", "/")
+                hit = self.path_index.get((project, cand))
+                if hit:
+                    return hit
+            return None
+        if g == "go":
+            pkg = raw
+            mod = self.go_module.get(project)
+            if mod and (raw == mod or raw.startswith(mod + "/")):
+                pkg = raw[len(mod):].lstrip("/")     # quita el prefijo del módulo
+            files = self.go_pkg_index.get((project, pkg))
+            return sorted(files)[0] if files else None   # 1 archivo representativo del paquete
+        if g == "php":
+            ns = raw.strip("\\")
+            for prefix, base in self.php_psr4.get(project, []):
+                pre = prefix.strip("\\")
+                if ns == pre or ns.startswith(pre + "\\"):
+                    rest = ns[len(pre):].strip("\\").replace("\\", "/")
+                    cand = "/".join(p for p in (base, rest) if p)
+                    hit = self.path_index.get((project, cand))
+                    if hit:
+                        return hit
+            return None
+        return None

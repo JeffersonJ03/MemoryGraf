@@ -545,12 +545,21 @@ asignación en R, bloque en VB, `label` en asm). El indexador rutea por extensi�
 Python→`python_ast` (exacto, con calls), JS/TS→`ts_treesitter` (exacto, con calls/imports
 cross-file), el resto→`ts_generic`. Degrada a nodo `file` sin tree-sitter.
 
-**Alcance honesto:** los lenguajes nuevos aportan **símbolos + `defines` + `calls` intra-archivo**
-(potencian `overview`, `search`, `get`, `neighbors`, `graph`, `report`, y el co-cambio a nivel
-símbolo de la Capa 1). Los `calls`/`imports` **cross-file** de alta fidelidad siguen siendo de
-Python y JS/TS; extenderlos a más lenguajes es una ampliación por-gramática documentada en el
-roadmap (`MEJORAS-FUTURAS.md` §M9): requiere parsear los imports de cada lenguaje y resolver los
-*bindings* (nombre local → módulo/símbolo) para el callee cross-file.
+Los lenguajes nuevos aportan **símbolos + `defines` + `calls` intra-archivo** (potencian
+`overview`, `search`, `get`, `neighbors`, `graph`, `report`, y el co-cambio a nivel símbolo de
+la Capa 1).
+
+**Cross-file (M9, implementado).** Además de Python y JS/TS, la resolución `calls`/`imports`
+**cross-file** cubre ahora los lenguajes genéricos, **determinista y precisión-primero** (solo
+enlaza si el destino es INEQUÍVOCO → sin aristas falsas). `ts_generic` extrae imports y llamadas
+con receptor; el indexador resuelve por lenguaje según su mecanismo real: **paquete→ruta**
+(Java), **`#include`/`source` relativo** (C/C++, R), **`mod`** (Rust), **`go.mod`→paquete** (Go),
+**PSR-4** (PHP), e **índice de namespaces** (`namespace`/`using`, `Namespace`/`Imports`) para
+**C#/VB**. Las llamadas libres (C/C++/R) se resuelven por el *stem* del include/source + nombre
+único; asm mapea `call`/saltos a etiquetas (whitelist de mnemónicos). Encima, una **capa LLM
+opcional y opt-in** (`resolver.llm` / `MEMORYGRAF_XLINK_LLM`) desempata los casos ambiguos que el
+resolutor estático deja sin enlazar (confidence baja + provenance `llm`, fallback determinista).
+Ver `MEJORAS-FUTURAS.md` §M9 para la matriz por lenguaje.
 
 ### 18.4 Co-cambio cross-project por símbolo (M8)
 
@@ -601,6 +610,7 @@ justificaría (o no) con datos.
 - **`memorygraf doctor`:** diagnostica e instala las dependencias opcionales (parsers,
   neural, watch, lsp, **pyright**) según el entorno (pipx/venv, plataforma/WSL/distro), con
   degradación; espejo "en vivo" del instalador.
-- **Indexado multi-lenguaje (§18.7):** Python + JS/TS (completo) y C/C++/Java/C#/Go/Rust/PHP/
-  R/VB/Assembly (símbolos + `defines`).
-- **Suite:** 121 tests (`python -m unittest discover -s tests`), sin dependencias.
+- **Indexado multi-lenguaje (§18.7):** Python + JS/TS y C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly
+  (símbolos + `defines` + `calls` intra); `calls`/`imports` **cross-file** en los 10 lenguajes
+  genéricos donde aplica (M9), + capa LLM opcional de desambiguación.
+- **Suite:** 155 tests (`python -m unittest discover -s tests`), sin dependencias.

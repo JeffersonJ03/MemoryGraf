@@ -123,7 +123,8 @@ CREATE TABLE IF NOT EXISTS runtime_node (
     last_test_status TEXT,     -- passed | failed | error | skipped
     resolved_type TEXT,        -- tipo resuelto por LSP (hover) de la definición
     diagnostics TEXT,          -- JSON: [{severity, message, line}]
-    param_types TEXT           -- JSON: {param: tipo} resueltos por LSP (M4b)
+    param_types TEXT,          -- JSON: {param: tipo} resueltos por LSP (M4b)
+    local_types TEXT           -- JSON: {var_local: tipo} resueltos por LSP (M4b-vars, opt-in)
 );
 """
 
@@ -149,6 +150,8 @@ class Store:
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(runtime_node)")}
         if "param_types" not in cols:      # M4b: tipos por parámetro (LSP)
             self.conn.execute("ALTER TABLE runtime_node ADD COLUMN param_types TEXT")
+        if "local_types" not in cols:      # M4b-vars: tipos de variables locales (LSP)
+            self.conn.execute("ALTER TABLE runtime_node ADD COLUMN local_types TEXT")
 
     def _init_fts(self) -> bool:
         try:
@@ -416,7 +419,7 @@ class Store:
 
     # --- CAPA 2 · verdad de runtime (caché regenerable desde tests/cobertura/LSP) ---
     _RUNTIME_COLS = ("covered", "coverage_ratio", "last_test_status",
-                     "resolved_type", "diagnostics", "param_types")
+                     "resolved_type", "diagnostics", "param_types", "local_types")
 
     def runtime_node_get(self, node_id: str) -> Optional[dict]:
         row = self.conn.execute(

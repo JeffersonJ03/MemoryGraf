@@ -77,6 +77,63 @@ def param_offsets(source: str, ext: str | None = None) -> dict:
     return out
 
 
+def local_var_offsets(source: str, ext: str | None = None) -> dict:
+    """{qualname: [(var, [(line0, char0)]), ...]} de variables LOCALES asignadas en el
+    cuerpo de cada función (M4b-vars, OPT-IN). Best-effort (Python `ast`).
+
+    Toma el PRIMER binding (target Store) de cada nombre que NO sea parámetro, self/cls ni
+    global/nonlocal. La posición es la del target (el LSP resuelve el tipo en la asignación).
+    `ext` se ignora (Python). Mismos qualnames que `extract()`."""
+    if source[:1] == "﻿":
+        source = source[1:]
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+
+    def _locals(fn):
+        a = fn.args
+        skip = {arg.arg for arg in (list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs)
+                + ([a.vararg] if a.vararg else []) + ([a.kwarg] if a.kwarg else []))}
+        skip |= {"self", "cls"}
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.Global, ast.Nonlocal)):
+                skip.update(n.names)
+        seen: dict = {}
+        order: list = []
+        for n in ast.walk(fn):
+            targets = []
+            if isinstance(n, ast.Assign):
+                targets = n.targets
+            elif isinstance(n, ast.AnnAssign) and n.target is not None:
+                targets = [n.target]
+            elif isinstance(n, (ast.For, ast.AsyncFor)):
+                targets = [n.target]
+            elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+                targets = [n.optional_vars]
+            for t in targets:
+                for nn in ast.walk(t):
+                    if (isinstance(nn, ast.Name) and nn.id not in skip
+                            and nn.id not in seen):
+                        seen[nn.id] = (nn.lineno - 1, nn.col_offset)
+                        order.append(nn.id)
+        return [(v, [seen[v]]) for v in order]
+
+    out: dict = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            lv = _locals(node)
+            if lv:
+                out[node.name] = lv
+        elif isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    lv = _locals(sub)
+                    if lv:
+                        out[f"{node.name}.{sub.name}"] = lv
+    return out
+
+
 def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list, list, dict]:
     nodes, edges, raw_imports = [], [], []
     fid = file_id(rel_path)

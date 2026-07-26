@@ -12,7 +12,11 @@ from memorygraf.store import Store
 from memorygraf.indexer import Indexer
 from memorygraf.query import Query
 from memorygraf.model import Edge, EDGE_CALLS, EDGE_CO_CHANGES
-from memorygraf import semantic, docs, entities, summarizer, workspace, git_layer
+from memorygraf import semantic, docs, entities, summarizer, workspace, git_layer, cross_link
+from memorygraf.extractors import ts_treesitter as _ts
+
+MICROSVC_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "microservices")
+CROSSFILE_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "crossfile")
 
 
 class Base(unittest.TestCase):
@@ -99,6 +103,423 @@ class TestCrossFileCalls(Base):
         self.assertNotIn(("proj/caller.py::run", "proj/helper.py::do_work"), calls)
         self.assertGreaterEqual(c["reconciled"], 1)
         store.close()
+
+
+class TestImportResolutionMatrix(Base):
+    """Matriz de resolución de imports/calls por escenario. Cada caso es un modo
+    de escribir un import que ANTES se perdía en silencio; sirve de red contra
+    regresiones al tocar _resolve_js/_resolve_py."""
+
+    # --- JS/TS: unidad, sin depender de tree-sitter ---
+    def test_strip_js_ext(self):
+        f = Indexer._strip_js_ext
+        self.assertEqual(f("a/b/c.js"), "a/b/c")
+        self.assertEqual(f("a/b/c.tsx"), "a/b/c")
+        self.assertEqual(f("a/b/c.mjs"), "a/b/c")
+        self.assertEqual(f("a/b/c"), "a/b/c")          # sin ext -> intacto
+        self.assertEqual(f("a/b.dir/c"), "a/b.dir/c")  # punto en carpeta -> intacto
+
+    def test_resolve_js_esm_explicit_extension(self):
+        # Bug ESM: 'import x from "../controllers/x.js"' (extensión OBLIGATORIA en ESM)
+        store = Store(self.db)
+        idx = Indexer(store, self.config)
+        idx.path_index[("proj", "src/controllers/vmdController")] = \
+            "proj/src/controllers/vmdController.js"
+        # con .js explícito (ESM) -> resuelve
+        self.assertEqual(
+            idx._resolve_js("proj", "src/routes", "../controllers/vmdController.js"),
+            "proj/src/controllers/vmdController.js")
+        # sin extensión (CommonJS/TS) -> sigue resolviendo
+        self.assertEqual(
+            idx._resolve_js("proj", "src/routes", "../controllers/vmdController"),
+            "proj/src/controllers/vmdController.js")
+        store.close()
+
+    def test_resolve_js_index_and_alias(self):
+        store = Store(self.db)
+        idx = Indexer(store, self.config)
+        idx.path_index[("proj", "utils/index")] = "proj/utils/index.js"
+        idx.path_index[("proj", "utils")] = "proj/utils/index.js"        # carpeta -> index
+        idx.path_index[("proj", "src/components/Btn")] = "proj/src/components/Btn.tsx"
+        self.assertEqual(idx._resolve_js("proj", "src", "../utils"),
+                         "proj/utils/index.js")                          # import de carpeta
+        self.assertEqual(idx._resolve_js("proj", "src", "@/components/Btn.tsx"),
+                         "proj/src/components/Btn.tsx")                  # alias @/ con ext
+        store.close()
+
+    def test_resolve_js_tsconfig_paths_alias(self):
+        # tsconfig con alias custom (no @/) y comentarios JSONC + coma colgante
+        self.write("tsconfig.json",
+                   '{\n'
+                   '  // config del proyecto\n'
+                   '  "compilerOptions": {\n'
+                   '    "baseUrl": ".",\n'
+                   '    "paths": {\n'
+                   '      "@app/*": ["src/app/*"],\n'
+                   '      "~utils": ["src/util.ts"],\n'
+                   '    },\n'
+                   '  },\n'
+                   '}\n')
+        store = Store(self.db)
+        idx = Indexer(store, self.config)
+        idx.path_index[("proj", "src/app/svc/order")] = "proj/src/app/svc/order.ts"
+        idx.path_index[("proj", "src/util")] = "proj/src/util.ts"
+        self.assertEqual(idx._resolve_js("proj", "src/x", "@app/svc/order"),
+                         "proj/src/app/svc/order.ts")           # alias con estrella
+        self.assertEqual(idx._resolve_js("proj", "src/x", "~utils"),
+                         "proj/src/util.ts")                    # alias exacto sin estrella
+        store.close()
+
+    # --- Python: flujo completo write+index ---
+    def test_python_relative_import_single_dot(self):
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/util.py", "def helper():\n    return 1\n")
+        self.write("pkg/main.py",
+                   "from .util import helper\n\ndef run():\n    return helper()\n")
+        store, _ = self.index()
+        imports = {(e["source"], e["target"]) for e in store.all_edges()
+                   if e["type"] == "imports"}
+        self.assertIn(("proj/pkg/main.py", "proj/pkg/util.py"), imports)
+        calls = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["type"] == "calls"}
+        self.assertIn(("proj/pkg/main.py::run", "proj/pkg/util.py::helper"), calls)
+        store.close()
+
+    def test_python_relative_import_double_dot(self):
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/sub/__init__.py", "")
+        self.write("pkg/shared.py", "def helper():\n    return 1\n")
+        self.write("pkg/sub/main.py",
+                   "from ..shared import helper\n\ndef run():\n    return helper()\n")
+        store, _ = self.index()
+        imports = {(e["source"], e["target"]) for e in store.all_edges()
+                   if e["type"] == "imports"}
+        self.assertIn(("proj/pkg/sub/main.py", "proj/pkg/shared.py"), imports)
+        store.close()
+
+    def test_python_absolute_import_still_works(self):
+        # Regresión: el arreglo de relativos no debe romper los absolutos.
+        self.write("b.py", "def util():\n    return 0\n")
+        self.write("a.py", "from b import util\n\ndef f():\n    return util()\n")
+        store, _ = self.index()
+        imports = {(e["source"], e["target"]) for e in store.all_edges()
+                   if e["type"] == "imports"}
+        self.assertIn(("proj/a.py", "proj/b.py"), imports)
+        store.close()
+
+
+def _microservices_config():
+    svcs = sorted(d for d in os.listdir(MICROSVC_DIR)
+                  if os.path.isdir(os.path.join(MICROSVC_DIR, d)))
+    return svcs, {"projects": [{"name": s, "root": os.path.join(MICROSVC_DIR, s)}
+                               for s in svcs]}
+
+
+class TestMicroservicesMultiLang(Base):
+    """Sistema de microservicios multi-lenguaje (tests/fixtures/microservices): un
+    servicio por lenguaje soportado, comunicándose por HTTP. Verifica (1) extracción
+    por lenguaje y (2) el mapeo de comunicación entre servicios (cross_link), que es
+    language-agnostic. Ver el README del fixture para la topología."""
+
+    # endpoint -> servicios que lo tocan (declaran o consumen)
+    EXPECTED_ENDPOINTS = {
+        "/api/orders": {"gateway", "orders"},
+        "/api/inventory": {"gateway", "inventory"},
+        "/api/payments": {"orders", "payments"},
+        "/api/notify": {"notifications", "orders"},
+        "/api/pricing": {"orders", "pricing"},
+        "/api/billing": {"admintool", "billing"},
+        "/api/analytics": {"analytics", "deviceagent", "reporting"},
+        "/api/health": {"bootstrap", "gateway"},
+    }
+
+    def test_cross_service_communication_mapped(self):
+        # cross_link es regex puro (sin tree-sitter): mapea la comunicación HTTP
+        # entre servicios de CUALQUIER lenguaje por endpoints compartidos.
+        _svcs, config = _microservices_config()
+        store = Store(self.db)
+        cross_link.link(store, config)
+        found = {}
+        for n in store.all_nodes():
+            if n["id"].startswith("endpoint:"):
+                projs = {e["source"].split("/")[0] for e in store.all_edges()
+                         if e["target"] == n["id"] and e["type"] == "references"}
+                found[n["name"]] = projs
+        for path, expected in self.EXPECTED_ENDPOINTS.items():
+            self.assertIn(path, found, f"endpoint {path} no detectado")
+            self.assertEqual(found[path], expected,
+                             f"{path}: {found.get(path)} != {expected}")
+        store.close()
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_per_language_symbol_extraction(self):
+        # Cada lenguaje soportado debe producir al menos un símbolo.
+        svcs, config = _microservices_config()
+        store = Store(self.db)
+        Indexer(store, config).index_all()
+        for s in svcs:
+            syms = [n for n in store.all_nodes(types=["symbol"])
+                    if (n.get("path") or "").startswith(f"{s}/")]
+            self.assertTrue(syms, f"servicio '{s}': 0 símbolos extraídos")
+        store.close()
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_intra_file_calls_across_languages(self):
+        # Los 12 lenguajes (incl. asm tras M9 1d) producen >=1 call intra-archivo.
+        svcs, config = _microservices_config()
+        store = Store(self.db)
+        Indexer(store, config).index_all()
+        for s in svcs:
+            calls = [e for e in store.all_edges()
+                     if e["type"] == "calls" and e["source"].startswith(f"{s}/")]
+            self.assertTrue(calls, f"servicio '{s}': 0 calls intra-archivo")
+        store.close()
+
+
+class TestCrossFileImportsM9(Base):
+    """M9: imports cross-file (archivo->archivo) para los lenguajes genéricos
+    deterministas. Resolución estática (sin LLM). Fixtures en
+    tests/fixtures/crossfile/<lang>/."""
+
+    def _imports_for(self, lang):
+        root = os.path.join(CROSSFILE_DIR, lang)
+        store = Store(self.db)
+        Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        edges = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["type"] == "imports"}
+        store.close()
+        return edges
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_java_package_import(self):
+        # import com.x.util.Validator; -> com/x/util/Validator.java
+        self.assertIn(("java/com/x/App.java", "java/com/x/util/Validator.java"),
+                      self._imports_for("java"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_c_include_relative(self):
+        # #include "util/helper.h" -> util/helper.h
+        self.assertIn(("c/main.c", "c/util/helper.h"), self._imports_for("c"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_rust_mod_declaration(self):
+        # mod helper; -> helper.rs
+        self.assertIn(("rust/main.rs", "rust/helper.rs"), self._imports_for("rust"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_go_module_package_import(self):
+        # import "myapp/util" (go.mod: module myapp) -> paquete util/
+        self.assertIn(("go/main.go", "go/util/helper.go"), self._imports_for("go"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_php_psr4_use(self):
+        # use App\Util\Validator; (composer psr-4 App\ -> src/) -> src/Util/Validator.php
+        self.assertIn(("php/src/App.php", "php/src/Util/Validator.php"),
+                      self._imports_for("php"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_r_source_import(self):
+        # source("util/helper.R") -> util/helper.R (por ruta, como #include)
+        self.assertIn(("r/main.R", "r/util/helper.R"), self._imports_for("r"))
+
+
+class TestCrossFileCallsM9(Base):
+    """M9 (1c): calls símbolo->símbolo cross-file para los genéricos con receptor
+    (Java `Clase.m`, Go `pkg.F`, PHP `Clase::m`, Rust `mod::f`). Resolución estática,
+    y enlaza SOLO si el nombre corto es inequívoco en el archivo destino (precisión)."""
+
+    def _xcalls_for(self, lang):
+        root = os.path.join(CROSSFILE_DIR, lang)
+        store = Store(self.db)
+        Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        edges = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["type"] == "calls" and e["provenance"] == "xfile"}
+        store.close()
+        return edges
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_java_method_call(self):
+        self.assertIn(("java/com/x/App.java::App.run",
+                       "java/com/x/util/Validator.java::Validator.isValid"),
+                      self._xcalls_for("java"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_go_package_func_call(self):
+        self.assertIn(("go/main.go::main", "go/util/helper.go::Help"),
+                      self._xcalls_for("go"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_php_static_method_call(self):
+        self.assertIn(("php/src/App.php::App.run",
+                       "php/src/Util/Validator.php::Validator.isValid"),
+                      self._xcalls_for("php"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_rust_path_func_call(self):
+        self.assertIn(("rust/main.rs::main", "rust/helper.rs::run"),
+                      self._xcalls_for("rust"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_precision_no_edge_for_absent_method(self):
+        # App llama Lib.missing(); Lib no define missing() -> NO se inventa arista xfile.
+        self.write("com/App.java",
+                   "package com;\nimport com.Lib;\n"
+                   "class App { void r(){ Lib.missing(); } }\n")
+        self.write("com/Lib.java",
+                   "package com;\nclass Lib { static void present(){} }\n")
+        store, _ = self.index()
+        xcalls = {(e["source"], e["target"]) for e in store.all_edges()
+                  if e["type"] == "calls" and e["provenance"] == "xfile"}
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_c_free_function_call(self):
+        # main.c llama help(); help() se define en util/helper.c (mismo stem que el .h incluido)
+        self.assertIn(("c/main.c::main", "c/util/helper.c::help"),
+                      self._xcalls_for("c"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_cpp_free_function_call(self):
+        self.assertIn(("cpp/main.cpp::main", "cpp/math/calc.cpp::add"),
+                      self._xcalls_for("cpp"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_r_sourced_function_call(self):
+        # main.R hace source("util/helper.R") y llama helper_func() -> resuelve al fichero
+        self.assertIn(("r/main.R::run", "r/util/helper.R::helper_func"),
+                      self._xcalls_for("r"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_csharp_namespace_method_call(self):
+        # using App.Util + Validator.IsValid() -> resuelto por namespace (M9 2b)
+        self.assertIn(("csharp/App.cs::Service.Run",
+                       "csharp/Util/Validator.cs::Validator.IsValid"),
+                      self._xcalls_for("csharp"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_vb_namespace_method_call(self):
+        # Imports App.Util + Validator.IsValid() -> resuelto por namespace (M9 2c)
+        self.assertIn(("vb/App.vb::Service.Run",
+                       "vb/Util/Validator.vb::Validator.IsValid"),
+                      self._xcalls_for("vb"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_precision_csharp_no_edge_when_namespace_not_used(self):
+        # Widget está en App.Other, que App.cs NO usa -> no se enlaza (precisión).
+        self.write("App.cs",
+                   "using App.Used;\nnamespace App { class S { void R(){ Widget.Make(); } } }\n")
+        self.write("a.cs", "namespace App.Used { class Nothing {} }\n")
+        self.write("b.cs", "namespace App.Other { class Widget { public static void Make(){} } }\n")
+        store, _ = self.index()
+        xcalls = {(e["source"], e["target"]) for e in store.all_edges()
+                  if e["type"] == "calls" and e["provenance"] == "xfile"}
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_precision_c_no_edge_when_file_not_included(self):
+        # main.c llama other(), definido en other.c, cuyo stem NO coincide con ningun
+        # #include de main.c -> NO se enlaza (precision: no adivina por nombre global).
+        self.write("main.c", '#include "a.h"\nint main(void){ return other(); }\n')
+        self.write("a.h", "int nothing(void);\n")
+        self.write("other.c", "int other(void){ return 1; }\n")
+        store, _ = self.index()
+        xcalls = {(e["source"], e["target"]) for e in store.all_edges()
+                  if e["type"] == "calls" and e["provenance"] == "xfile"}
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_asm_intra_file_call_and_precision(self):
+        # M9 1d: 'call'/'jmp' -> arista a la etiqueta; 'mov'/'add' NO (whitelist mnemónicos).
+        self.write("boot.s",
+                   "foo:\n    ret\nbar:\n    mov eax, foo\n    add ebx, foo\n"
+                   "    call foo\n    jmp foo\n")
+        store, _ = self.index()
+        calls = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["type"] == "calls"}
+        self.assertEqual(calls, {("proj/boot.s::bar", "proj/boot.s::foo")})
+
+
+class TestXlinkLlmOptional(Base):
+    """M9: capa LLM OPT-IN para desambiguar calls cross-file ambiguas. Sin LLM (default)
+    -> comportamiento determinista (ambiguo = sin arista). Con LLM -> elige, confianza
+    baja + provenance 'llm'. El LLM se mockea (no requiere Ollama)."""
+
+    def _ambiguous_c_project(self):
+        # main.c llama dup(); dup() está definido en a.c Y b.c (ambos incluidos) -> ambiguo
+        self.write("main.c", '#include "a.h"\n#include "b.h"\nint main(void){ return dup(); }\n')
+        self.write("a.h", "int dup(void);\n")
+        self.write("a.c", '#include "a.h"\nint dup(void){ return 1; }\n')
+        self.write("b.h", "int dup(void);\n")
+        self.write("b.c", '#include "b.h"\nint dup(void){ return 2; }\n')
+
+    def _llm_edges(self, store):
+        return {(e["source"], e["target"]) for e in store.all_edges()
+                if e["provenance"] == "llm"}
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ambiguous_not_linked_without_llm(self):
+        self._ambiguous_c_project()
+        store = Store(self.db)
+        Indexer(store, self.config).index_all()          # xlink_llm OFF por defecto
+        self.assertEqual(self._llm_edges(store), set())
+        xfile = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["provenance"] == "xfile" and e["source"].endswith("main.c::main")}
+        self.assertEqual(xfile, set())                   # ambiguo -> sin arista determinista
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ambiguous_resolved_with_llm(self):
+        self._ambiguous_c_project()
+        from memorygraf import context_compiler
+        import contextlib
+
+        class _FakeLLM:
+            name = "ollama:test"
+            def generate(self, prompt, **kw):
+                return "1"                                # elige el candidato 1
+
+        @contextlib.contextmanager
+        def _fake_local_llm(config, log=lambda m: None):
+            yield _FakeLLM()
+
+        orig = context_compiler.local_llm
+        context_compiler.local_llm = _fake_local_llm
+        try:
+            cfg = {"projects": self.config["projects"], "resolver": {"llm": True}}
+            store = Store(self.db)
+            Indexer(store, cfg).index_all()
+        finally:
+            context_compiler.local_llm = orig
+        edges = self._llm_edges(store)
+        self.assertEqual(len(edges), 1)
+        src, tgt = next(iter(edges))
+        self.assertTrue(src.endswith("main.c::main"))
+        self.assertIn("::dup", tgt)
+
+
+class TestUninitializedWorkspace(Base):
+    """Un comando con BD en un proyecto sin init debe dar un mensaje claro (haz init),
+    no el críptico 'sqlite3.OperationalError: unable to open database file'."""
+
+    def _run(self, *cli_args):
+        import sys as _sys
+        env = dict(os.environ)
+        env.pop("MEMORYGRAF_DB", None)
+        env.pop("MEMORYGRAF_HOME", None)
+        return subprocess.run([_sys.executable, "-m", "memorygraf.cli", *cli_args],
+                              cwd=self.tmp, capture_output=True, text=True, env=env)
+
+    def test_query_without_init_is_friendly(self):
+        r = self._run("overview")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("memorygraf init", out)
+        self.assertNotIn("OperationalError", out)
+
+    def test_graph_without_init_is_friendly(self):
+        r = self._run("graph")
+        out = r.stdout + r.stderr
+        self.assertIn("memorygraf init", out)
+        self.assertNotIn("Traceback", out)
 
 
 class TestSearch(Base):
@@ -404,6 +825,38 @@ class _GitRepo:
 
     def _sync_git(self, store):
         return git_layer.sync(store, self.config)
+
+
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestFullHistorySymbolCochange(_GitRepo, Base):
+    """M1 (opt-in): co-cambio de símbolo por HISTORIA COMPLETA capta el acoplamiento que
+    el blame pierde (dos funciones co-editadas en commits viejos y luego reescritas)."""
+
+    def test_captures_coupling_that_blame_misses(self):
+        self._init_repo()
+        self.write("a.py", "def foo():\n    return 1\ndef bar():\n    return 2\n")
+        self._commit("c1 crea ambas")
+        self.write("a.py", "def foo():\n    return 11\ndef bar():\n    return 22\n")
+        self._commit("c2 co-edita ambas")
+        self.write("a.py", "def foo():  # r3\n    return 111\ndef bar():\n    return 22\n")
+        self._commit("c3 reescribe foo")
+        self.write("a.py", "def foo():  # r3\n    return 111\ndef bar():  # r4\n    return 222\n")
+        self._commit("c4 reescribe bar")
+        store, _ = self.index()
+
+        pair = {"proj/a.py::foo", "proj/a.py::bar"}
+        # (1) sin full: el blame NO ve el co-cambio (líneas ya reescritas por separado)
+        git_layer.sync(store, self.config)
+        blame = [e for e in store.all_edges() if e["type"] == "co_changes_with"
+                 and {e["source"], e["target"]} == pair]
+        self.assertEqual(blame, [])
+
+        # (2) con full (opt-in): SÍ lo capta, con provenance identificable
+        cfg = {**self.config, "git": {"symbol_cochange_full": True, "cochange_full_depth": 50}}
+        git_layer.sync(store, cfg)
+        full = {(e["source"], e["target"]) for e in store.all_edges()
+                if e["provenance"] == "git-cochange-sym-full"}
+        self.assertIn(("proj/a.py::foo", "proj/a.py::bar"), full)
 
 
 @unittest.skipUnless(_git_available(), "git no disponible")
@@ -1465,6 +1918,34 @@ class TestRuntimeLsp(Base):
                                   param_types=json.dumps({"a": "int", "b": "str"}))
         store.commit()
         self.assertIn("params: a: int, b: str", Query(store).get("proj/a.py::f"))
+        store.close()
+
+    def test_local_var_offsets(self):
+        # M4b-vars: extrae vars locales asignadas; salta params y self, en orden de aparición
+        from memorygraf.extractors import python_ast as pa
+        src = ("class C:\n"
+               "    def m(self, a):\n"
+               "        x = a + 1\n"
+               "        y = x * 2\n"
+               "        for i in range(y):\n"
+               "            z = i\n"
+               "        return y\n")
+        off = pa.local_var_offsets(src)
+        self.assertEqual([n for n, _ in off["C.m"]], ["x", "y", "i", "z"])
+        # 'a' (param) y 'self' no aparecen
+        self.assertNotIn("a", [n for n, _ in off["C.m"]])
+        x_line, x_char = off["C.m"][0][1][0]
+        self.assertEqual((x_line, x_char), (2, 8))     # posición 0-based del binding de x
+
+    def test_local_types_rendered_in_get(self):
+        # render determinista (sin LSP): inyecta local_types y verifica get()
+        import json
+        self.write("a.py", "def f():\n    x = 1\n    return x\n")
+        store, _ = self.index()
+        store.runtime_node_update("proj/a.py::f",
+                                  local_types=json.dumps({"x": "int"}))
+        store.commit()
+        self.assertIn("locales: x: int", Query(store).get("proj/a.py::f"))
         store.close()
 
 

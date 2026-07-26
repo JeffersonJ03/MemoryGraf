@@ -90,6 +90,24 @@ def _db_path(args):
     return workspace.resolve_db_path(workspace.resolve_config_path(getattr(args, "config", None)))
 
 
+def _require_workspace(args, needs_synced: bool):
+    """Falla con un mensaje claro si el proyecto no está inicializado/sincronizado,
+    en vez del críptico 'sqlite3.OperationalError: unable to open database file'.
+
+    Con --db o MEMORYGRAF_DB explícitos no se exige nada (el usuario fija la ruta)."""
+    if getattr(args, "db", None) or os.environ.get("MEMORYGRAF_DB"):
+        return
+    cfg = workspace.resolve_config_path(getattr(args, "config", None))
+    if not cfg:
+        sys.exit("No hay un grafo MemoryGraf en este proyecto (falta .memorygraf/).\n"
+                 "Inicialízalo primero:\n"
+                 "  memorygraf init            # crea .memorygraf/ (config)\n"
+                 "  memorygraf sync            # construye el grafo")
+    if needs_synced and not os.path.exists(workspace.resolve_db_path(cfg)):
+        sys.exit("El grafo aún no se ha construido en este proyecto.\n"
+                 "Ejecuta:  memorygraf sync")
+
+
 def _mcp_launch_command(config_path):
     """Comando robusto para lanzar el servidor MCP (funciona con pipx o venv)."""
     return {
@@ -296,6 +314,9 @@ def main(argv=None):
         return
 
     # --- comandos con BD ---
+    # sync/index/watch CONSTRUYEN el grafo (toleran que la BD no exista aún); el resto
+    # (consultas, summarize, embed, ...) requieren un grafo ya sincronizado.
+    _require_workspace(args, needs_synced=args.cmd not in ("sync", "index", "watch"))
     store = Store(_db_path(args))
     try:
         if args.cmd == "index":

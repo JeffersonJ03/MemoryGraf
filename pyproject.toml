@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memorygraf"
-version = "1.0.0"
+version = "1.0.1"
 description = "Grafo de conocimiento local, portable y agnóstico al LLM, para dar contexto de un proyecto a un asistente con recuperación selectiva y bajo consumo de tokens."
 readme = "README.md"
 requires-python = ">=3.10"
