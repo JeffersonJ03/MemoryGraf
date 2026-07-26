@@ -312,8 +312,10 @@ class Indexer:
                 target = None
                 if ext == ".py":
                     target = self._resolve_py(project, raw, base_dir)
-                else:
+                elif ext in _TS_EXTS:
                     target = self._resolve_js(project, base_dir, raw)
+                else:
+                    target = self._resolve_generic(project, ext, base_dir, raw)
                 if target:
                     self.store.upsert_edge(Edge(
                         source=file_id_, target=target, type=EDGE_IMPORTS,
@@ -406,3 +408,31 @@ class Indexer:
             return None
         norm = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
         return self.path_index.get((project, self._strip_js_ext(norm)))
+
+    def _resolve_generic(self, project, ext, base_dir, raw):
+        """Resuelve un import de los lenguajes genéricos a un archivo interno (M9).
+
+        Determinista (sin LLM). Cada lenguaje mapea distinto:
+          java: paquete `a.b.C` -> ruta `a/b/C` (progresivo para static/inner).
+          c/cpp: `#include "x.h"` -> ruta relativa al archivo.
+          rust: `mod x;` -> archivo hermano `x.rs` o `x/mod.rs`.
+        Go/PHP: siguiente incremento (necesitan go.mod / composer.json)."""
+        g = EXT_LANG.get(ext)
+        if g == "java":
+            parts = raw.replace(".", "/").split("/")
+            for i in range(len(parts), 0, -1):     # progresivo: static imports / inner classes
+                hit = self.path_index.get((project, "/".join(parts[:i])))
+                if hit:
+                    return hit
+            return None
+        if g in ("c", "cpp"):
+            norm = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
+            return self.path_index.get((project, os.path.splitext(norm)[0]))
+        if g == "rust":
+            for suffix in (raw, raw + "/mod"):
+                cand = os.path.normpath(os.path.join(base_dir, suffix)).replace("\\", "/")
+                hit = self.path_index.get((project, cand))
+                if hit:
+                    return hit
+            return None
+        return None

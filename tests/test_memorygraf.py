@@ -16,6 +16,7 @@ from memorygraf import semantic, docs, entities, summarizer, workspace, git_laye
 from memorygraf.extractors import ts_treesitter as _ts
 
 MICROSVC_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "microservices")
+CROSSFILE_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "crossfile")
 
 
 class Base(unittest.TestCase):
@@ -276,6 +277,37 @@ class TestMicroservicesMultiLang(Base):
                      if e["type"] == "calls" and e["source"].startswith(f"{s}/")]
             self.assertTrue(calls, f"servicio '{s}': 0 calls intra-archivo")
         store.close()
+
+
+class TestCrossFileImportsM9(Base):
+    """M9: imports cross-file (archivo->archivo) para los lenguajes genéricos
+    deterministas. Resolución estática (sin LLM). Fixtures en
+    tests/fixtures/crossfile/<lang>/."""
+
+    def _imports_for(self, lang):
+        root = os.path.join(CROSSFILE_DIR, lang)
+        store = Store(self.db)
+        Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        edges = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["type"] == "imports"}
+        store.close()
+        return edges
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_java_package_import(self):
+        # import com.x.util.Validator; -> com/x/util/Validator.java
+        self.assertIn(("java/com/x/App.java", "java/com/x/util/Validator.java"),
+                      self._imports_for("java"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_c_include_relative(self):
+        # #include "util/helper.h" -> util/helper.h
+        self.assertIn(("c/main.c", "c/util/helper.h"), self._imports_for("c"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_rust_mod_declaration(self):
+        # mod helper; -> helper.rs
+        self.assertIn(("rust/main.rs", "rust/helper.rs"), self._imports_for("rust"))
 
 
 class TestSearch(Base):

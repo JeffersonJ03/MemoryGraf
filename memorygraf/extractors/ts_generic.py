@@ -33,6 +33,18 @@ _CALLS = {
     "vb":    ({"invocation"}, None),     # sin campo: primer identificador del callee
 }
 
+# Imports cross-file por gramática (M9). El nodo del AST que declara un import y de
+# dónde sacar el especificador crudo; la RESOLUCIÓN (specifier -> archivo) vive en el
+# indexer, que conoce las rutas del proyecto. Determinista, sin LLM.
+#   java: `import a.b.C;`      -> "a.b.C"
+#   c/cpp: `#include "x.h"`    -> "x.h"   (los <...> del sistema se omiten)
+#   rust: `mod x;`             -> "x"     (solo el mod-en-archivo, sin cuerpo inline)
+_IMPORT_NODES = {
+    "java": {"import_declaration"},
+    "c": {"preproc_include"}, "cpp": {"preproc_include"},
+    "rust": {"mod_item"},
+}
+
 # extensión -> gramática de tree-sitter
 _GRAMMAR_BY_EXT = {
     "c": "c", "h": "c",
@@ -125,7 +137,45 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     # --- llamadas INTRA-archivo (callee resuelto por nombre local) ---
     if grammar in _CALLS and by_short:
         _find_calls(root, grammar, text, spans, by_short, edges)
-    return nodes, edges, [], [], {}
+    # --- imports cross-file (specifiers crudos; el indexer los resuelve a archivos) ---
+    raw_imports = _extract_imports(root, grammar, text) if grammar in _IMPORT_NODES else []
+    return nodes, edges, raw_imports, [], {}
+
+
+def _extract_imports(root, grammar, text) -> list:
+    """Devuelve los specifiers crudos de import (M9). No recorre dentro del import."""
+    types = _IMPORT_NODES[grammar]
+    out: list = []
+
+    def walk(n):
+        if n.type in types:
+            raw = _import_raw(n, grammar, text)
+            if raw:
+                out.append(raw)
+            return
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    return out
+
+
+def _import_raw(n, grammar, text):
+    if grammar == "java":
+        sid = _first_child(n, "scoped_identifier") or _first_child(n, "identifier")
+        return text(sid) if sid is not None else None
+    if grammar in ("c", "cpp"):
+        lit = _first_child(n, "string_literal")   # solo comillas = interno; <...> = sistema
+        if lit is None:
+            return None
+        content = _first_child(lit, "string_content")
+        return text(content) if content is not None else text(lit).strip('"')
+    if grammar == "rust":
+        if _first_child(n, "declaration_list") is not None:
+            return None                            # `mod x { ... }` inline -> no es archivo
+        ident = _first_child(n, "identifier")
+        return text(ident) if ident is not None else None
+    return None
 
 
 def _walk_defs(root, spec, grammar, text, src, rel_path, fid, add):
