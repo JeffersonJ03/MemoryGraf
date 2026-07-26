@@ -19,13 +19,33 @@ Autor: **Jefferson J. Patiño Ortega** · Licencia: **MIT**
 
 ## Instalación (una vez)
 
+**Recomendado — desde PyPI, sin clonar** (con [`pipx`](https://pipx.pypa.io), que aísla la
+CLI en su propio entorno y deja el comando global):
+
 ```bash
-git clone <este-repo> memorygraf && cd memorygraf
+pipx install "memorygraf[full]"     # modo potencia (todas las capacidades opcionales)
+pipx install memorygraf             # solo núcleo (stdlib, sin dependencias opcionales)
+#   ¿sin pipx?  ->  pip install "memorygraf[full]"
+```
+
+> ¿No usas pipx todavía? `python -m pip install --user pipx && python -m pipx ensurepath`.
+> Con `uv`: `uvx --from "memorygraf[full]" memorygraf` lo corre sin instalar nada persistente.
+
+**Alternativa — instalar directo desde GitHub** (última versión de `main`, sin esperar a PyPI):
+
+```bash
+pipx install "memorygraf[full] @ git+https://github.com/JeffersonJ03/MemoryGraf.git"
+```
+
+**Desde el repo clonado** (desarrollo, o para usar los instaladores con detección de plataforma):
+
+```bash
+git clone https://github.com/JeffersonJ03/MemoryGraf.git memorygraf && cd memorygraf
 ./install.sh            # Linux/macOS/WSL   ·   .\install.ps1 en Windows
 #   --core  para instalar solo el núcleo (sin dependencias opcionales)
 ```
 
-Deja disponible el comando **`memorygraf`** (vía `pipx` si está, o un venv local).
+Cualquiera de las vías deja disponible el comando **`memorygraf`**.
 
 > **Estado de plataformas (honesto).** Validado end-to-end en **Linux / WSL**. El núcleo es
 > cross-platform por diseño (solo stdlib) y hay soporte específico para Windows/macOS

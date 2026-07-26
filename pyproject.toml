@@ -11,8 +11,25 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Jefferson J. Patiño Ortega" }]
 keywords = ["mcp", "knowledge-graph", "llm", "code-context", "retrieval"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Documentation",
+]
 # Núcleo sin dependencias: corre solo con stdlib (modo portable de base).
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/JeffersonJ03/MemoryGraf"
+Repository = "https://github.com/JeffersonJ03/MemoryGraf"
+Issues = "https://github.com/JeffersonJ03/MemoryGraf/issues"
 
 [project.scripts]
 memorygraf = "memorygraf.cli:main"

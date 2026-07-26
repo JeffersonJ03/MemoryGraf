@@ -1,0 +1,57 @@
+name: Publicar en PyPI
+
+# Publica automáticamente cuando se empuja un tag de versión (p. ej. v1.0.2).
+# Usa "Trusted Publishing" (OIDC): NO hay tokens ni secrets que gestionar.
+# Requisito de una sola vez: registrar este repo+workflow como publisher de
+# confianza en PyPI  →  https://pypi.org/manage/account/publishing/
+#   Project: memorygraf · Owner: JeffersonJ03 · Repo: MemoryGraf
+#   Workflow: publish.yml · Environment: pypi
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Construir distribuciones
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar build
+        run: python -m pip install --upgrade build
+      - name: Construir sdist y wheel
+        run: python -m build
+      - name: Verificar metadatos
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*
+      - name: Subir artefactos
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publicar en PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/memorygraf/
+    permissions:
+      id-token: write   # necesario para OIDC / Trusted Publishing
+    steps:
+      - name: Descargar artefactos
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publicar
+        uses: pypa/gh-action-pypi-publish@release/v1
