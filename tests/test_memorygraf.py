@@ -12,7 +12,10 @@ from memorygraf.store import Store
 from memorygraf.indexer import Indexer
 from memorygraf.query import Query
 from memorygraf.model import Edge, EDGE_CALLS, EDGE_CO_CHANGES
-from memorygraf import semantic, docs, entities, summarizer, workspace, git_layer
+from memorygraf import semantic, docs, entities, summarizer, workspace, git_layer, cross_link
+from memorygraf.extractors import ts_treesitter as _ts
+
+MICROSVC_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "microservices")
 
 
 class Base(unittest.TestCase):
@@ -98,6 +101,180 @@ class TestCrossFileCalls(Base):
         self.assertIn(("proj/caller.py::run", "proj/util.py::do_work"), calls)
         self.assertNotIn(("proj/caller.py::run", "proj/helper.py::do_work"), calls)
         self.assertGreaterEqual(c["reconciled"], 1)
+        store.close()
+
+
+class TestImportResolutionMatrix(Base):
+    """Matriz de resolución de imports/calls por escenario. Cada caso es un modo
+    de escribir un import que ANTES se perdía en silencio; sirve de red contra
+    regresiones al tocar _resolve_js/_resolve_py."""
+
+    # --- JS/TS: unidad, sin depender de tree-sitter ---
+    def test_strip_js_ext(self):
+        f = Indexer._strip_js_ext
+        self.assertEqual(f("a/b/c.js"), "a/b/c")
+        self.assertEqual(f("a/b/c.tsx"), "a/b/c")
+        self.assertEqual(f("a/b/c.mjs"), "a/b/c")
+        self.assertEqual(f("a/b/c"), "a/b/c")          # sin ext -> intacto
+        self.assertEqual(f("a/b.dir/c"), "a/b.dir/c")  # punto en carpeta -> intacto
+
+    def test_resolve_js_esm_explicit_extension(self):
+        # Bug ESM: 'import x from "../controllers/x.js"' (extensión OBLIGATORIA en ESM)
+        store = Store(self.db)
+        idx = Indexer(store, self.config)
+        idx.path_index[("proj", "src/controllers/vmdController")] = \
+            "proj/src/controllers/vmdController.js"
+        # con .js explícito (ESM) -> resuelve
+        self.assertEqual(
+            idx._resolve_js("proj", "src/routes", "../controllers/vmdController.js"),
+            "proj/src/controllers/vmdController.js")
+        # sin extensión (CommonJS/TS) -> sigue resolviendo
+        self.assertEqual(
+            idx._resolve_js("proj", "src/routes", "../controllers/vmdController"),
+            "proj/src/controllers/vmdController.js")
+        store.close()
+
+    def test_resolve_js_index_and_alias(self):
+        store = Store(self.db)
+        idx = Indexer(store, self.config)
+        idx.path_index[("proj", "utils/index")] = "proj/utils/index.js"
+        idx.path_index[("proj", "utils")] = "proj/utils/index.js"        # carpeta -> index
+        idx.path_index[("proj", "src/components/Btn")] = "proj/src/components/Btn.tsx"
+        self.assertEqual(idx._resolve_js("proj", "src", "../utils"),
+                         "proj/utils/index.js")                          # import de carpeta
+        self.assertEqual(idx._resolve_js("proj", "src", "@/components/Btn.tsx"),
+                         "proj/src/components/Btn.tsx")                  # alias @/ con ext
+        store.close()
+
+    def test_resolve_js_tsconfig_paths_alias(self):
+        # tsconfig con alias custom (no @/) y comentarios JSONC + coma colgante
+        self.write("tsconfig.json",
+                   '{\n'
+                   '  // config del proyecto\n'
+                   '  "compilerOptions": {\n'
+                   '    "baseUrl": ".",\n'
+                   '    "paths": {\n'
+                   '      "@app/*": ["src/app/*"],\n'
+                   '      "~utils": ["src/util.ts"],\n'
+                   '    },\n'
+                   '  },\n'
+                   '}\n')
+        store = Store(self.db)
+        idx = Indexer(store, self.config)
+        idx.path_index[("proj", "src/app/svc/order")] = "proj/src/app/svc/order.ts"
+        idx.path_index[("proj", "src/util")] = "proj/src/util.ts"
+        self.assertEqual(idx._resolve_js("proj", "src/x", "@app/svc/order"),
+                         "proj/src/app/svc/order.ts")           # alias con estrella
+        self.assertEqual(idx._resolve_js("proj", "src/x", "~utils"),
+                         "proj/src/util.ts")                    # alias exacto sin estrella
+        store.close()
+
+    # --- Python: flujo completo write+index ---
+    def test_python_relative_import_single_dot(self):
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/util.py", "def helper():\n    return 1\n")
+        self.write("pkg/main.py",
+                   "from .util import helper\n\ndef run():\n    return helper()\n")
+        store, _ = self.index()
+        imports = {(e["source"], e["target"]) for e in store.all_edges()
+                   if e["type"] == "imports"}
+        self.assertIn(("proj/pkg/main.py", "proj/pkg/util.py"), imports)
+        calls = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["type"] == "calls"}
+        self.assertIn(("proj/pkg/main.py::run", "proj/pkg/util.py::helper"), calls)
+        store.close()
+
+    def test_python_relative_import_double_dot(self):
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/sub/__init__.py", "")
+        self.write("pkg/shared.py", "def helper():\n    return 1\n")
+        self.write("pkg/sub/main.py",
+                   "from ..shared import helper\n\ndef run():\n    return helper()\n")
+        store, _ = self.index()
+        imports = {(e["source"], e["target"]) for e in store.all_edges()
+                   if e["type"] == "imports"}
+        self.assertIn(("proj/pkg/sub/main.py", "proj/pkg/shared.py"), imports)
+        store.close()
+
+    def test_python_absolute_import_still_works(self):
+        # Regresión: el arreglo de relativos no debe romper los absolutos.
+        self.write("b.py", "def util():\n    return 0\n")
+        self.write("a.py", "from b import util\n\ndef f():\n    return util()\n")
+        store, _ = self.index()
+        imports = {(e["source"], e["target"]) for e in store.all_edges()
+                   if e["type"] == "imports"}
+        self.assertIn(("proj/a.py", "proj/b.py"), imports)
+        store.close()
+
+
+def _microservices_config():
+    svcs = sorted(d for d in os.listdir(MICROSVC_DIR)
+                  if os.path.isdir(os.path.join(MICROSVC_DIR, d)))
+    return svcs, {"projects": [{"name": s, "root": os.path.join(MICROSVC_DIR, s)}
+                               for s in svcs]}
+
+
+class TestMicroservicesMultiLang(Base):
+    """Sistema de microservicios multi-lenguaje (tests/fixtures/microservices): un
+    servicio por lenguaje soportado, comunicándose por HTTP. Verifica (1) extracción
+    por lenguaje y (2) el mapeo de comunicación entre servicios (cross_link), que es
+    language-agnostic. Ver el README del fixture para la topología."""
+
+    # endpoint -> servicios que lo tocan (declaran o consumen)
+    EXPECTED_ENDPOINTS = {
+        "/api/orders": {"gateway", "orders"},
+        "/api/inventory": {"gateway", "inventory"},
+        "/api/payments": {"orders", "payments"},
+        "/api/notify": {"notifications", "orders"},
+        "/api/pricing": {"orders", "pricing"},
+        "/api/billing": {"admintool", "billing"},
+        "/api/analytics": {"analytics", "deviceagent", "reporting"},
+        "/api/health": {"bootstrap", "gateway"},
+    }
+
+    def test_cross_service_communication_mapped(self):
+        # cross_link es regex puro (sin tree-sitter): mapea la comunicación HTTP
+        # entre servicios de CUALQUIER lenguaje por endpoints compartidos.
+        _svcs, config = _microservices_config()
+        store = Store(self.db)
+        cross_link.link(store, config)
+        found = {}
+        for n in store.all_nodes():
+            if n["id"].startswith("endpoint:"):
+                projs = {e["source"].split("/")[0] for e in store.all_edges()
+                         if e["target"] == n["id"] and e["type"] == "references"}
+                found[n["name"]] = projs
+        for path, expected in self.EXPECTED_ENDPOINTS.items():
+            self.assertIn(path, found, f"endpoint {path} no detectado")
+            self.assertEqual(found[path], expected,
+                             f"{path}: {found.get(path)} != {expected}")
+        store.close()
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_per_language_symbol_extraction(self):
+        # Cada lenguaje soportado debe producir al menos un símbolo.
+        svcs, config = _microservices_config()
+        store = Store(self.db)
+        Indexer(store, config).index_all()
+        for s in svcs:
+            syms = [n for n in store.all_nodes(types=["symbol"])
+                    if (n.get("path") or "").startswith(f"{s}/")]
+            self.assertTrue(syms, f"servicio '{s}': 0 símbolos extraídos")
+        store.close()
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_intra_file_calls_across_languages(self):
+        # Todos menos asm producen >=1 call intra-archivo. La instrucción 'call' de
+        # asm no la cubre la query de llamadas: se documenta, no se exige.
+        svcs, config = _microservices_config()
+        store = Store(self.db)
+        Indexer(store, config).index_all()
+        for s in svcs:
+            if s == "bootstrap":
+                continue
+            calls = [e for e in store.all_edges()
+                     if e["type"] == "calls" and e["source"].startswith(f"{s}/")]
+            self.assertTrue(calls, f"servicio '{s}': 0 calls intra-archivo")
         store.close()
 
 
