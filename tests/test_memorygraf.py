@@ -439,6 +439,63 @@ class TestCrossFileCallsM9(Base):
         self.assertEqual(calls, {("proj/boot.s::bar", "proj/boot.s::foo")})
 
 
+class TestXlinkLlmOptional(Base):
+    """M9: capa LLM OPT-IN para desambiguar calls cross-file ambiguas. Sin LLM (default)
+    -> comportamiento determinista (ambiguo = sin arista). Con LLM -> elige, confianza
+    baja + provenance 'llm'. El LLM se mockea (no requiere Ollama)."""
+
+    def _ambiguous_c_project(self):
+        # main.c llama dup(); dup() está definido en a.c Y b.c (ambos incluidos) -> ambiguo
+        self.write("main.c", '#include "a.h"\n#include "b.h"\nint main(void){ return dup(); }\n')
+        self.write("a.h", "int dup(void);\n")
+        self.write("a.c", '#include "a.h"\nint dup(void){ return 1; }\n')
+        self.write("b.h", "int dup(void);\n")
+        self.write("b.c", '#include "b.h"\nint dup(void){ return 2; }\n')
+
+    def _llm_edges(self, store):
+        return {(e["source"], e["target"]) for e in store.all_edges()
+                if e["provenance"] == "llm"}
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ambiguous_not_linked_without_llm(self):
+        self._ambiguous_c_project()
+        store = Store(self.db)
+        Indexer(store, self.config).index_all()          # xlink_llm OFF por defecto
+        self.assertEqual(self._llm_edges(store), set())
+        xfile = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["provenance"] == "xfile" and e["source"].endswith("main.c::main")}
+        self.assertEqual(xfile, set())                   # ambiguo -> sin arista determinista
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ambiguous_resolved_with_llm(self):
+        self._ambiguous_c_project()
+        from memorygraf import context_compiler
+        import contextlib
+
+        class _FakeLLM:
+            name = "ollama:test"
+            def generate(self, prompt, **kw):
+                return "1"                                # elige el candidato 1
+
+        @contextlib.contextmanager
+        def _fake_local_llm(config, log=lambda m: None):
+            yield _FakeLLM()
+
+        orig = context_compiler.local_llm
+        context_compiler.local_llm = _fake_local_llm
+        try:
+            cfg = {"projects": self.config["projects"], "resolver": {"llm": True}}
+            store = Store(self.db)
+            Indexer(store, cfg).index_all()
+        finally:
+            context_compiler.local_llm = orig
+        edges = self._llm_edges(store)
+        self.assertEqual(len(edges), 1)
+        src, tgt = next(iter(edges))
+        self.assertTrue(src.endswith("main.c::main"))
+        self.assertIn("::dup", tgt)
+
+
 class TestUninitializedWorkspace(Base):
     """Un comando con BD en un proyecto sin init debe dar un mensaje claro (haz init),
     no el críptico 'sqlite3.OperationalError: unable to open database file'."""

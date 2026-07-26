@@ -566,3 +566,66 @@ def compile(store, config: dict | None = None, log=lambda m: None,
     else:   # auto | heuristic -> sin LLM en el camino del sync
         r = compile_cochange_notes(store, cfg, llm=None, log=log)
     return {"enabled": True, **r}
+
+
+# --------------------------------------------------------------------------- #
+# M9 · Desambiguación LLM opcional de calls cross-file (el "plus" no determinista)
+# --------------------------------------------------------------------------- #
+def _sym_snippet(store, sid: str, roots: dict, maxlines: int = 6) -> str:
+    """Unas líneas del código del símbolo `sid` (para dar contexto al LLM)."""
+    n = store.get_node(sid)
+    if not n or not n.get("path"):
+        return ""
+    proj, rel = n["path"].split("/", 1)
+    root = roots.get(proj)
+    if not root:
+        return ""
+    try:
+        with open(os.path.join(root, rel), encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return ""
+    a = max(0, (n.get("span_start") or 1) - 1)
+    return "\n".join(lines[a:a + maxlines])
+
+
+def _parse_choice(ans: str, n: int):
+    """Primer entero 1..n de la respuesta del LLM; None si 0/ausente/fuera de rango."""
+    m = re.search(r"-?\d+", ans or "")
+    if not m:
+        return None
+    i = int(m.group())
+    return i if 1 <= i <= n else None
+
+
+def disambiguate_calls(store, config, cases, roots, log=lambda m: None):
+    """Elige el destino de calls cross-file AMBIGUAS (varios candidatos) con el LLM local.
+
+    `cases`: [(caller_sid, callee_name, [cand_sid,...])]. Devuelve [(caller, elegido)].
+    OPT-IN y no determinista -> confianza baja + provenance 'llm' en el llamador. Si no
+    hay LLM local disponible, NO elige (fallback determinista: se queda sin arista)."""
+    if not cases:
+        return []
+    picked = []
+    with local_llm(config, log=log) as llm:
+        if getattr(llm, "name", "heuristic") == "heuristic":
+            log("xlink-llm: sin LLM local disponible; desambiguación omitida (fallback)")
+            return []
+        for caller, name, cands in cases:
+            caller_ctx = _sym_snippet(store, caller, roots, 4)
+            opts = []
+            for i, c in enumerate(cands, 1):
+                cn = store.get_node(c)
+                opts.append(f"{i}. {cn['name'] if cn else c}  [{(cn or {}).get('path','?')}]\n"
+                            f"{_sym_snippet(store, c, roots, 4)}")
+            prompt = (
+                "Eres un analizador de código. Una llamada a la función/método "
+                f"'{name}' tiene VARIOS destinos posibles. Elige el más probable.\n\n"
+                f"Contexto del llamante:\n{caller_ctx}\n\n"
+                f"Candidatos:\n" + "\n\n".join(opts) +
+                "\n\nResponde SOLO con el número del candidato correcto, o 0 si ninguno.")
+            ans = llm.generate(prompt, num_predict=6, temperature=0.0)
+            idx = _parse_choice(ans or "", len(cands))
+            if idx is not None:
+                picked.append((caller, cands[idx - 1]))
+    return picked

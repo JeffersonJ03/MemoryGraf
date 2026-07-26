@@ -31,5 +31,10 @@
   "_compiler_comment": "Opcional (M7). Narrativa del co-cambio + rerank. En el sync, 'auto' usa el HEURÍSTICO (barato); backend='ollama'/'api' para LLM en cada sync, o on-demand con 'memorygraf compile --llm' y 'memorygraf search <q> --rerank-llm' (latencia acotada + fallback + caché).",
   "compiler": {
     "backend": "auto"
+  },
+
+  "_resolver_comment": "Opcional (M9). llm=true activa el desempate LLM de calls cross-file AMBIGUAS (>1 candidato): el resolutor estático solo enlaza lo inequívoco; con esto el LLM local (usa la config de 'compiler') elige entre candidatos, con confidence baja + provenance 'llm' y fallback determinista (sin Ollama no añade nada). OFF por defecto (portabilidad). Equivale a la env MEMORYGRAF_XLINK_LLM=1.",
+  "resolver": {
+    "llm": false
   }
 }

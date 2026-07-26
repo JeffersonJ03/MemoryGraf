@@ -217,6 +217,12 @@ class Indexer:
                 self.php_psr4[name] = psr4
         # tree-sitter para JS/TS si está instalado; si no, regex (degradación elegante)
         self.use_treesitter = ts_treesitter.available()
+        # M9: desambiguación LLM OPT-IN de calls cross-file ambiguas (>1 candidato).
+        # Por defecto OFF (portabilidad); requiere Ollama y este flag. Fallback: sin arista.
+        self.xlink_llm = (str(os.environ.get("MEMORYGRAF_XLINK_LLM", "")).lower()
+                          in ("1", "true", "yes", "on")
+                          or bool((config.get("resolver") or {}).get("llm")))
+        self._ambiguous = []       # [(caller_sid, callee_name, [cand_sid,...])]
 
     def index_all(self) -> dict:
         counters = {"files": 0, "skipped": 0, "nodes": 0, "removed": 0, "reconciled": 0}
@@ -265,6 +271,16 @@ class Indexer:
                 counters["removed"] += 1
         self._resolve_imports()
         counters["xcalls"] = self._resolve_calls()
+        # M9: desambiguación LLM opcional de las calls ambiguas recolectadas (opt-in).
+        # confidence baja + provenance 'llm'; sin LLM disponible no añade nada (fallback).
+        if self.xlink_llm and self._ambiguous:
+            from . import context_compiler
+            roots = {p["name"]: p["root"] for p in self.config["projects"]}
+            picked = context_compiler.disambiguate_calls(
+                self.store, self.config, self._ambiguous, roots)
+            for caller, chosen in picked:
+                self.store.upsert_edge(Edge(caller, chosen, EDGE_CALLS, 0.55, "llm"))
+            counters["xcalls_llm"] = len(picked)
         counters["reconciled"] = self._reconcile(pre_symbols)
         self.store.set_meta("indexed_at", _now())
         self.store.set_meta("projects", ",".join(p["name"] for p in self.config["projects"]))
@@ -308,6 +324,8 @@ class Indexer:
                     if len(cands) == 1:
                         self.store.upsert_edge(Edge(caller, cands[0], EDGE_CALLS, 0.8, "xfile"))
                         count += 1
+                    elif len(cands) > 1 and self.xlink_llm:
+                        self._ambiguous.append((caller, callee_name, cands))
                     continue
                 if generic and via and EXT_LANG.get(ext) in ("csharp", "vb"):
                     # M9 (2b/2c): 'Receptor.metodo' -> símbolo "Receptor.metodo" en archivos
@@ -321,6 +339,8 @@ class Indexer:
                     if len(cands) == 1:
                         self.store.upsert_edge(Edge(caller, cands[0], EDGE_CALLS, 0.8, "xfile"))
                         count += 1
+                    elif len(cands) > 1 and self.xlink_llm:
+                        self._ambiguous.append((caller, callee_name, cands))
                     continue
                 b = bindings.get(via or callee_name)
                 if not b:
@@ -335,6 +355,8 @@ class Indexer:
                     if len(cands) == 1:
                         self.store.upsert_edge(Edge(caller, cands[0], EDGE_CALLS, 0.85, "xfile"))
                         count += 1
+                    elif len(cands) > 1 and self.xlink_llm:
+                        self._ambiguous.append((caller, callee_name, cands))
                     continue
                 target_name = imported or callee_name
                 target_file = (self._resolve_py(project, module, base_dir) if ext == ".py"
