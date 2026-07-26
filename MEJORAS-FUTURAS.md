@@ -31,7 +31,7 @@ verificación en vivo antes de dar por buena.
 | ~~M7~~ | ✅ **Implementado** · Narrativa/rerank con **LLM local** opt-in (Ollama) | Bajo | Bajo | Bajo |
 | ~~M8~~ | ✅ **Implementado** · Co-cambio **cross-project** por símbolo, gateado y conservador | Bajo | Medio | Medio |
 | ~~M4b~~ | ✅ **Implementado** (params Python **y TS/JS**) · `resolved_type` de **params individuales** (hover por offset) | Bajo | Medio | Medio |
-| M9 | `calls`/`imports` **cross-file** para los lenguajes nuevos (C/C++/Java/C#/Go/Rust/PHP/R/VB) | Medio | Medio | Alto |
+| ~~M9~~ | ✅ **Implementado** · `calls`/`imports` **cross-file** para los 10 lenguajes genéricos (+ `call` intra de asm) + capa LLM opcional de desambiguación | Medio | Medio | Alto |
 
 ---
 
@@ -382,11 +382,36 @@ inferidas; el 80% del valor (firma con tipos) ya se entregó en M4.
 
 ---
 
-## M9 · `calls`/`imports` cross-file para los lenguajes nuevos
+## M9 · `calls`/`imports` cross-file para los lenguajes nuevos  ✅ IMPLEMENTADO
+
+**Estado (2026-07-26).** Hecho, por incrementos entregables y con test de precisión por
+lenguaje (solo enlaza si el destino es INEQUÍVOCO → sin aristas falsas). `ts_generic`
+extrae imports (`_extract_imports`) y llamadas con receptor (`_call_parts`,
+`_bindings_from_imports`); el indexador resuelve por lenguaje (`_resolve_generic`,
+`_resolve_generic_files`, `_c_call_candidates`, y el índice de namespaces C#/VB).
+
+| Lenguaje | imports cross-file | calls cross-file | Mecanismo |
+|---|:--:|:--:|---|
+| Java | ✅ | ✅ | paquete `a.b.C` → `a/b/C` |
+| C / C++ | ✅ | ✅ | `#include` relativo; call libre → stem del include, nombre único |
+| Rust | ✅ | ✅ | `mod x;` → hermano; `path::f()` |
+| Go | ✅ | ✅ | `go.mod` (prefijo de módulo) → dir de paquete |
+| PHP | ✅ | ✅ | PSR-4 (`composer.json`); `Clase::m()` |
+| R | ✅ | ✅ | `source("path")`; call libre por nombre único |
+| C# / VB | — (namespace) | ✅ | índice namespace→archivos (`namespace`/`using`, `Namespace`/`Imports`); `Receptor.m()` cualificado |
+| Assembly | — | — (intra ✅) | `call`/salto → etiqueta (whitelist de mnemónicos, 1d) |
+
+Todo **determinista y estático**. Encima, capa **LLM opcional** (`resolver.llm` /
+`MEMORYGRAF_XLINK_LLM`): cuando el resolutor estático deja >1 candidato, el LLM local
+desempata (confidence 0.55 + provenance `llm`, fallback determinista sin Ollama).
+Tests: `TestCrossFileImportsM9`, `TestCrossFileCallsM9` (positivos + precisión por
+lenguaje), `TestXlinkLlmOptional`; validado E2E en un despliegue real (vmd_sys+bottracking)
+con grafo idéntico al baseline (sin regresión). El resto de esta sección queda como
+registro del plan original.
 
 **Contexto.** El indexado multi-lenguaje (§18.7 de DESIGN, `extractors/ts_generic.py`) entrega
-para C/C++/Java/C#/Go/Rust/PHP/R/VB: símbolos + `defines` + `calls` **intra-archivo**. Falta el
-`calls`/`imports` **cross-file** de alta fidelidad, que hoy solo tienen Python (`ast`) y JS/TS
+para C/C++/Java/C#/Go/Rust/PHP/R/VB: símbolos + `defines` + `calls` **intra-archivo**. Faltaba el
+`calls`/`imports` **cross-file** de alta fidelidad, que solo tenían Python (`ast`) y JS/TS
 (`ts_treesitter`, vía `bindings` de import + resolución diferida en el indexador).
 
 **Plan de implementación.**
