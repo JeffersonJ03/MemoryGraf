@@ -262,17 +262,30 @@ class Indexer:
         sym_index = {}
         # (file_id, nombre_corto) -> [symbol_id]  (todos; genéricos: Clase.m -> "m")
         short_index = {}
+        # nombre_corto -> [(file_id, symbol_id)]  (para C/C++: resolución por nombre único)
+        short_all = {}
         for n in self.store.all_nodes(types=["symbol"]):
             path, name = n.get("path"), n["name"]
             if not path:
                 continue
+            short = name.rsplit(".", 1)[-1]
             if "." not in name:
                 sym_index[(path, name)] = n["id"]
-            short_index.setdefault((path, name.rsplit(".", 1)[-1]), []).append(n["id"])
+            short_index.setdefault((path, short), []).append(n["id"])
+            short_all.setdefault(short, []).append((path, n["id"]))
         count = 0
         for file_id_, project, ext, base_dir, calls_out, bindings in self.pending_calls:
             generic = ext != ".py" and ext not in _TS_EXTS
             for caller, callee_name, via in calls_out:
+                if generic and via is None and EXT_LANG.get(ext) in ("c", "cpp"):
+                    # M9 (1c-ii): llamada libre C/C++. Candidatos = símbolos con el mismo
+                    # nombre corto en archivos cuyo stem coincide con un #include directo
+                    # (cubre la pareja .h/.c). Enlaza SOLO si es único -> sin falsos.
+                    cands = self._c_call_candidates(file_id_, callee_name, short_all, caller)
+                    if len(cands) == 1:
+                        self.store.upsert_edge(Edge(caller, cands[0], EDGE_CALLS, 0.8, "xfile"))
+                        count += 1
+                    continue
                 b = bindings.get(via or callee_name)
                 if not b:
                     continue
@@ -297,6 +310,16 @@ class Indexer:
                     self.store.upsert_edge(Edge(caller, tgt, EDGE_CALLS, 0.9, "xfile"))
                     count += 1
         return count
+
+    def _c_call_candidates(self, file_id_, name, short_all, caller):
+        """Candidatos para una llamada libre de C/C++ (M9 1c-ii). Restringe a símbolos
+        en archivos cuyo stem == stem de un `#include` DIRECTO del llamante; así el par
+        header/impl (`x.h`/`x.c`) comparte stem y se cubre solo, sin falsos por convención."""
+        stems = {e["target"].rsplit(".", 1)[0]
+                 for e in self.store.neighbors(file_id_, edge_types=[EDGE_IMPORTS],
+                                               direction="out")}
+        return [sid for (f, sid) in short_all.get(name, [])
+                if sid != caller and f.rsplit(".", 1)[0] in stems]
 
     def _resolve_generic_files(self, project, ext, base_dir, module):
         """Archivos candidatos de un import genérico (M9). Go: todos los del paquete

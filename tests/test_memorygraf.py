@@ -368,6 +368,29 @@ class TestCrossFileCallsM9(Base):
         self.assertEqual(xcalls, set())
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_c_free_function_call(self):
+        # main.c llama help(); help() se define en util/helper.c (mismo stem que el .h incluido)
+        self.assertIn(("c/main.c::main", "c/util/helper.c::help"),
+                      self._xcalls_for("c"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_cpp_free_function_call(self):
+        self.assertIn(("cpp/main.cpp::main", "cpp/math/calc.cpp::add"),
+                      self._xcalls_for("cpp"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_precision_c_no_edge_when_file_not_included(self):
+        # main.c llama other(), definido en other.c, cuyo stem NO coincide con ningun
+        # #include de main.c -> NO se enlaza (precision: no adivina por nombre global).
+        self.write("main.c", '#include "a.h"\nint main(void){ return other(); }\n')
+        self.write("a.h", "int nothing(void);\n")
+        self.write("other.c", "int other(void){ return 1; }\n")
+        store, _ = self.index()
+        xcalls = {(e["source"], e["target"]) for e in store.all_edges()
+                  if e["type"] == "calls" and e["provenance"] == "xfile"}
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_asm_intra_file_call_and_precision(self):
         # M9 1d: 'call'/'jmp' -> arista a la etiqueta; 'mov'/'add' NO (whitelist mnemónicos).
         self.write("boot.s",

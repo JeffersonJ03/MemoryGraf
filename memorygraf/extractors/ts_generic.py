@@ -341,12 +341,16 @@ def _find_calls(root, grammar, text, spans, by_short, edges, bindings, calls_out
             caller = enclosing(n.start_byte)
             if caller and method:
                 if recv and recv in bindings:
-                    calls_out.append((caller, method, recv))          # cross-file
+                    calls_out.append((caller, method, recv))          # cross-file (receptor)
                 else:
                     callee = by_short.get(method)                     # intra-archivo
                     if callee and callee != caller and (caller, callee) not in seen:
                         seen.add((caller, callee))
                         edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))
+                    elif callee is None and not recv and grammar in ("c", "cpp"):
+                        # C/C++: llamada libre no local -> el indexer la resuelve por
+                        # includes + nombre único (M9 1c-ii). via=None la marca de bare.
+                        calls_out.append((caller, method, None))
         for c in n.children:
             walk(c)
 
