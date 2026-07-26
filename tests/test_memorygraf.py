@@ -1920,6 +1920,34 @@ class TestRuntimeLsp(Base):
         self.assertIn("params: a: int, b: str", Query(store).get("proj/a.py::f"))
         store.close()
 
+    def test_local_var_offsets(self):
+        # M4b-vars: extrae vars locales asignadas; salta params y self, en orden de aparición
+        from memorygraf.extractors import python_ast as pa
+        src = ("class C:\n"
+               "    def m(self, a):\n"
+               "        x = a + 1\n"
+               "        y = x * 2\n"
+               "        for i in range(y):\n"
+               "            z = i\n"
+               "        return y\n")
+        off = pa.local_var_offsets(src)
+        self.assertEqual([n for n, _ in off["C.m"]], ["x", "y", "i", "z"])
+        # 'a' (param) y 'self' no aparecen
+        self.assertNotIn("a", [n for n, _ in off["C.m"]])
+        x_line, x_char = off["C.m"][0][1][0]
+        self.assertEqual((x_line, x_char), (2, 8))     # posición 0-based del binding de x
+
+    def test_local_types_rendered_in_get(self):
+        # render determinista (sin LSP): inyecta local_types y verifica get()
+        import json
+        self.write("a.py", "def f():\n    x = 1\n    return x\n")
+        store, _ = self.index()
+        store.runtime_node_update("proj/a.py::f",
+                                  local_types=json.dumps({"x": "int"}))
+        store.commit()
+        self.assertIn("locales: x: int", Query(store).get("proj/a.py::f"))
+        store.close()
+
 
 class TestBenchmark(Base):
     """El benchmark corre, produce números coherentes y EXCLUYE lo ilustrativo del total.

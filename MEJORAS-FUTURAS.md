@@ -22,7 +22,7 @@ verificación en vivo antes de dar por buena.
 
 | # | Mejora | Valor | Riesgo | Esfuerzo |
 |---|---|---|---|---|
-| M1 | Co-cambio por símbolo con **historia completa** — ✅ **on-demand** (`impact --deep` + disparador + LLM); 🔬 full-repo diferido | Alto | Alto | Alto |
+| ~~M1~~ | ✅ **Implementado** · Co-cambio por símbolo con **historia completa** — on-demand (`impact --deep`) **+ full-repo OPT-IN** (`git.symbol_cochange_full`, acotado por `cochange_full_depth`) | Alto | Alto | Alto |
 | ~~M2~~ | ✅ **Implementado** · `tested_by` a nivel **símbolo→test** (contextos de cobertura) | Alto | Medio | Medio |
 | ~~M3~~ | ✅ **Implementado** · Narrar el "por qué" del co-cambio de **símbolos** | Medio | Bajo | Bajo |
 | ~~M4~~ | ✅ **Implementado** (multi-lenguaje TS/JS) · `resolved_type` + params/vars *(params/vars pend.)* | Medio | Medio | Medio |
@@ -30,7 +30,7 @@ verificación en vivo antes de dar por buena.
 | ~~M6~~ | ✅ **Implementado** · Escala: `git blame` **paralelo** (lectura) en repos grandes | Medio | Medio | Medio |
 | ~~M7~~ | ✅ **Implementado** · Narrativa/rerank con **LLM local** opt-in (Ollama) | Bajo | Bajo | Bajo |
 | ~~M8~~ | ✅ **Implementado** · Co-cambio **cross-project** por símbolo, gateado y conservador | Bajo | Medio | Medio |
-| ~~M4b~~ | ✅ **Implementado** (params Python **y TS/JS**) · `resolved_type` de **params individuales** (hover por offset) | Bajo | Medio | Medio |
+| ~~M4b~~ | ✅ **Implementado** · `resolved_type` de **params** (Python y TS/JS) **y variables locales** (Python, OPT-IN `runtime.local_var_types`) | Bajo | Medio | Medio |
 | ~~M9~~ | ✅ **Implementado** · `calls`/`imports` **cross-file** para los 10 lenguajes genéricos (+ `call` intra de asm) + capa LLM opcional de desambiguación | Medio | Medio | Alto |
 
 ---
@@ -54,8 +54,16 @@ acotada** — más barata, honesta y alineada con la filosofía "paga por lo que
   LLM local si YA está activo (sin cold-start sorpresa), si no heurístico (reusa M3). Degrada.
 
 Tests: `TestDeepImpact` (A halla lo que el blame pierde, B sugiere, C degrada, determinismo +
-evidencia, resolución por `git_roots`). El **full-repo siempre-encendido** queda diferido (el
-prototipo de abajo mide su coste y por qué no compensa integrarlo global).
+evidencia, resolución por `git_roots`).
+
+**Full-repo — ✅ INTEGRADO OPT-IN (2026-07-26).** `git_layer._full_symbol_cochange`: por cada
+commit (hasta `git.cochange_full_depth`) re-extrae la versión histórica de los archivos
+tocados (multi-lenguaje) y ve qué símbolos VIGENTES cayeron en los rangos cambiados → pares.
+Aditivo (provenance `git-cochange-sym-full`, no borra las de blame), recompute contra los
+símbolos actuales (sin ids obsoletos). **OPT-IN** (`git.symbol_cochange_full=false` por defecto)
+por el coste medido (~14-23x) y acotado por profundidad. Test: `TestFullHistorySymbolCochange`
+(repo real donde el blame pierde el par y el full lo capta). El prototipo de abajo queda como
+registro de la medición que justificó hacerlo opt-in y acotado.
 
 **Prototipo full-repo (medido, no integrado).** Prototipo en
 `prototype_m1_history_cochange.py` (raíz del repo, NO importado por el paquete). Sigue la
@@ -357,7 +365,15 @@ destructuring), render determinista, y E2E guardados (Python + TS).
 del param YA está en la firma (`resolved_type`), así que `param_types` es en buena parte
 **redundante**; el valor NUEVO (params **inferidos** sin anotación) depende del servidor
 (**pyright** limpio en la definición; **pylsp/jedi** vía uso, más verboso; **tsserver** limpio
-en la definición). **Variables locales** (no params) quedan fuera (muchísimas, valor marginal).
+en la definición).
+
+**Variables locales — ✅ INTEGRADO OPT-IN (2026-07-26, Python).** `python_ast.local_var_offsets`
+extrae el binding de cada variable local (salta params/self/global); `runtime/lsp.py` hace
+hover en esos offsets y guarda `local_types` (JSON) por símbolo; `query.get()` los renderiza
+(`locales: x: int, ...`). **OPT-IN** (`runtime.local_var_types=false` por defecto) por el
+veredicto de valor marginal + coste de hovers. Tests: `test_local_var_offsets`,
+`test_local_types_rendered_in_get`. (TS/JS locales: extensión trivial futura; el slot del
+proveedor por lenguaje ya existe en `_LANGUAGES`.)
 
 **Contexto.** M4 dejó el multi-lenguaje. Faltaba el punto 3 de su plan: tipos de parámetros
 individuales, no solo la firma. `_collect_types` hacía UN hover por símbolo (definición) y

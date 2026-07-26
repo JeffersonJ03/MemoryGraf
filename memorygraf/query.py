@@ -41,6 +41,13 @@ def _runtime_line(rt: dict) -> str:
                 parts.append("params: " + ", ".join(f"{k}: {v}" for k, v in pt.items()))
         except (ValueError, TypeError):
             pass
+    if rt.get("local_types"):
+        try:
+            lt = _json.loads(rt["local_types"])
+            if lt:
+                parts.append("locales: " + ", ".join(f"{k}: {v}" for k, v in lt.items()))
+        except (ValueError, TypeError):
+            pass
     diags = rt.get("diagnostics")
     if diags:
         try:
