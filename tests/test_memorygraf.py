@@ -321,6 +321,56 @@ class TestCrossFileImportsM9(Base):
                       self._imports_for("php"))
 
 
+class TestCrossFileCallsM9(Base):
+    """M9 (1c): calls símbolo->símbolo cross-file para los genéricos con receptor
+    (Java `Clase.m`, Go `pkg.F`, PHP `Clase::m`, Rust `mod::f`). Resolución estática,
+    y enlaza SOLO si el nombre corto es inequívoco en el archivo destino (precisión)."""
+
+    def _xcalls_for(self, lang):
+        root = os.path.join(CROSSFILE_DIR, lang)
+        store = Store(self.db)
+        Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        edges = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["type"] == "calls" and e["provenance"] == "xfile"}
+        store.close()
+        return edges
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_java_method_call(self):
+        self.assertIn(("java/com/x/App.java::App.run",
+                       "java/com/x/util/Validator.java::Validator.isValid"),
+                      self._xcalls_for("java"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_go_package_func_call(self):
+        self.assertIn(("go/main.go::main", "go/util/helper.go::Help"),
+                      self._xcalls_for("go"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_php_static_method_call(self):
+        self.assertIn(("php/src/App.php::App.run",
+                       "php/src/Util/Validator.php::Validator.isValid"),
+                      self._xcalls_for("php"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_rust_path_func_call(self):
+        self.assertIn(("rust/main.rs::main", "rust/helper.rs::run"),
+                      self._xcalls_for("rust"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_precision_no_edge_for_absent_method(self):
+        # App llama Lib.missing(); Lib no define missing() -> NO se inventa arista xfile.
+        self.write("com/App.java",
+                   "package com;\nimport com.Lib;\n"
+                   "class App { void r(){ Lib.missing(); } }\n")
+        self.write("com/Lib.java",
+                   "package com;\nclass Lib { static void present(){} }\n")
+        store, _ = self.index()
+        xcalls = {(e["source"], e["target"]) for e in store.all_edges()
+                  if e["type"] == "calls" and e["provenance"] == "xfile"}
+        self.assertEqual(xcalls, set())
+
+
 class TestSearch(Base):
     def test_hybrid_search_finds_by_tokens(self):
         self.write("orders.py",

@@ -258,23 +258,38 @@ class Indexer:
         Precisión alta: solo enlaza si el nombre llamado fue importado de un módulo
         interno que define ese símbolo. Activa la reconciliación al mover símbolos.
         """
-        # (file_id, nombre_simple) -> symbol_id  (solo símbolos top-level)
+        # (file_id, nombre_simple) -> symbol_id  (top-level; modelo Python/JS)
         sym_index = {}
+        # (file_id, nombre_corto) -> [symbol_id]  (todos; genéricos: Clase.m -> "m")
+        short_index = {}
         for n in self.store.all_nodes(types=["symbol"]):
-            if "." not in n["name"] and n.get("path"):
-                sym_index[(n["path"], n["name"])] = n["id"]
+            path, name = n.get("path"), n["name"]
+            if not path:
+                continue
+            if "." not in name:
+                sym_index[(path, name)] = n["id"]
+            short_index.setdefault((path, name.rsplit(".", 1)[-1]), []).append(n["id"])
         count = 0
         for file_id_, project, ext, base_dir, calls_out, bindings in self.pending_calls:
+            generic = ext != ".py" and ext not in _TS_EXTS
             for caller, callee_name, via in calls_out:
                 b = bindings.get(via or callee_name)
                 if not b:
                     continue
                 module, imported = b
+                if generic:
+                    # M9 (1c): receptor->import->archivo(s); match por nombre corto.
+                    # Enlaza SOLO si es inequívoco (1 candidato) -> alta precisión.
+                    files = self._resolve_generic_files(project, ext, base_dir, module)
+                    cands = [c for tf in files
+                             for c in short_index.get((tf, callee_name), []) if c != caller]
+                    if len(cands) == 1:
+                        self.store.upsert_edge(Edge(caller, cands[0], EDGE_CALLS, 0.85, "xfile"))
+                        count += 1
+                    continue
                 target_name = imported or callee_name
-                if ext == ".py":
-                    target_file = self._resolve_py(project, module, base_dir)
-                else:
-                    target_file = self._resolve_js(project, base_dir, module)
+                target_file = (self._resolve_py(project, module, base_dir) if ext == ".py"
+                               else self._resolve_js(project, base_dir, module))
                 if not target_file:
                     continue
                 tgt = sym_index.get((target_file, target_name))
@@ -282,6 +297,18 @@ class Indexer:
                     self.store.upsert_edge(Edge(caller, tgt, EDGE_CALLS, 0.9, "xfile"))
                     count += 1
         return count
+
+    def _resolve_generic_files(self, project, ext, base_dir, module):
+        """Archivos candidatos de un import genérico (M9). Go: todos los del paquete
+        (un paquete = dir con varios archivos); el resto: el único archivo resuelto."""
+        if EXT_LANG.get(ext) == "go":
+            pkg = module
+            mod = self.go_module.get(project)
+            if mod and (module == mod or module.startswith(mod + "/")):
+                pkg = module[len(mod):].lstrip("/")
+            return list(self.go_pkg_index.get((project, pkg), []))
+        f = self._resolve_generic(project, ext, base_dir, module)
+        return [f] if f else []
 
     def _reconcile(self, pre_symbols: dict) -> int:
         """Re-enlaza aristas cuyos extremos se movieron de archivo (§6.4).

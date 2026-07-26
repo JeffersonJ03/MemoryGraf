@@ -137,12 +137,66 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     else:
         _walk_defs(root, _SPEC[grammar], grammar, text, src, rel_path, fid, add)
 
-    # --- llamadas INTRA-archivo (callee resuelto por nombre local) ---
-    if grammar in _CALLS and by_short:
-        _find_calls(root, grammar, text, spans, by_short, edges)
     # --- imports cross-file (specifiers crudos; el indexer los resuelve a archivos) ---
     raw_imports = _extract_imports(root, grammar, text) if grammar in _IMPORT_NODES else []
-    return nodes, edges, raw_imports, [], {}
+    bindings = _bindings_from_imports(raw_imports, grammar)
+    # --- llamadas: INTRA-archivo (nombre local) + calls_out cross-file (receptor->import) ---
+    calls_out: list = []
+    if grammar in _CALLS and (by_short or bindings):
+        _find_calls(root, grammar, text, spans, by_short, edges, bindings, calls_out)
+    return nodes, edges, raw_imports, calls_out, bindings
+
+
+def _bindings_from_imports(raw_imports, grammar) -> dict:
+    """nombre local -> (module_spec, None). Java: última clase; Go: paquete; PHP: clase;
+    Rust: nombre del `mod`. Es el receptor que el indexer resolverá a archivo (M9 1c)."""
+    b: dict = {}
+    for raw in raw_imports:
+        if grammar == "java":
+            local = raw.split(".")[-1]
+        elif grammar == "go":
+            local = raw.rstrip("/").split("/")[-1]
+        elif grammar == "php":
+            local = raw.strip("\\").split("\\")[-1]
+        elif grammar == "rust":
+            local = raw
+        else:
+            local = None
+        if local:
+            b[local] = (raw, None)
+    return b
+
+
+def _call_parts(n, grammar, text):
+    """(receptor, método_corto) de una llamada; receptor=None si no hay receptor
+    (llamada simple). El receptor se contrasta contra los bindings de import."""
+    if grammar == "java" and n.type == "method_invocation":
+        obj, nm = n.child_by_field_name("object"), n.child_by_field_name("name")
+        recv = text(obj) if (obj is not None and obj.type == "identifier") else None
+        return recv, (text(nm) if nm is not None else None)
+    if grammar == "go" and n.type == "call_expression":
+        fn = n.child_by_field_name("function")
+        if fn is not None and fn.type == "selector_expression":
+            op, fl = fn.child_by_field_name("operand"), fn.child_by_field_name("field")
+            recv = text(op) if (op is not None and op.type == "identifier") else None
+            return recv, (text(fl) if fl is not None else None)
+        return None, (_short_ident(text(fn)) if fn is not None else None)
+    if grammar == "php" and n.type == "scoped_call_expression":
+        sc, nm = n.child_by_field_name("scope"), n.child_by_field_name("name")
+        recv = text(sc) if sc is not None else None
+        return recv, (text(nm) if nm is not None else None)
+    if grammar == "rust" and n.type == "call_expression":
+        fn = n.child_by_field_name("function")
+        if fn is not None and fn.type == "scoped_identifier":
+            path, nm = fn.child_by_field_name("path"), fn.child_by_field_name("name")
+            recv = text(path) if (path is not None and path.type == "identifier") else None
+            return recv, (text(nm) if nm is not None else None)
+        return None, (_short_ident(text(fn)) if fn is not None else None)
+    # genérico: field configurado o primer ident, sin receptor
+    _types, field = _CALLS.get(grammar, (set(), None))
+    node = n.child_by_field_name(field) if field else None
+    name = text(node) if node is not None else (_first_ident(n, text) or "")
+    return None, _short_ident(name)
 
 
 def _extract_imports(root, grammar, text) -> list:
@@ -264,10 +318,11 @@ def _first_ident(node, text):
     return None
 
 
-def _find_calls(root, grammar, text, spans, by_short, edges):
-    """Aristas `calls` INTRA-archivo: llamante (por contención de bytes) -> callee
-    resuelto por nombre corto contra los símbolos del propio archivo."""
-    call_types, field = _CALLS[grammar]
+def _find_calls(root, grammar, text, spans, by_short, edges, bindings, calls_out):
+    """Llamadas: `calls` INTRA-archivo (callee por nombre corto local) + `calls_out`
+    cross-file cuando el receptor es un import (el indexer lo resuelve, M9 1c).
+    Llamante ubicado por contención de bytes en el span del símbolo más interno."""
+    call_types, _field = _CALLS[grammar]
     ordered = sorted(spans, key=lambda s: s[1] - s[0])   # el span más pequeño (interno) 1º
 
     def enclosing(byte):
@@ -280,14 +335,16 @@ def _find_calls(root, grammar, text, spans, by_short, edges):
 
     def walk(n):
         if n.type in call_types:
-            callee_node = n.child_by_field_name(field) if field else None
-            name = (text(callee_node) if callee_node is not None
-                    else _first_ident(n, text) or "")
+            recv, method = _call_parts(n, grammar, text)
             caller = enclosing(n.start_byte)
-            callee = by_short.get(_short_ident(name))
-            if caller and callee and callee != caller and (caller, callee) not in seen:
-                seen.add((caller, callee))
-                edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))
+            if caller and method:
+                if recv and recv in bindings:
+                    calls_out.append((caller, method, recv))          # cross-file
+                else:
+                    callee = by_short.get(method)                     # intra-archivo
+                    if callee and callee != caller and (caller, callee) not in seen:
+                        seen.add((caller, callee))
+                        edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))
         for c in n.children:
             walk(c)
 
