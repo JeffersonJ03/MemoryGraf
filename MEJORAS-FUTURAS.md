@@ -4,7 +4,8 @@
 > verdad es el **código + los tests (`tests/test_memorygraf.py`) + el historial de commits**;
 > este documento ya no es un "roadmap de cosas por hacer", sino un registro corto de:
 > **(a)** lo hecho, **(b)** la **deuda consciente** que conviene recordar (por qué algo va
-> gateado/acotado), y **(c)** lo único genuinamente pendiente: la **validación de ENTORNO** (§9).
+> gateado/acotado), **(c)** una **propuesta** de mejora (M10: bootstrap de entidades con LLM),
+> y **(d)** lo único pendiente de ejecución: la **validación de ENTORNO** (§9).
 > Complementa `DESIGN.md` (principios §3, vinculantes).
 
 ---
@@ -62,6 +63,38 @@ desempata candidatos ambiguos (confidence 0.55 + provenance `llm`, fallback dete
 | R | ✅ | ✅ | `source("path")`; call libre por nombre único |
 | C# / VB | — (namespace) | ✅ | índice namespace→archivos; `Receptor.m()` cualificado |
 | Assembly | — | intra ✅ | `call`/salto → etiqueta (whitelist de mnemónicos) |
+
+---
+
+## M10 · (PROPUESTA) Bootstrap de entidades de dominio con LLM local
+
+**Contexto.** El glosario de dominio (`memorygraf.entities.json` → nodos `entity` + aristas
+`models`, Fase 4) es opt-in y su **contenido se redacta a mano** (es conocimiento de negocio;
+autocopiarlo del `.example` metería entidades falsas, ya que aliases genéricos como
+`user`/`order` matchearían código no relacionado). Se autodetecta si existe, pero un usuario
+nuevo rara vez sabe que existe o se anima a escribirlo desde cero → la capa de dominio queda
+infrautilizada.
+
+**Propuesta.** Un comando **interactivo** `memorygraf bootstrap-entities` (nombre tentativo),
+friendly como `configure`/`doctor`, que:
+1. Lee el grafo YA sincronizado (símbolos/archivos + sus nombres/rutas).
+2. Con el **LLM LOCAL** (Ollama, opt-in; sin él, fallback heurístico: agrupación por tokens
+   frecuentes en identificadores) **PROPONE** entidades candidatas + aliases desde el código.
+3. Presenta cada candidata para que el usuario la **CURE** (aceptar / editar / descartar). El
+   humano es la fuente de verdad; el LLM solo sugiere (guardarraíl §6.4, DESIGN).
+4. Escribe `memorygraf.entities.json` con lo curado. Idempotente (re-ejecutable, fusiona sin
+   duplicar). El siguiente `sync` crea los nodos `entity` + aristas `models`.
+5. Documentado en `--help` (descripción + ejemplos) y en el MANUAL (`memorygraf -h`).
+
+**Pruebas post-implementación.**
+- Con LLM mockeado: propone candidatas desde un grafo de juguete; aceptar 1 → se escribe el
+  glosario y el `sync` posterior crea `entity`/`models`. Descartar no la escribe.
+- Fallback sin Ollama: agrupación heurística determinista (no rompe, degradación elegante).
+- Idempotencia: re-ejecutar fusiona sin duplicar; procedencia (cada candidata cita símbolos
+  reales, nada inventado).
+
+**Riesgo/Esfuerzo.** Medio. El LLM propone pero NO es canónico (curación humana obligatoria);
+sin Ollama degrada a heurístico. Contenido a un módulo nuevo + subcomando (patrón `configure`).
 
 ---
 
