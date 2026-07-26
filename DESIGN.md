@@ -567,21 +567,23 @@ Muy conservador: dos símbolos de proyectos distintos solo se enlazan si (1) com
 git, (2) superan umbrales más estrictos y (3) están CONFIRMADOS por `cross_link` (endpoints
 compartidos). Evita falsos positivos entre proyectos.
 
-### 18.5 M1 · Co-cambio por historia completa — prototipo medido y decisión de diseño
+### 18.5 M1 · Co-cambio por historia completa — medición y decisión de diseño
 
 **Problema.** El co-cambio por símbolo se deriva del BLAME, que atribuye cada línea a su
 ÚLTIMO commit: es un acoplamiento "de superficie". Si dos símbolos se co-editaron en commits
 viejos cuyas líneas luego se reescribieron, la señal se pierde (el de archivo sí usa historia
 completa).
 
-**Prototipo (`prototype_m1_history_cochange.py`, NO integrado).** Recorre el diff de cada
-commit (`git show --unified=0`) y re-extrae los símbolos de esa versión (AST, caché por
-(sha,path)) para contar co-ocurrencias reales. Su fin es MEDIR el coste antes de integrar
-(§10, §12), no ser código de producción:
+**Medición previa (el prototipo se retiró tras integrar).** Antes de integrar se midió el
+coste con un prototipo aislado (recorrer el diff de cada commit + re-extraer los símbolos de
+esa versión, caché por (sha,path)):
 
-- **Beneficio confirmado:** capta el acoplamiento que el blame pierde (test dedicado).
+- **Beneficio:** capta el acoplamiento que el blame pierde.
 - **Coste medido:** ~14× (20 archivos × 30 commits) y ~23× (50 × 50) frente al `sync` con
   blame. Domina `git show` + re-AST por (commit, archivo): O(commits × archivos).
+
+Con esos datos se decidió integrarlo como OPT-IN y acotado (abajo); el prototipo cumplió su
+fin y se retiró — su lógica vive ahora en `git_layer._full_symbol_cochange`.
 
 **Decisión (elección consciente).** En vez de pagar ese coste GLOBAL en cada `sync`, se
 integró la ruta **ON-DEMAND y ACOTADA** (`deep_history.py`), fiel a §3.3/§3.4 (el trabajo
@@ -597,9 +599,10 @@ pesado fuera del hot path; pagar solo por lo que se consulta):
 - **C · narrativa:** el "por qué" del acoplamiento profundo con el LLM local si ya está
   activo (sin cold-start sorpresa), si no heurístico (Capa 3). Degradación elegante.
 
-El **full-repo siempre-encendido** queda diferido; si alguna vez se integra, el camino es un
-acumulador incremental por SHA + tope de profundidad — y el prototipo es la evidencia que lo
-justificaría (o no) con datos.
+El **full-repo** está integrado como **OPT-IN** (`git.symbol_cochange_full`, acotado por
+`cochange_full_depth`): `git_layer._full_symbol_cochange` emite aristas `git-cochange-sym-full`
+(aditivas, recomputadas contra los símbolos vigentes). Se deja apagado por el coste medido;
+una futura optimización sería un acumulador incremental por SHA.
 
 ### 18.6 Estado actual
 
