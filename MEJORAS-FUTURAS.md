@@ -34,8 +34,8 @@ commit): un acoplamiento "de superficie". Si dos símbolos se co-editaron en com
 cuyas líneas luego se reescribieron, esa señal se pierde. El **full-repo**
 (`git_layer._full_symbol_cochange`, provenance `git-cochange-sym-full`) la recupera
 re-extrayendo la versión histórica de cada commit — pero **cuesta ~14-23×** el blame
-(medido con `prototype_m1_history_cochange.py`: 20 archivos×30 commits ≈ 14×, 50×50 ≈ 23×;
-domina `git show`+re-AST por cada (commit, archivo)).
+(medido antes de integrar con un prototipo aislado, ya retirado: 20 archivos×30 commits ≈ 14×,
+50×50 ≈ 23×; domina `git show`+re-AST por cada (commit, archivo)).
 
 **Por eso va OPT-IN** (`git.symbol_cochange_full=false` por defecto) y **acotado por
 profundidad** (`git.cochange_full_depth`). Es aditivo (no borra el blame) y recomputa contra
