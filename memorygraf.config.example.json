@@ -8,12 +8,14 @@
 
   "_runtime_comment": "Opcional (autodescubre en reports/, coverage/, ...). 'memorygraf runtime' ingiere coverage.xml (cobertura por símbolo) y junit.xml (estado de tests). Para tested_by SÍMBOLO→test, genera coverage.json con contextos: pytest --cov-context=test && coverage json --show-contexts. Con --lsp: diagnósticos + resolved_type; 'param_types':false desactiva el hover por parámetro (M4b, mejor con pyright).",
 
-  "_git_comment": "Opcional. Ajustes de la capa Git. 'blame_workers': hilos para el 'git blame' (I/O-bound) en repos grandes; 0=auto (min(8, cpu+2)), 1=secuencial. Co-cambio CROSS-PROJECT por símbolo (M8, muy conservador): solo enlaza símbolos de proyectos que comparten repo git, superando umbrales estrictos (cochange_cross_min, cochange_cross_threshold) y CONFIRMADOS por cross_link/endpoints (cochange_cross_confirm=true). Pon cochange_cross_confirm=false para permitirlo sin endpoints compartidos (solo umbral).",
+  "_git_comment": "Opcional. Ajustes de la capa Git. 'blame_workers': hilos para el 'git blame' (I/O-bound) en repos grandes; 0=auto (min(8, cpu+2)), 1=secuencial. Co-cambio CROSS-PROJECT por símbolo (M8, muy conservador): solo enlaza símbolos de proyectos que comparten repo git, superando umbrales estrictos (cochange_cross_min, cochange_cross_threshold) y CONFIRMADOS por cross_link/endpoints (cochange_cross_confirm=true). Pon cochange_cross_confirm=false para permitirlo sin endpoints compartidos (solo umbral). Co-cambio de símbolo por HISTORIA COMPLETA (M1, OPT-IN): symbol_cochange_full=true capta el acoplamiento que el blame pierde (líneas reescritas) re-extrayendo cada commit; cuesta ~14-23x, por eso va apagado y acotado por cochange_full_depth (nº de commits). Aristas con provenance 'git-cochange-sym-full'.",
   "git": {
     "blame_workers": 0,
     "cochange_cross_confirm": true,
     "cochange_cross_min": 3,
-    "cochange_cross_threshold": 0.5
+    "cochange_cross_threshold": 0.5,
+    "symbol_cochange_full": false,
+    "cochange_full_depth": 400
   },
 
   "_llm_comment": "Motor+modelo del LLM para resúmenes y compilador. Lo más fácil: 'memorygraf setup-llm' (interactivo) elige motor y modelo y escribe estos bloques. Motores: heuristic (offline) · ollama (local: model) · api (endpoint compatible OpenAI: {url, model}; la KEY va en la env MEMORYGRAF_LLM_KEY, nunca en este archivo).",

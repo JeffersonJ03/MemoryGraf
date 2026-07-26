@@ -828,6 +828,38 @@ class _GitRepo:
 
 
 @unittest.skipUnless(_git_available(), "git no disponible")
+class TestFullHistorySymbolCochange(_GitRepo, Base):
+    """M1 (opt-in): co-cambio de símbolo por HISTORIA COMPLETA capta el acoplamiento que
+    el blame pierde (dos funciones co-editadas en commits viejos y luego reescritas)."""
+
+    def test_captures_coupling_that_blame_misses(self):
+        self._init_repo()
+        self.write("a.py", "def foo():\n    return 1\ndef bar():\n    return 2\n")
+        self._commit("c1 crea ambas")
+        self.write("a.py", "def foo():\n    return 11\ndef bar():\n    return 22\n")
+        self._commit("c2 co-edita ambas")
+        self.write("a.py", "def foo():  # r3\n    return 111\ndef bar():\n    return 22\n")
+        self._commit("c3 reescribe foo")
+        self.write("a.py", "def foo():  # r3\n    return 111\ndef bar():  # r4\n    return 222\n")
+        self._commit("c4 reescribe bar")
+        store, _ = self.index()
+
+        pair = {"proj/a.py::foo", "proj/a.py::bar"}
+        # (1) sin full: el blame NO ve el co-cambio (líneas ya reescritas por separado)
+        git_layer.sync(store, self.config)
+        blame = [e for e in store.all_edges() if e["type"] == "co_changes_with"
+                 and {e["source"], e["target"]} == pair]
+        self.assertEqual(blame, [])
+
+        # (2) con full (opt-in): SÍ lo capta, con provenance identificable
+        cfg = {**self.config, "git": {"symbol_cochange_full": True, "cochange_full_depth": 50}}
+        git_layer.sync(store, cfg)
+        full = {(e["source"], e["target"]) for e in store.all_edges()
+                if e["provenance"] == "git-cochange-sym-full"}
+        self.assertIn(("proj/a.py::foo", "proj/a.py::bar"), full)
+
+
+@unittest.skipUnless(_git_available(), "git no disponible")
 class TestGitLayer(_GitRepo, Base):
     """CAPA 1 · Temporal/Git. Crea un repo git real y valida las señales."""
 

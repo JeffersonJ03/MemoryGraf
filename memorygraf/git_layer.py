@@ -49,7 +49,15 @@ _DEFAULTS = {
     "cochange_cross_confirm": True,   # exige confirmación de cross_link (endpoints compartidos)
     "cochange_cross_min": 3,          # co-ocurrencias mínimas cross-project (más estricto)
     "cochange_cross_threshold": 0.5,  # peso mínimo cross-project (más estricto)
+    # Co-cambio de símbolo por HISTORIA COMPLETA (M1): OPT-IN. Capta el acoplamiento que
+    # el blame pierde (líneas reescritas), pero cuesta ~14-23x (re-AST por commit); por eso
+    # va acotado por profundidad y apagado por defecto. Emite provenance '-full' (aditivo).
+    "symbol_cochange_full": False,    # activa el walk de historia completa por símbolo
+    "cochange_full_depth": 400,       # tope de commits a recorrer (acota el coste)
 }
+
+# Cabecera de hunk: interesa el rango POST-IMAGE (+c,d) = estado del archivo EN ese commit.
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 
 # --------------------------------------------------------------------------- #
@@ -219,14 +227,18 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
     # de símbolo solo AÑADE -> el orden importa.
     edges = _rebuild_cochange_edges(store, file_ids, st)
     sym_edges = _rebuild_symbol_cochange(store, st, repos)
+    # M1 (opt-in): co-cambio de símbolo por historia completa -> capta lo que el blame pierde
+    full_sym = _full_symbol_cochange(store, config, repos, st, log) \
+        if st.get("symbol_cochange_full") else 0
 
     store.prune_git_layer()
     store.commit()
+    extra = f" (+{full_sym} historia completa)" if st.get("symbol_cochange_full") else ""
     log(f"git: {processed_commits} commits nuevos · {blamed} archivos blame · "
-        f"{edges} co_changes_with archivo, {sym_edges} símbolo")
+        f"{edges} co_changes_with archivo, {sym_edges} símbolo{extra}")
     return {"enabled": True, "commits": processed_commits, "blamed_files": blamed,
             "cochange_edges": edges, "cochange_symbol_edges": sym_edges,
-            "full_rebuild": full}
+            "cochange_symbol_full_edges": full_sym, "full_rebuild": full}
 
 
 def _walk_commits(store, root, project, file_ids, rng, st, recent, log) -> int:
@@ -550,6 +562,112 @@ def _rebuild_symbol_cochange(store, st, repos) -> int:
             continue
         store.upsert_edge(Edge(a, b, EDGE_CO_CHANGES, weight, prov))
         store.upsert_edge(Edge(b, a, EDGE_CO_CHANGES, weight, prov))
+        count += 1
+    return count
+
+
+def _changed_ranges(top: str, sha: str) -> dict:
+    """{repo_rel_path: [(inicio, fin), ...]} rangos POST-IMAGE tocados en el commit."""
+    out = _git(["show", sha, "--unified=0", "--format=", "--no-color"], top)
+    ranges: dict = {}
+    cur = None
+    for ln in (out or "").splitlines():
+        if ln.startswith("+++ b/"):
+            cur = ln[6:].strip()
+            cur = None if cur == "/dev/null" else cur
+        elif cur and ln.startswith("@@"):
+            m = _HUNK.match(ln)
+            if not m:
+                continue
+            start, cnt = int(m.group(1)), int(m.group(2) or "1")
+            if cnt > 0:                          # adición/modificación (borrado puro se omite)
+                ranges.setdefault(cur, []).append((start, start + cnt - 1))
+    return ranges
+
+
+def _extract_syms_at(rel_id: str, project: str, source: str, ext: str) -> list:
+    """[(sym_id, span_start, span_end)] de una versión histórica del archivo (re-extracción
+    por lenguaje). Los ids son {project}/{path}::{qualname}: casan con el grafo actual."""
+    from .extractors import python_ast, ts_treesitter, ts_generic
+    from .model import NODE_SYMBOL
+    try:
+        if ext == ".py":
+            nodes = python_ast.extract(rel_id, project, source)[0]
+        elif ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs") and ts_treesitter.available():
+            nodes = ts_treesitter.extract(rel_id, project, source)[0]
+        elif ext.lstrip(".") in ts_generic._GRAMMAR_BY_EXT and ts_generic.available():
+            nodes = ts_generic.extract(rel_id, project, source)[0]
+        else:
+            return []
+    except Exception:
+        return []
+    return [(n.id, n.span_start, n.span_end or n.span_start)
+            for n in nodes if n.type == NODE_SYMBOL and n.span_start]
+
+
+def _full_symbol_cochange(store, config, repos, st, log) -> int:
+    """M1 (OPT-IN): co-cambio símbolo↔símbolo por HISTORIA COMPLETA. Aditivo.
+
+    Por cada commit (hasta `cochange_full_depth`) re-extrae la versión histórica de los
+    archivos tocados y ve qué símbolos VIGENTES cayeron en los rangos cambiados -> pares.
+    Capta el acoplamiento que el blame pierde (líneas reescritas). Recompute contra los
+    símbolos actuales cada sync (sin ids obsoletos). Emite provenance 'git-cochange-sym-full'
+    (upsert: para pares que el blame ya halló, prevalece esta versión; los que solo halla el
+    blame se conservan). Intra-proyecto (el cross-project lo maneja M8 por blame)."""
+    from .extractors import ts_generic
+    sym_ids = {n["id"] for n in store.all_nodes(types=["symbol"])}
+    if not sym_ids:
+        return 0
+    ext_ok = ({".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
+              | {"." + e for e in ts_generic._GRAMMAR_BY_EXT})
+    depth = st.get("cochange_full_depth", 400)
+    max_syms = st.get("cochange_max_symbols", 20)
+    pair_cnt: dict = {}
+    cache: dict = {}
+    for name, (root, top, _head) in repos.items():
+        prefix = os.path.relpath(root, top).replace("\\", "/")
+        prefix = "" if prefix == "." else prefix + "/"
+        shas = (_git(["log", "--no-merges", f"-n{depth}", "--format=%H"], top) or "").split()
+        for sha in shas:
+            touched = set()
+            for repo_rel, ranges in _changed_ranges(top, sha).items():
+                if prefix and not repo_rel.startswith(prefix):
+                    continue
+                ext = os.path.splitext(repo_rel)[1].lower()
+                if ext not in ext_ok:
+                    continue
+                key = (sha, repo_rel)
+                if key not in cache:
+                    src = _git(["show", f"{sha}:{repo_rel}"], top)
+                    proj_rel = repo_rel[len(prefix):]
+                    cache[key] = (_extract_syms_at(f"{name}/{proj_rel}", name, src, ext)
+                                  if src else [])
+                for sid, a, b in cache[key]:
+                    if sid in sym_ids and any(a <= e and b >= s for s, e in ranges):
+                        touched.add(sid)
+            uniq = sorted(touched)
+            if 1 < len(uniq) <= max_syms:        # ignora commits "barredera"
+                for i in range(len(uniq)):
+                    for j in range(i + 1, len(uniq)):
+                        k = (uniq[i], uniq[j])
+                        pair_cnt[k] = pair_cnt.get(k, 0) + 1
+    churn: dict = {}
+    count = 0
+    for (a, b), cnt in pair_cnt.items():
+        if _project_of(a) != _project_of(b) or cnt < st["min_cochange"]:
+            continue
+        for nid in (a, b):
+            if nid not in churn:
+                g = store.git_node_get(nid)
+                churn[nid] = g["churn"] if g else 0
+        denom = min(churn[a], churn[b])
+        if denom <= 0:
+            continue
+        weight = round(min(1.0, cnt / denom), 3)
+        if weight < st["cochange_threshold"]:
+            continue
+        store.upsert_edge(Edge(a, b, EDGE_CO_CHANGES, weight, "git-cochange-sym-full"))
+        store.upsert_edge(Edge(b, a, EDGE_CO_CHANGES, weight, "git-cochange-sym-full"))
         count += 1
     return count
 
