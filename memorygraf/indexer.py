@@ -159,6 +159,24 @@ def _load_php_psr4(root: str):
     return out
 
 
+_RE_CS_NS = re.compile(r'\bnamespace\s+([A-Za-z_][\w.]*)')
+_RE_CS_USING = re.compile(r'\busing\s+([A-Za-z_][\w.]*)\s*;')
+_RE_VB_NS = re.compile(r'(?i)\bNamespace\s+([A-Za-z_][\w.]*)')
+_RE_VB_IMPORTS = re.compile(r'(?i)^\s*Imports\s+([A-Za-z_][\w.]*)', re.MULTILINE)
+
+
+def _cs_vb_namespaces(source: str, ext: str):
+    """(namespaces declarados, namespaces usados) de un archivo C#/VB (M9 2b/2c).
+
+    Regex (no tree-sitter): barato y suficiente para 'namespace X'/'using X;' (C#) y
+    'Namespace X'/'Imports X' (VB). El 'scope' visible = declarados + usados."""
+    if ext == ".cs":
+        return set(_RE_CS_NS.findall(source)), set(_RE_CS_USING.findall(source))
+    if ext == ".vb":
+        return set(_RE_VB_NS.findall(source)), set(_RE_VB_IMPORTS.findall(source))
+    return set(), set()
+
+
 def _py_module_key(project: str, relpath: str) -> str:
     """miapp/paquete/modulo.py -> paquete.modulo  (clave de import interno)."""
     p = relpath
@@ -184,6 +202,8 @@ class Indexer:
         self.go_module = {}        # project -> nombre de módulo (go.mod)
         self.go_pkg_index = {}     # (project, dir_paquete) -> [file_id,...]
         self.php_psr4 = {}         # project -> [(prefijo_namespace, dir_base),...]
+        self.ns_index = {}         # (project, namespace) -> [file_id,...]  (C#/VB)
+        self.file_ns_scope = {}    # file_id -> set(namespaces visibles: declarados+usados)
         for proj in config["projects"]:
             name, root = proj["name"], proj["root"]
             al = _load_ts_aliases(root)
@@ -264,6 +284,8 @@ class Indexer:
         short_index = {}
         # nombre_corto -> [(file_id, symbol_id)]  (para C/C++: resolución por nombre único)
         short_all = {}
+        # (file_id, nombre_cualificado) -> symbol_id  (para C#/VB: "Clase.metodo")
+        name_index = {}
         for n in self.store.all_nodes(types=["symbol"]):
             path, name = n.get("path"), n["name"]
             if not path:
@@ -273,15 +295,29 @@ class Indexer:
                 sym_index[(path, name)] = n["id"]
             short_index.setdefault((path, short), []).append(n["id"])
             short_all.setdefault(short, []).append((path, n["id"]))
+            name_index[(path, name)] = n["id"]
         count = 0
         for file_id_, project, ext, base_dir, calls_out, bindings in self.pending_calls:
             generic = ext != ".py" and ext not in _TS_EXTS
             for caller, callee_name, via in calls_out:
-                if generic and via is None and EXT_LANG.get(ext) in ("c", "cpp"):
-                    # M9 (1c-ii): llamada libre C/C++. Candidatos = símbolos con el mismo
-                    # nombre corto en archivos cuyo stem coincide con un #include directo
-                    # (cubre la pareja .h/.c). Enlaza SOLO si es único -> sin falsos.
+                if generic and via is None and EXT_LANG.get(ext) in ("c", "cpp", "r"):
+                    # M9 (1c-ii/2a): llamada libre C/C++/R. Candidatos = símbolos con el
+                    # mismo nombre corto en archivos cuyo stem coincide con un #include
+                    # (C/C++) o source() (R) directo. Enlaza SOLO si es único -> sin falsos.
                     cands = self._c_call_candidates(file_id_, callee_name, short_all, caller)
+                    if len(cands) == 1:
+                        self.store.upsert_edge(Edge(caller, cands[0], EDGE_CALLS, 0.8, "xfile"))
+                        count += 1
+                    continue
+                if generic and via and EXT_LANG.get(ext) in ("csharp", "vb"):
+                    # M9 (2b/2c): 'Receptor.metodo' -> símbolo "Receptor.metodo" en archivos
+                    # de los namespaces visibles del llamante. Único -> enlaza (sin falsos).
+                    qual = f"{via}.{callee_name}"
+                    files = {f for ns in self.file_ns_scope.get(file_id_, ())
+                             for f in self.ns_index.get((project, ns), ())}
+                    cands = list(dict.fromkeys(
+                        name_index[(f, qual)] for f in files
+                        if (f, qual) in name_index and name_index[(f, qual)] != caller))
                     if len(cands) == 1:
                         self.store.upsert_edge(Edge(caller, cands[0], EDGE_CALLS, 0.8, "xfile"))
                         count += 1
@@ -379,6 +415,13 @@ class Indexer:
             # Go: paquete = directorio. Índice dir->archivos para resolver imports.
             pkgdir = os.path.dirname(relpath)
             self.go_pkg_index.setdefault((project, pkgdir), []).append(rel_id)
+        if ext in (".cs", ".vb"):
+            # C#/VB: namespace = espacio lógico (varios archivos). Índice ns->archivos
+            # y el scope visible del archivo (declarados + using/Imports) para M9 2b/2c.
+            declared, used = _cs_vb_namespaces(source, ext)
+            for ns in declared:
+                self.ns_index.setdefault((project, ns), []).append(rel_id)
+            self.file_ns_scope[rel_id] = declared | used
         no_ext = relpath.rsplit(".", 1)[0]
         self.path_index[(project, no_ext)] = rel_id
         # index/ resoluciones tipo carpeta
@@ -529,7 +572,8 @@ class Indexer:
                 if hit:
                     return hit
             return None
-        if g in ("c", "cpp"):
+        if g in ("c", "cpp", "r"):
+            # C/C++: #include relativo; R: source("path") relativo (ambos por ruta)
             norm = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
             return self.path_index.get((project, os.path.splitext(norm)[0]))
         if g == "rust":

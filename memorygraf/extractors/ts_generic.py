@@ -46,6 +46,7 @@ _IMPORT_NODES = {
     "rust": {"mod_item"},
     "go": {"import_spec"},                 # `import "mod/pkg"` -> "mod/pkg"
     "php": {"namespace_use_declaration"},  # `use App\Foo\Bar;` -> "App\Foo\Bar"
+    "r": {"call"},                          # `source("x.R")` -> "x.R" (resto de calls: None)
 }
 
 # extensión -> gramática de tree-sitter
@@ -194,6 +195,14 @@ def _call_parts(n, grammar, text):
             recv = text(path) if (path is not None and path.type == "identifier") else None
             return recv, (text(nm) if nm is not None else None)
         return None, (_short_ident(text(fn)) if fn is not None else None)
+    if grammar in ("csharp", "vb"):
+        # Receptor.metodo(...) -> (Receptor=clase, metodo). El indexer lo resuelve por
+        # namespace (M9 2b/2c). Toma los 2 últimos segmentos del callee: A.B.Clase.m.
+        head = text(n).split("(", 1)[0]
+        segs = [s for s in (re.sub(r"\W", "", p) for p in head.split(".")) if s]
+        if len(segs) >= 2:
+            return segs[-2], segs[-1]        # receptor (clase), método
+        return None, (segs[-1] if segs else None)
     # genérico: field configurado o primer ident, sin receptor
     _types, field = _CALLS.get(grammar, (set(), None))
     node = n.child_by_field_name(field) if field else None
@@ -211,7 +220,8 @@ def _extract_imports(root, grammar, text) -> list:
             raw = _import_raw(n, grammar, text)
             if raw:
                 out.append(raw)
-            return
+                return               # import real -> no recorrer dentro
+            # nodo del tipo pero NO es import (p.ej. call de R que no es source): seguir
         for c in n.children:
             walk(c)
 
@@ -241,6 +251,12 @@ def _import_raw(n, grammar, text):
         clause = _first_child(n, "namespace_use_clause") or n
         qn = _first_child(clause, "qualified_name") or _first_child(clause, "name")
         return text(qn) if qn is not None else None
+    if grammar == "r":
+        fn = n.child_by_field_name("function")   # solo source("path") es un import
+        if fn is None or text(fn) != "source":
+            return None
+        m = re.findall(r'''["']([^"']+)["']''', text(n))
+        return m[0] if m else None
     return None
 
 
@@ -342,14 +358,16 @@ def _find_calls(root, grammar, text, spans, by_short, edges, bindings, calls_out
             if caller and method:
                 if recv and recv in bindings:
                     calls_out.append((caller, method, recv))          # cross-file (receptor)
+                elif recv and grammar in ("csharp", "vb"):
+                    calls_out.append((caller, method, recv))          # resuelto por namespace
                 else:
                     callee = by_short.get(method)                     # intra-archivo
                     if callee and callee != caller and (caller, callee) not in seen:
                         seen.add((caller, callee))
                         edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))
-                    elif callee is None and not recv and grammar in ("c", "cpp"):
-                        # C/C++: llamada libre no local -> el indexer la resuelve por
-                        # includes + nombre único (M9 1c-ii). via=None la marca de bare.
+                    elif callee is None and not recv and grammar in ("c", "cpp", "r"):
+                        # C/C++/R: llamada libre no local -> el indexer la resuelve por
+                        # includes/source + nombre único (M9 1c-ii/2a). via=None: bare.
                         calls_out.append((caller, method, None))
         for c in n.children:
             walk(c)

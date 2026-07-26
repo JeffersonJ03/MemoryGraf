@@ -317,6 +317,11 @@ class TestCrossFileImportsM9(Base):
         self.assertIn(("php/src/App.php", "php/src/Util/Validator.php"),
                       self._imports_for("php"))
 
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_r_source_import(self):
+        # source("util/helper.R") -> util/helper.R (por ruta, como #include)
+        self.assertIn(("r/main.R", "r/util/helper.R"), self._imports_for("r"))
+
 
 class TestCrossFileCallsM9(Base):
     """M9 (1c): calls símbolo->símbolo cross-file para los genéricos con receptor
@@ -377,6 +382,38 @@ class TestCrossFileCallsM9(Base):
     def test_cpp_free_function_call(self):
         self.assertIn(("cpp/main.cpp::main", "cpp/math/calc.cpp::add"),
                       self._xcalls_for("cpp"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_r_sourced_function_call(self):
+        # main.R hace source("util/helper.R") y llama helper_func() -> resuelve al fichero
+        self.assertIn(("r/main.R::run", "r/util/helper.R::helper_func"),
+                      self._xcalls_for("r"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_csharp_namespace_method_call(self):
+        # using App.Util + Validator.IsValid() -> resuelto por namespace (M9 2b)
+        self.assertIn(("csharp/App.cs::Service.Run",
+                       "csharp/Util/Validator.cs::Validator.IsValid"),
+                      self._xcalls_for("csharp"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_vb_namespace_method_call(self):
+        # Imports App.Util + Validator.IsValid() -> resuelto por namespace (M9 2c)
+        self.assertIn(("vb/App.vb::Service.Run",
+                       "vb/Util/Validator.vb::Validator.IsValid"),
+                      self._xcalls_for("vb"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_precision_csharp_no_edge_when_namespace_not_used(self):
+        # Widget está en App.Other, que App.cs NO usa -> no se enlaza (precisión).
+        self.write("App.cs",
+                   "using App.Used;\nnamespace App { class S { void R(){ Widget.Make(); } } }\n")
+        self.write("a.cs", "namespace App.Used { class Nothing {} }\n")
+        self.write("b.cs", "namespace App.Other { class Widget { public static void Make(){} } }\n")
+        store, _ = self.index()
+        xcalls = {(e["source"], e["target"]) for e in store.all_edges()
+                  if e["type"] == "calls" and e["provenance"] == "xfile"}
+        self.assertEqual(xcalls, set())
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_precision_c_no_edge_when_file_not_included(self):
