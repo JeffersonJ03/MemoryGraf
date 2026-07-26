@@ -89,6 +89,8 @@ cat <<EOF
 Siguiente, en cualquier proyecto:
   cd /ruta/a/tu/proyecto
   memorygraf init
+  memorygraf configure           # asistente: activa capacidades opcionales por potencia
+                                 # (LLM local, historia completa, tipos LSP, …) y valida deps
   memorygraf sync
   memorygraf install claude      # o:  memorygraf mcp-config  (para cualquier cliente MCP)
 

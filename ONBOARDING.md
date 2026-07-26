@@ -33,6 +33,7 @@ Esto deja disponible el comando **`memorygraf`** (vía pipx global, o en `./.ven
 ```bash
 cd /ruta/a/tu/proyecto
 memorygraf init          # crea .memorygraf/ (config + BD del grafo)
+memorygraf configure     # (opcional) asistente: activa capacidades por potencia y valida deps
 memorygraf sync          # construye el grafo (incremental; repite cuando cambie el código)
 ```
 
@@ -116,6 +117,7 @@ memorygraf decisions "base de datos"
 ```
 instalar     ./install.sh
 por proyecto memorygraf init && memorygraf sync
+capacidades  memorygraf configure   (opcional: LLM local, historia completa, tipos LSP…)
 conectar     memorygraf install claude   |   memorygraf mcp-config
 al día       memorygraf watch
 ver grafo    memorygraf graph
