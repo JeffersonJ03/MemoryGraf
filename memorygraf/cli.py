@@ -65,9 +65,13 @@ RESÚMENES: RÁPIDO vs PROSA
     memorygraf sync                                          # rápido (heurístico por defecto)
     MEMORYGRAF_SUMMARY_BACKEND=ollama memorygraf summarize --all   # prosa; lento pero con progreso
 
+ACTIVAR CAPACIDADES OPCIONALES  (LLM local, historia completa, tipos LSP, …)
+  memorygraf configure            # asistente: paquetes por potencia o modo avanzado,
+                                  # valida dependencias y orienta a doctor/setup-ollama
+  memorygraf doctor               # qué dependencias opcionales tienes activas y cómo instalarlas
+
 AYUDA DE CADA COMANDO
   memorygraf <comando> -h         # ej.: 'memorygraf init -h', 'memorygraf search -h'
-  memorygraf doctor               # qué capacidades opcionales tienes activas y cómo activarlas
 
 Más detalle: README.md · ONBOARDING.md · DESIGN.md
 """
@@ -165,6 +169,16 @@ def main(argv=None):
                    help="No interactivo: motor a configurar")
     p.add_argument("--model", help="Modelo (nombre Ollama, ruta .gguf, o modelo de la API)")
     p.add_argument("--url", help="URL del endpoint API (motor api) o de Ollama")
+    p = sub.add_parser(
+        "configure", help="Asistente interactivo: activa las opciones opcionales del grafo",
+        description="Activa/ajusta las capacidades opcionales de .memorygraf/config.json "
+                    "(LLM local, historia completa M1, tipos LSP en sync, vars locales M4b, "
+                    "desempate LLM M9) con paquetes por potencia o modo avanzado, validando "
+                    "las dependencias.",
+        epilog="Escoge un paquete recomendado (portable/estándar/potencia) o activa cada "
+               "opción a mano. Tras activar, valida dependencias y orienta a 'doctor'/"
+               "'setup-ollama' si falta algo. Aplica los cambios con 'memorygraf sync'.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p = sub.add_parser("doctor",
                        help="Reporta capacidades y (interactivo) instala las que falten")
     p.add_argument("--json", action="store_true", help="Salida legible por máquina (solo reporte)")
@@ -299,6 +313,13 @@ def main(argv=None):
         rc = llm_setup.run(
             config_path=workspace.resolve_config_path(getattr(args, "config", None)),
             engine=args.engine, model=args.model, url=args.url,
+            log=lambda m: print(m, file=sys.stderr))
+        sys.exit(rc)
+
+    if args.cmd == "configure":
+        from . import configure
+        rc = configure.run(
+            config_path=workspace.resolve_config_path(getattr(args, "config", None)),
             log=lambda m: print(m, file=sys.stderr))
         sys.exit(rc)
 

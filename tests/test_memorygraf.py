@@ -496,6 +496,73 @@ class TestXlinkLlmOptional(Base):
         self.assertIn("::dup", tgt)
 
 
+class TestConfigureWizard(Base):
+    """Asistente interactivo `memorygraf configure`: presets + avanzado + validación deps."""
+
+    def _cfg_file(self, initial):
+        import json
+        p = os.path.join(self.tmp, "config.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(initial, f)
+        return p
+
+    def _run(self, cfg_path, answers):
+        import json
+        from memorygraf import configure
+        it = iter(answers)
+        out = []
+        rc = configure.run(cfg_path, log=lambda m: out.append(str(m)),
+                           ask=lambda p: next(it, ""))
+        with open(cfg_path, encoding="utf-8") as f:
+            return rc, "\n".join(out), json.load(f)
+
+    def test_preset_potencia_activates_all(self):
+        p = self._cfg_file({"graph_name": "t", "projects": [{"name": "t", "root": "."}]})
+        rc, _out, cfg = self._run(p, ["1", "3"])   # paquetes -> potencia
+        self.assertEqual(rc, 0)
+        self.assertEqual(cfg["summary"]["backend"], "ollama")
+        self.assertEqual(cfg["compiler"]["backend"], "ollama")
+        self.assertTrue(cfg["resolver"]["llm"])
+        self.assertTrue(cfg["git"]["symbol_cochange_full"])
+        self.assertTrue(cfg["runtime"]["lsp"])
+        self.assertTrue(cfg["runtime"]["local_var_types"])
+
+    def test_preset_portable_turns_everything_off(self):
+        p = self._cfg_file({"graph_name": "t", "projects": [{"name": "t", "root": "."}],
+                            "resolver": {"llm": True}, "git": {"symbol_cochange_full": True}})
+        rc, _out, cfg = self._run(p, ["1", "1"])   # paquetes -> portable
+        self.assertEqual(cfg["summary"]["backend"], "heuristic")
+        self.assertFalse(cfg["resolver"]["llm"])          # apagó lo que estaba activo
+        self.assertFalse(cfg["git"]["symbol_cochange_full"])
+
+    def test_advanced_toggles_single_option(self):
+        p = self._cfg_file({"graph_name": "t", "projects": [{"name": "t", "root": "."}]})
+        # 2=avanzado; 6 respuestas (orden: summary, compiler, resolver, cochange, lsp, locals)
+        rc, _out, cfg = self._run(p, ["2", "", "", "", "s", "", ""])
+        self.assertTrue(cfg["git"]["symbol_cochange_full"])       # solo esta activada
+        self.assertNotEqual((cfg.get("summary") or {}).get("backend"), "ollama")
+
+    def test_missing_dependency_shows_hint(self):
+        from memorygraf import configure
+        p = self._cfg_file({"graph_name": "t", "projects": [{"name": "t", "root": "."}]})
+        orig = configure._dep_ok
+        configure._dep_ok = lambda d: False        # simula dependencias ausentes
+        try:
+            rc, out, _cfg = self._run(p, ["1", "3"])
+        finally:
+            configure._dep_ok = orig
+        self.assertIn("FALTA", out)
+        self.assertIn("setup-ollama", out)         # orienta a instalar la dependencia
+
+    def test_requires_init(self):
+        from memorygraf import configure
+        out = []
+        rc = configure.run(os.path.join(self.tmp, "noexiste.json"),
+                          log=lambda m: out.append(str(m)), ask=lambda p: "")
+        self.assertEqual(rc, 1)
+        self.assertIn("memorygraf init", "\n".join(out))
+
+
 class TestUninitializedWorkspace(Base):
     """Un comando con BD en un proyecto sin init debe dar un mensaje claro (haz init),
     no el críptico 'sqlite3.OperationalError: unable to open database file'."""

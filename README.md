@@ -37,6 +37,7 @@ Deja disponible el comando **`memorygraf`** (vía `pipx` si está, o un venv loc
 ```bash
 cd /ruta/a/tu/proyecto
 memorygraf init            # crea .memorygraf/ (config + grafo)
+memorygraf configure       # (opcional) asistente: activa capacidades por potencia y valida deps
 memorygraf sync            # construye el grafo (incremental)
 memorygraf install claude  # registra el MCP en Claude Code (1 comando)
 #   … o para cualquier otro cliente MCP:
@@ -108,11 +109,12 @@ dependencia, y todas dejan **procedencia** (`archivo:línea`) y respetan un pres
 
 1. **Grafo base.** Nodos `file`/`symbol`/`entity`/`decision`/`convention` y aristas
    `defines`/`imports`/`calls` (intra y cross-archivo)/`implements`/`references`/`models`.
-   **Multi-lenguaje** vía tree-sitter: **Python** (`ast`) y **JS/TS/TSX** con extracción
-   completa (símbolos + `calls`/`imports` cross-archivo); **C, C++, Java, C#, Go, Rust, PHP,
-   R, Visual Basic y Assembly** con símbolos + `defines` + `calls` **intra-archivo** (los
-   `calls`/`imports` cross-file de estos son roadmap). Incremental por hash, con reconciliación
-   de símbolos movidos y enlace cross-project por endpoints HTTP.
+   **Multi-lenguaje** vía tree-sitter: **Python** (`ast`), **JS/TS/TSX** y ahora también
+   **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic y Assembly** con símbolos + `defines` +
+   `calls` intra-archivo **y `calls`/`imports` cross-file** (M9, determinista y precisión-primero:
+   paquete/ruta/`#include`/`source`/`mod`/`go.mod`/PSR-4/namespaces según el lenguaje; capa LLM
+   opcional para desempatar ambiguos). Incremental por hash, con reconciliación de símbolos
+   movidos y enlace cross-project por endpoints HTTP.
 2. **Conocimiento de dominio.** Decisiones y convenciones desde markdown (`governs`);
    entidades desde un glosario del proyecto (`models`); resúmenes (heurístico/Ollama/API) y
    embeddings (TF-IDF/model2vec/API) para búsqueda híbrida (RRF).
@@ -144,8 +146,15 @@ que el blame pierde; si un símbolo está muy tocado pero sin co-cambios, `impac
   `decisions` · `stats` · `working-set` · `impact [--deep]` · `history` · `graph [--level symbol]`.
 - **Mantenimiento:** `init` · `sync` · `index` · `summarize` · `embed` · `runtime [--lsp]` ·
   `compile [--llm]` · `digest [--llm]` · `analyze` · `report` · `watch` · `export`.
-- **Setup:** `install claude` / `mcp-config` · `doctor` (dependencias opcionales) ·
-  `setup-ollama` (instala Ollama) · **`setup-llm`** (elige motor+modelo de LLM, interactivo).
+- **Setup:** `install claude` / `mcp-config` · **`configure`** (asistente de capacidades
+  opcionales) · `doctor` (dependencias opcionales) · `setup-ollama` (instala Ollama) ·
+  **`setup-llm`** (elige motor+modelo de LLM, interactivo).
+
+**`memorygraf configure`** es un asistente interactivo que activa las capacidades opcionales
+del grafo (LLM local para resúmenes/compilador/desempate M9, co-cambio por **historia completa**
+M1, **tipos LSP en el `sync`** y variables locales M4b) mediante **paquetes por potencia**
+(portable / estándar / potencia) o **modo avanzado** opción por opción, **validando las
+dependencias** y orientando a `doctor`/`setup-ollama` si falta alguna. Escribe la config sola.
 
 `memorygraf setup-llm` configura el LLM de resúmenes y compilador de forma interactiva y
 escribe la config sola. Motores: **heuristic** (offline), **ollama** (local — elige/descarga
