@@ -11,6 +11,7 @@ fidelidad siguen siendo de Python y JS/TS. Degradación: sin tree-sitter, el arc
 """
 from __future__ import annotations
 
+import re
 from typing import Tuple
 
 from ..model import (
@@ -43,6 +44,8 @@ _IMPORT_NODES = {
     "java": {"import_declaration"},
     "c": {"preproc_include"}, "cpp": {"preproc_include"},
     "rust": {"mod_item"},
+    "go": {"import_spec"},                 # `import "mod/pkg"` -> "mod/pkg"
+    "php": {"namespace_use_declaration"},  # `use App\Foo\Bar;` -> "App\Foo\Bar"
 }
 
 # extensión -> gramática de tree-sitter
@@ -175,6 +178,13 @@ def _import_raw(n, grammar, text):
             return None                            # `mod x { ... }` inline -> no es archivo
         ident = _first_child(n, "identifier")
         return text(ident) if ident is not None else None
+    if grammar == "go":
+        m = re.findall(r'"([^"]+)"', text(n))      # el path va entre comillas
+        return m[0] if m else None
+    if grammar == "php":
+        clause = _first_child(n, "namespace_use_clause") or n
+        qn = _first_child(clause, "qualified_name") or _first_child(clause, "name")
+        return text(qn) if qn is not None else None
     return None
 
 

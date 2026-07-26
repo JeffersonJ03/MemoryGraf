@@ -309,6 +309,17 @@ class TestCrossFileImportsM9(Base):
         # mod helper; -> helper.rs
         self.assertIn(("rust/main.rs", "rust/helper.rs"), self._imports_for("rust"))
 
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_go_module_package_import(self):
+        # import "myapp/util" (go.mod: module myapp) -> paquete util/
+        self.assertIn(("go/main.go", "go/util/helper.go"), self._imports_for("go"))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_php_psr4_use(self):
+        # use App\Util\Validator; (composer psr-4 App\ -> src/) -> src/Util/Validator.php
+        self.assertIn(("php/src/App.php", "php/src/Util/Validator.php"),
+                      self._imports_for("php"))
+
 
 class TestSearch(Base):
     def test_hybrid_search_finds_by_tokens(self):

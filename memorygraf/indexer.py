@@ -121,6 +121,44 @@ def _load_ts_aliases(root: str):
     return []
 
 
+def _load_go_module(root: str):
+    """Nombre de módulo de go.mod (`module miapp/x`). Prefijo de los import paths
+    internos: `import "miapp/x/util"` -> paquete interno `util`."""
+    p = os.path.join(root, "go.mod")
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("module "):
+                    return line[len("module "):].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _load_php_psr4(root: str):
+    r"""Mapeo PSR-4 de composer.json: [(prefijo_namespace, dir_base),...].
+
+    autoload.psr-4 {"App\\": "src/"} -> `use App\Foo\Bar` vive en src/Foo/Bar.php."""
+    p = os.path.join(root, "composer.json")
+    if not os.path.isfile(p):
+        return []
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            data = _loads_jsonc(f.read())
+    except OSError:
+        return []
+    out = []
+    for key in ("autoload", "autoload-dev"):
+        psr4 = ((data or {}).get(key) or {}).get("psr-4") or {}
+        for prefix, base in psr4.items():
+            base = (base[0] if isinstance(base, list) and base else base) or ""
+            out.append((prefix, str(base).strip("/")))
+    return out
+
+
 def _py_module_key(project: str, relpath: str) -> str:
     """miapp/paquete/modulo.py -> paquete.modulo  (clave de import interno)."""
     p = relpath
@@ -142,10 +180,21 @@ class Indexer:
         self.path_index = {}       # (project, normalized_relpath_no_ext) -> file_id
         # alias de tsconfig/jsconfig (compilerOptions.paths) por proyecto
         self.js_aliases = {}       # project -> [(prefijo, con_estrella, [dest,...])]
+        # M9: config por-proyecto para resolver imports de Go y PHP
+        self.go_module = {}        # project -> nombre de módulo (go.mod)
+        self.go_pkg_index = {}     # (project, dir_paquete) -> [file_id,...]
+        self.php_psr4 = {}         # project -> [(prefijo_namespace, dir_base),...]
         for proj in config["projects"]:
-            al = _load_ts_aliases(proj["root"])
+            name, root = proj["name"], proj["root"]
+            al = _load_ts_aliases(root)
             if al:
-                self.js_aliases[proj["name"]] = al
+                self.js_aliases[name] = al
+            mod = _load_go_module(root)
+            if mod:
+                self.go_module[name] = mod
+            psr4 = _load_php_psr4(root)
+            if psr4:
+                self.php_psr4[name] = psr4
         # tree-sitter para JS/TS si está instalado; si no, regex (degradación elegante)
         self.use_treesitter = ts_treesitter.available()
 
@@ -276,6 +325,10 @@ class Indexer:
         ext = os.path.splitext(relpath)[1].lower()
         if ext == ".py":
             self.py_module_index[(project, _py_module_key(project, relpath))] = rel_id
+        if ext == ".go":
+            # Go: paquete = directorio. Índice dir->archivos para resolver imports.
+            pkgdir = os.path.dirname(relpath)
+            self.go_pkg_index.setdefault((project, pkgdir), []).append(rel_id)
         no_ext = relpath.rsplit(".", 1)[0]
         self.path_index[(project, no_ext)] = rel_id
         # index/ resoluciones tipo carpeta
@@ -410,13 +463,14 @@ class Indexer:
         return self.path_index.get((project, self._strip_js_ext(norm)))
 
     def _resolve_generic(self, project, ext, base_dir, raw):
-        """Resuelve un import de los lenguajes genéricos a un archivo interno (M9).
+        r"""Resuelve un import de los lenguajes genéricos a un archivo interno (M9).
 
         Determinista (sin LLM). Cada lenguaje mapea distinto:
           java: paquete `a.b.C` -> ruta `a/b/C` (progresivo para static/inner).
           c/cpp: `#include "x.h"` -> ruta relativa al archivo.
           rust: `mod x;` -> archivo hermano `x.rs` o `x/mod.rs`.
-        Go/PHP: siguiente incremento (necesitan go.mod / composer.json)."""
+          go:   import path -> (quita prefijo de go.mod) -> dir de paquete -> 1 archivo.
+          php:  `use App\Foo\Bar` -> PSR-4 (composer.json) -> src/Foo/Bar.php."""
         g = EXT_LANG.get(ext)
         if g == "java":
             parts = raw.replace(".", "/").split("/")
@@ -434,5 +488,23 @@ class Indexer:
                 hit = self.path_index.get((project, cand))
                 if hit:
                     return hit
+            return None
+        if g == "go":
+            pkg = raw
+            mod = self.go_module.get(project)
+            if mod and (raw == mod or raw.startswith(mod + "/")):
+                pkg = raw[len(mod):].lstrip("/")     # quita el prefijo del módulo
+            files = self.go_pkg_index.get((project, pkg))
+            return sorted(files)[0] if files else None   # 1 archivo representativo del paquete
+        if g == "php":
+            ns = raw.strip("\\")
+            for prefix, base in self.php_psr4.get(project, []):
+                pre = prefix.strip("\\")
+                if ns == pre or ns.startswith(pre + "\\"):
+                    rest = ns[len(pre):].strip("\\").replace("\\", "/")
+                    cand = "/".join(p for p in (base, rest) if p)
+                    hit = self.path_index.get((project, cand))
+                    if hit:
+                        return hit
             return None
         return None
