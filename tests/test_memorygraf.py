@@ -265,14 +265,11 @@ class TestMicroservicesMultiLang(Base):
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_intra_file_calls_across_languages(self):
-        # Todos menos asm producen >=1 call intra-archivo. La instrucción 'call' de
-        # asm no la cubre la query de llamadas: se documenta, no se exige.
+        # Los 12 lenguajes (incl. asm tras M9 1d) producen >=1 call intra-archivo.
         svcs, config = _microservices_config()
         store = Store(self.db)
         Indexer(store, config).index_all()
         for s in svcs:
-            if s == "bootstrap":
-                continue
             calls = [e for e in store.all_edges()
                      if e["type"] == "calls" and e["source"].startswith(f"{s}/")]
             self.assertTrue(calls, f"servicio '{s}': 0 calls intra-archivo")
@@ -369,6 +366,17 @@ class TestCrossFileCallsM9(Base):
         xcalls = {(e["source"], e["target"]) for e in store.all_edges()
                   if e["type"] == "calls" and e["provenance"] == "xfile"}
         self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_asm_intra_file_call_and_precision(self):
+        # M9 1d: 'call'/'jmp' -> arista a la etiqueta; 'mov'/'add' NO (whitelist mnemónicos).
+        self.write("boot.s",
+                   "foo:\n    ret\nbar:\n    mov eax, foo\n    add ebx, foo\n"
+                   "    call foo\n    jmp foo\n")
+        store, _ = self.index()
+        calls = {(e["source"], e["target"]) for e in store.all_edges()
+                 if e["type"] == "calls"}
+        self.assertEqual(calls, {("proj/boot.s::bar", "proj/boot.s::foo")})
 
 
 class TestSearch(Base):

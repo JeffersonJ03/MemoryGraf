@@ -144,6 +144,8 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     calls_out: list = []
     if grammar in _CALLS and (by_short or bindings):
         _find_calls(root, grammar, text, spans, by_short, edges, bindings, calls_out)
+    elif grammar == "asm" and by_short:
+        _find_calls_asm(root, text, spans, by_short, edges)
     return nodes, edges, raw_imports, calls_out, bindings
 
 
@@ -424,4 +426,51 @@ def _extract_asm(root, text, rel_path, project, fid, add):
                 if nm:
                     add(nm, "label", ch, fid)
             walk(ch)
+    walk(root)
+
+
+# Mnemónicos que transfieren control a una etiqueta (call/salto). Solo estos generan
+# arista `calls`; el resto de instrucciones (mov, add, ...) también tienen operandos
+# identificador pero NO son llamadas -> whitelist para no meter aristas falsas (M9 1d).
+_ASM_CALL_MNEMONICS = {
+    "call", "callq", "callw", "lcall",
+    "jmp", "jmpq", "je", "jne", "jz", "jnz", "jg", "jge", "jl", "jle",
+    "ja", "jae", "jb", "jbe", "jc", "jnc", "jo", "jno", "js", "jns", "jp", "jnp", "loop",
+    "bl", "blx", "blr", "jal", "jalr", "br", "bsr", "b",   # ARM/RISC-V/otros
+}
+
+
+def _find_calls_asm(root, text, spans, by_short, edges):
+    """`calls` intra-archivo en asm: instrucción call/salto -> etiqueta destino.
+
+    El llamante es la etiqueta que 'posee' la instrucción = la última etiqueta antes de
+    ella (el AST de asm es plano: labels e instructions son hermanos, no anidados)."""
+    labels = sorted(((a, sid) for (a, b, sid) in spans), key=lambda x: x[0])
+
+    def caller_at(byte):
+        cur = None
+        for a, sid in labels:
+            if a <= byte:
+                cur = sid
+            else:
+                break
+        return cur
+
+    seen = set()
+
+    def walk(n):
+        if n.type == "instruction":
+            words = [c for c in n.children if c.type == "word"]
+            mnem = text(words[0]).lower() if words else ""
+            if mnem in _ASM_CALL_MNEMONICS:
+                idents = [c for c in n.children if c.type in ("ident", "identifier")]
+                target = text(idents[0]) if idents else _first_ident(n, text)
+                callee = by_short.get(target) if target else None
+                caller = caller_at(n.start_byte)
+                if caller and callee and callee != caller and (caller, callee) not in seen:
+                    seen.add((caller, callee))
+                    edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))
+        for c in n.children:
+            walk(c)
+
     walk(root)
