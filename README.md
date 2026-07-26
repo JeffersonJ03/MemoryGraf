@@ -147,7 +147,8 @@ que el blame pierde; si un símbolo está muy tocado pero sin co-cambios, `impac
 - **Mantenimiento:** `init` · `sync` · `index` · `summarize` · `embed` · `runtime [--lsp]` ·
   `compile [--llm]` · `digest [--llm]` · `analyze` · `report` · `watch` · `export`.
 - **Setup:** `install claude` / `mcp-config` · **`configure`** (asistente de capacidades
-  opcionales) · `doctor` (dependencias opcionales) · `setup-ollama` (instala Ollama) ·
+  opcionales) · **`bootstrap-entities`** (propone entidades de dominio desde el código para
+  curar) · `doctor` (dependencias opcionales) · `setup-ollama` (instala Ollama) ·
   **`setup-llm`** (elige motor+modelo de LLM, interactivo).
 
 **`memorygraf configure`** es un asistente interactivo que activa las capacidades opcionales

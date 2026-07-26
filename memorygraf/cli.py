@@ -68,6 +68,7 @@ RESÚMENES: RÁPIDO vs PROSA
 ACTIVAR CAPACIDADES OPCIONALES  (LLM local, historia completa, tipos LSP, …)
   memorygraf configure            # asistente: paquetes por potencia o modo avanzado,
                                   # valida dependencias y orienta a doctor/setup-ollama
+  memorygraf bootstrap-entities   # propone entidades de dominio desde el código para curar
   memorygraf doctor               # qué dependencias opcionales tienes activas y cómo instalarlas
 
 AYUDA DE CADA COMANDO
@@ -178,6 +179,16 @@ def main(argv=None):
         epilog="Escoge un paquete recomendado (portable/estándar/potencia) o activa cada "
                "opción a mano. Tras activar, valida dependencias y orienta a 'doctor'/"
                "'setup-ollama' si falta algo. Aplica los cambios con 'memorygraf sync'.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub.add_parser(
+        "bootstrap-entities",
+        help="Asistente: propone entidades de dominio desde el código para curar (M10)",
+        description="Propone ENTIDADES DE DOMINIO candidatas a partir del grafo (clases/tipos), "
+                    "para que las cures y escribir memorygraf.entities.json. Heurístico "
+                    "determinista + LLM local (Ollama) opcional como refuerzo.",
+        epilog="Requiere un grafo ya construido ('memorygraf sync'). Aceptas/editas/omites "
+               "cada candidata; el humano es la fuente de verdad (el LLM solo sugiere). Tras "
+               "escribir el glosario, 'memorygraf sync' crea los nodos 'entity' + aristas 'models'.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p = sub.add_parser("doctor",
                        help="Reporta capacidades y (interactivo) instala las que falten")
@@ -397,6 +408,13 @@ def main(argv=None):
             from . import analyze as _analyze
             print(json.dumps(_analyze.analyze(store, limit=args.limit),
                              ensure_ascii=False, indent=2))
+        elif args.cmd == "bootstrap-entities":
+            from . import entities_bootstrap
+            rc = entities_bootstrap.run(
+                store, _load_cfg(args), _cfg_path(args),
+                log=lambda m: print(m, file=sys.stderr))
+            store.close()
+            sys.exit(rc)
         elif args.cmd == "report":
             from . import report
             md = report.build_markdown(store, _load_cfg(args))
