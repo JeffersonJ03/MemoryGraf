@@ -439,6 +439,32 @@ class TestCrossFileCallsM9(Base):
         self.assertEqual(calls, {("proj/boot.s::bar", "proj/boot.s::foo")})
 
 
+class TestUninitializedWorkspace(Base):
+    """Un comando con BD en un proyecto sin init debe dar un mensaje claro (haz init),
+    no el críptico 'sqlite3.OperationalError: unable to open database file'."""
+
+    def _run(self, *cli_args):
+        import sys as _sys
+        env = dict(os.environ)
+        env.pop("MEMORYGRAF_DB", None)
+        env.pop("MEMORYGRAF_HOME", None)
+        return subprocess.run([_sys.executable, "-m", "memorygraf.cli", *cli_args],
+                              cwd=self.tmp, capture_output=True, text=True, env=env)
+
+    def test_query_without_init_is_friendly(self):
+        r = self._run("overview")
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("memorygraf init", out)
+        self.assertNotIn("OperationalError", out)
+
+    def test_graph_without_init_is_friendly(self):
+        r = self._run("graph")
+        out = r.stdout + r.stderr
+        self.assertIn("memorygraf init", out)
+        self.assertNotIn("Traceback", out)
+
+
 class TestSearch(Base):
     def test_hybrid_search_finds_by_tokens(self):
         self.write("orders.py",
