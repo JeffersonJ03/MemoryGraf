@@ -2,6 +2,7 @@
 
 Ejecutar:  python3 -m unittest discover -s tests   (desde la raíz del repo)
 """
+import json
 import os
 import shutil
 import subprocess
@@ -587,6 +588,82 @@ class TestUninitializedWorkspace(Base):
         out = r.stdout + r.stderr
         self.assertIn("memorygraf init", out)
         self.assertNotIn("Traceback", out)
+
+
+class TestEntitiesBootstrap(Base):
+    """M10 · `bootstrap-entities`: propone entidades de dominio desde el grafo (heurístico
+    + LLM opcional), el usuario cura, y se escribe el glosario."""
+
+    def _graph_and_cfg(self):
+        self.write("shop.py",
+                   "class OrderRepository:\n    def get(self): return 1\n"
+                   "class OrderValidator:\n    def check(self): return 1\n"
+                   "class PaymentGateway:\n    def charge(self): return 1\n"
+                   "class PaymentService:\n    def refund(self): return 1\n"
+                   "class ProductCatalog:\n    def find(self): return 1\n")
+        store, _ = self.index()
+        cfgdir = os.path.join(self.proj, ".memorygraf")
+        os.makedirs(cfgdir, exist_ok=True)
+        cfgp = os.path.join(cfgdir, "config.json")
+        # compiler heuristic -> no arranca Ollama en el test (determinista/offline)
+        cfg = {"projects": [{"name": "proj", "root": self.proj}],
+               "compiler": {"backend": "heuristic"}}
+        with open(cfgp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+        return store, cfg, cfgp
+
+    def test_heuristic_candidates_by_domain_noun(self):
+        from memorygraf import entities_bootstrap as eb
+        store, _cfg, _p = self._graph_and_cfg()
+        names = {c[0] for c in eb._heuristic_candidates(store)}
+        self.assertIn("Order", names)          # 2 clases comparten el sustantivo -> candidato
+        self.assertIn("Payment", names)
+        self.assertNotIn("Product", names)     # 1 sola clase -> no candidato
+        store.close()
+
+    def test_run_writes_curated_glossary(self):
+        from memorygraf import entities_bootstrap as eb
+        store, cfg, cfgp = self._graph_and_cfg()
+        ans = iter([""])                        # acepta la 1ª; el resto -> "n" por defecto
+        eb.run(store, cfg, cfgp, log=lambda m: None, ask=lambda p: next(ans, "n"))
+        gloss = os.path.join(self.proj, "memorygraf.entities.json")
+        self.assertTrue(os.path.exists(gloss))
+        with open(gloss, encoding="utf-8") as f:
+            data = json.load(f)["entities"]
+        self.assertGreaterEqual(len(data), 1)
+        # cada entidad tiene aliases (contrato del glosario)
+        self.assertTrue(all(v.get("aliases") for v in data.values()))
+        store.close()
+
+    def test_llm_candidates_used_when_available(self):
+        from memorygraf import entities_bootstrap as eb, context_compiler
+        import contextlib
+        store, cfg, _p = self._graph_and_cfg()
+
+        class _FakeLLM:
+            name = "ollama:test"
+            def generate(self, prompt, **kw):
+                return '{"Cliente": {"description": "un cliente", "aliases": ["user", "cliente"]}}'
+
+        @contextlib.contextmanager
+        def _fake(config, log=lambda m: None):
+            yield _FakeLLM()
+
+        orig = context_compiler.local_llm
+        context_compiler.local_llm = _fake
+        try:
+            cands = eb.propose_candidates(store, cfg, log=lambda m: None)
+        finally:
+            context_compiler.local_llm = orig
+        self.assertIn("Cliente", {c[0] for c in cands})   # usó la propuesta del LLM
+        store.close()
+
+    def test_requires_config(self):
+        from memorygraf import entities_bootstrap as eb
+        store, cfg, _p = self._graph_and_cfg()
+        rc = eb.run(store, cfg, None, log=lambda m: None, ask=lambda p: "")
+        self.assertEqual(rc, 1)
+        store.close()
 
 
 class TestSearch(Base):

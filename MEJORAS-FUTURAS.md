@@ -4,13 +4,12 @@
 > verdad es el **código + los tests (`tests/test_memorygraf.py`) + el historial de commits**;
 > este documento ya no es un "roadmap de cosas por hacer", sino un registro corto de:
 > **(a)** lo hecho, **(b)** la **deuda consciente** que conviene recordar (por qué algo va
-> gateado/acotado), **(c)** una **propuesta** de mejora (M10: bootstrap de entidades con LLM),
-> y **(d)** lo único pendiente de ejecución: la **validación de ENTORNO** (§9).
+> gateado/acotado), y **(c)** lo único pendiente de ejecución: la **validación de ENTORNO** (§9).
 > Complementa `DESIGN.md` (principios §3, vinculantes).
 
 ---
 
-## 1. Backlog M1–M9 — implementado
+## 1. Backlog M1–M10 — implementado
 
 | # | Mejora | Dónde / nota |
 |---|---|---|
@@ -23,6 +22,7 @@
 | M7 | Narrativa/rerank con **LLM local** opt-in (Ollama) | `context_compiler` |
 | M8 | Co-cambio **cross-project** por símbolo, gateado y conservador | `git_layer` |
 | M9 | `calls`/`imports` **cross-file** multi-lenguaje + capa LLM opcional | `ts_generic` + `indexer`. Ver §3. |
+| M10 | **Bootstrap de entidades** de dominio (`bootstrap-entities`): propone desde el código para curar | `entities_bootstrap`. Ver §M10. |
 
 Cada mejora entró con **test de regresión** y verificación en vivo (regla DESIGN §11).
 
@@ -66,7 +66,15 @@ desempata candidatos ambiguos (confidence 0.55 + provenance `llm`, fallback dete
 
 ---
 
-## M10 · (PROPUESTA) Bootstrap de entidades de dominio con LLM local
+## M10 · Bootstrap de entidades de dominio con LLM local  ✅ IMPLEMENTADO
+
+**Estado (2026-07-26).** Hecho. Comando `memorygraf bootstrap-entities`
+(`entities_bootstrap.py`): propone entidades candidatas desde las clases/tipos del grafo
+(heurístico determinista por sustantivo de dominio; refuerzo con LLM local si Ollama está,
+fallback si no), el usuario las cura (aceptar/editar/omitir) y escribe `memorygraf.entities.json`
+(fusiona con el existente). CLI con `-h` detallado + MANUAL. Tests: heurístico por sustantivo,
+LLM mockeado, escritura del glosario curado, requiere config. Validado E2E: bootstrap → `sync`
+crea nodos `entity` + aristas `models`. El resto de esta sección queda como registro del plan.
 
 **Contexto.** El glosario de dominio (`memorygraf.entities.json` → nodos `entity` + aristas
 `models`, Fase 4) es opt-in y su **contenido se redacta a mano** (es conocimiento de negocio;
