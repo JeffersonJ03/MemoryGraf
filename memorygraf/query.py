@@ -109,7 +109,12 @@ class Query:
         import time
         from . import staleness
         now = time.monotonic()
-        if self._fresh_obj is None or now - self._fresh_ts > staleness.ttl_seconds(self.store):
+        try:
+            ttl = staleness.ttl_seconds(self.store)
+        except Exception:
+            ttl = 2.0
+        if self._fresh_obj is None or now - self._fresh_ts > ttl:
+            # Staleness.__init__ ya es a prueba de excepciones (nunca lanza).
             self._fresh_obj = staleness.Staleness(self.store)
             self._fresh_ts = now
         return self._fresh_obj

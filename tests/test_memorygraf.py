@@ -2696,6 +2696,46 @@ class TestFreshnessToggle(_GitRepo, Base):
         store.close()
 
 
+class TestFreshnessRobustness(unittest.TestCase):
+    """La señal de frescura es un EXTRA: ninguna excepción (BD bloqueada, meta ilegible)
+    debe tumbar una consulta. `Staleness.__init__` nunca lanza."""
+
+    def test_never_raises_on_broken_store(self):
+        from memorygraf import staleness
+
+        class BrokenStore:
+            def get_meta(self, k):
+                raise RuntimeError("db locked")
+
+            def all_nodes(self, types=None):
+                raise RuntimeError("db locked")
+
+        s = staleness.Staleness(BrokenStore())
+        self.assertFalse(s.enabled)
+        self.assertFalse(s.stale)
+        self.assertEqual(s.banner(), "")
+        self.assertEqual(s.marker("proj/x.py"), "")
+        self.assertIn("fresh", s.as_dict())
+
+    def test_empty_env_does_not_force_enable(self):
+        from memorygraf import staleness
+
+        class MetaStore:
+            def __init__(self, meta):
+                self._m = meta
+
+            def get_meta(self, k):
+                return self._m.get(k)
+
+            def all_nodes(self, types=None):
+                return []
+
+        disabled = MetaStore({"freshness_enabled": "0"})
+        with unittest.mock.patch.dict(os.environ, {"MEMORYGRAF_FRESHNESS": ""}):
+            # env vacío no debe forzar activación: cae al meta (que la desactiva)
+            self.assertFalse(staleness.is_enabled(disabled))
+
+
 class TestSummaryBackendSwitch(Base):
     """Cambiar el backend de resúmenes (p. ej. heurístico -> Ollama vía `configure`) NO
     se aplica en el `sync` incremental; `summarize_all` debe DETECTARLO y avisar."""
@@ -2718,6 +2758,22 @@ class TestSummaryBackendSwitch(Base):
         r2 = summarizer.summarize_all(store, config=cfg, only_missing=False)
         self.assertFalse(r2["stale_backend"])
         store.close()
+
+    def test_expected_name_matches_actual_summarizer_names(self):
+        # El nombre ESPERADO debe coincidir EXACTO con el .name real de cada summarizer,
+        # o `_stale_backend` avisaría en falso para siempre (bug del prefijo 'api:' vs 'llm:').
+        from memorygraf import summarizer as S
+        self.assertEqual(
+            S._expected_backend_name({"summary": {"backend": "heuristic"}}, None),
+            S.HeuristicSummarizer().name)                                    # heuristic-v1
+        self.assertEqual(
+            S._expected_backend_name({"summary": {"backend": "api", "api": {"model": "gpt-x"}}}, None),
+            S.ApiSummarizer("http://u", "k", "gpt-x").name)                  # llm:gpt-x (NO api:gpt-x)
+        self.assertEqual(
+            S._expected_backend_name({"summary": {"backend": "ollama", "ollama": {"model": "m1"}}}, None),
+            "ollama:m1")                                                     # == OllamaSummarizer.name
+        self.assertIsNone(
+            S._expected_backend_name({"summary": {"backend": "auto"}}, None))  # indeterminable
 
 
 class TestConfigureLspLangAware(unittest.TestCase):
