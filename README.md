@@ -89,7 +89,7 @@ hay **degradación elegante** al modo portable.
 | Símbolos C/C++/Java/C#/Go/Rust/PHP/R/VB/asm | — (se omite) | **tree-sitter** (símbolos + `defines` + `calls` intra-archivo) | `parsers` |
 | Búsqueda semántica | TF-IDF | **model2vec** neural (cross-idioma) | `neural` |
 | `watch` | polling | **watchdog** (eventos nativos) | `watch` |
-| Diagnósticos + tipos por símbolo (`runtime --lsp`) | — (se omite) | **python-lsp-server** (o **pyright**, mejor calidad — `memorygraf doctor` lo instala); **TS/JS** con `typescript-language-server` | `lsp` |
+| Diagnósticos + tipos por símbolo (`runtime --lsp`) | — (se omite) | **python-lsp-server** (o **pyright**, mejor calidad — `memorygraf doctor` lo instala); **TS/JS** con `typescript-language-server`; **Go/Rust/C/C++** con `gopls`/`rust-analyzer`/`clangd` (M11a — `doctor` los detecta y te dice cómo instalarlos) | `lsp` |
 | Python (`ast`), grafo, MCP, decisiones, entidades | exacto siempre | igual | — |
 
 Instala todo con `pip install ".[full]"`, o solo lo que quieras: `pip install ".[neural]"`,
@@ -142,7 +142,7 @@ dependencia, y todas dejan **procedencia** (`archivo:línea`) y respetan un pres
    fragilidad, autores y el "por qué" de cada cambio → `history`, `working-set`, `impact`.
 4. **Verdad de runtime.** Cobertura por símbolo, `tested_by` código↔test (hasta **símbolo→test**
    por contextos de cobertura), estado del último test, y diagnósticos + tipos vía **LSP**
-   (`runtime --lsp`, multi-lenguaje Python + TS/JS).
+   (`runtime --lsp`, multi-lenguaje: Python, TS/JS y Go/Rust/C/C++ vía gopls/rust-analyzer/clangd).
 5. **Compilador de contexto local.** Un LLM pequeño y local (Ollama, opcional) que **destila**
    logs gigantes (`digest`), **narra** el co-cambio y **reordena** búsquedas — siempre con
    fallback determinista.

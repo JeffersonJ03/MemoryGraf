@@ -48,6 +48,28 @@ _LANGUAGES = [
                      ".mjs": "javascript", ".cjs": "javascript"},
         "params": ts_treesitter.param_offsets,   # M4b: offsets de params TS/JS (tree-sitter)
     },
+    # M11a · Grupo A — servers LSP estándar por stdio, single-binary, sin init especial:
+    # solo config, reusan el cliente efímero tal cual (diagnósticos + resolved_type vía
+    # hover). Sin provider de params todavía (M4b por lenguaje es follow-up, no bloquea).
+    {
+        "name": "go",
+        "servers": [("gopls", [])],
+        "ext_lang": {".go": "go"},
+    },
+    {
+        "name": "rust",
+        "servers": [("rust-analyzer", [])],
+        "ext_lang": {".rs": "rust"},
+    },
+    {
+        # clangd sirve C y C++ desde un único binario; el languageId por extensión le da
+        # el modo correcto (los .h se tratan como C; clangd los reajusta por contenido/flags).
+        "name": "c/c++",
+        "servers": [("clangd", [])],
+        "ext_lang": {".c": "c", ".h": "c",
+                     ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".c++": "cpp",
+                     ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp"},
+    },
 ]
 
 # Cómo instalar el language-server de cada lenguaje (para el mensaje de "omitido":
@@ -55,12 +77,17 @@ _LANGUAGES = [
 _INSTALL_HINT = {
     "python": "pip install python-lsp-server   (o pyright:  npm i -g pyright)",
     "typescript": "npm i -g typescript-language-server typescript",
+    # M11a · Grupo A (el comando exacto por OS lo da `memorygraf doctor`):
+    "go": "go install golang.org/x/tools/gopls@latest   (requiere Go)",
+    "rust": "rustup component add rust-analyzer   (requiere rustup)",
+    "c/c++": "instala clangd (apt/brew/winget · ver `memorygraf doctor`)",
 }
 
 _SEVERITY = {1: "error", 2: "warning", 3: "info", 4: "hint"}
 # etiquetas de fence/idioma a descartar al extraer la firma del hover (multi-lenguaje)
 _FENCE_TAGS = {"python", "typescript", "javascript", "typescriptreact",
-               "javascriptreact", "ts", "js", "tsx", "jsx", "text", "plaintext"}
+               "javascriptreact", "ts", "js", "tsx", "jsx", "text", "plaintext",
+               "go", "rust", "rs", "c", "cpp", "c++"}
 
 
 def _find_lang_server(spec: dict) -> tuple | None:
@@ -430,7 +457,8 @@ def _run_language(store, server, files, roots, rt, log, param_provider=None,
 
 def sync(store, config: dict, log=lambda m: None) -> dict:
     """Arranca un LSP efímero POR LENGUAJE presente, recoge diagnósticos y tipos y los
-    mapea a nodos. Multi-lenguaje (M4): Python y TS/JS (si su servidor está instalado)."""
+    mapea a nodos. Multi-lenguaje (M4 + M11a): Python, TS/JS, Go, Rust y C/C++ (cada uno
+    si su servidor está instalado; los que falten se omiten con degradación elegante)."""
     rt = (config or {}).get("runtime") or {}
     if rt.get("enabled") is False or rt.get("lsp") is False:
         return {"enabled": False, "reason": "deshabilitado"}

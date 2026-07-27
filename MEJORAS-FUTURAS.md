@@ -1,9 +1,10 @@
 # MemoryGraf — Deuda consciente y validación pendiente
 
-> **Estado (2026-07-27).** El backlog **M1–M10 está IMPLEMENTADO y probado**. La fuente de
+> **Estado (2026-07-27).** El backlog **M1–M10 está IMPLEMENTADO y probado**, más **M11a**
+> (capa LSP para Go/Rust/C/C++). La fuente de
 > verdad es el **código + los tests (`tests/test_memorygraf.py`) + el historial de commits**;
 > este documento registra: **(a)** lo hecho, **(b)** la **deuda consciente** que conviene
-> recordar (por qué algo va gateado/acotado), **(c)** las propuestas abiertas (M11–M12 y el
+> recordar (por qué algo va gateado/acotado), **(c)** las propuestas abiertas (M11b–M12 y el
 > **Anexo M13–M20**, roadmap de paridad con Graphify) y **(d)** lo único pendiente de
 > ejecución sin código nuevo: la **validación de ENTORNO** (§9).
 > Complementa `DESIGN.md` (principios §3, vinculantes).
@@ -107,13 +108,18 @@ sin Ollama degrada a heurístico. Contenido a un módulo nuevo + subcomando (pat
 
 ---
 
-## M11 · Ampliar la capa LSP a más lenguajes  (PROPUESTA)
+## M11 · Ampliar la capa LSP a más lenguajes  (M11a ✅ · resto PROPUESTA)
 
-**Estado (2026-07-26).** Propuesta. Hoy `runtime/lsp.py` (`_LANGUAGES`) cubre LSP solo para
-**Python** y **TypeScript/JS**. El resto de lenguajes que MemoryGraf **sí indexa** con
-tree-sitter (Go, Rust, C/C++, Java, C#, PHP, R, VB, asm) obtiene **símbolos/`calls`/`imports`**
-pero **no** la capa LSP (diagnósticos, `resolved_type`, `param_types`). `doctor`/`configure` ya
-lo reportan honestamente ("indexado, SIN capa LSP"). No es imposibilidad: es alcance actual.
+**Estado (2026-07-27).** **M11a (Grupo A) IMPLEMENTADO:** `runtime/lsp.py` (`_LANGUAGES`) ya
+cubre LSP para **Python**, **TypeScript/JS** y ahora **Go (`gopls`)**, **Rust
+(`rust-analyzer`)** y **C/C++ (`clangd`)** — diagnósticos + `resolved_type` vía hover, reusando
+el cliente efímero. Su language-server es toolchain/OS-específico, así que **no se auto-instala**:
+`doctor` lo detecta (`shutil.which`) y muestra el comando correcto por plataforma
+(`go install …` / `rustup component add …` / `apt`·`brew`·`winget` para clangd). Tests en
+`tests/test_memorygraf.py` (`TestGroupALspHints`, mapeo de extensiones, reporte por lenguaje).
+El resto que MemoryGraf **sí indexa** con tree-sitter (Java, C#, PHP, R, VB, asm) sigue con
+**símbolos/`calls`/`imports`** pero **sin** capa LSP (`doctor`/`configure` lo reportan como
+"indexado, SIN capa LSP"). No es imposibilidad: es alcance de M11b–d.
 
 **Qué exige añadir un lenguaje** (el cliente LSP efímero ya es genérico y reutilizable):
 1. Una entrada en `_LANGUAGES`: `name`, `servers` (binario + args por stdio), `ext_lang`
@@ -136,8 +142,9 @@ lo reportan honestamente ("indexado, SIN capa LSP"). No es imposibilidad: es alc
   (`languageserver`)** — factibles, menor demanda. **VB** y **Assembly** no tienen LSP
   standalone práctico → se quedan **symbols-only** permanente (marcarlo así en `doctor`).
 
-**Orden sugerido:** M11a = Grupo A (Go/Rust/C/C++) en una corrida · M11b = Java · M11c = C# ·
-M11d = PHP/R. Cada sub-hito con su **instalable en `doctor`** (respetando entorno/OS, como
+**Orden sugerido:** ~~M11a = Grupo A (Go/Rust/C/C++) en una corrida~~ ✅ hecho · **siguiente:**
+M11b = Java · M11c = C# · M11d = PHP/R. Cada sub-hito con su **instalable/detectable en `doctor`**
+(respetando entorno/OS, como
 `ts-lsp`) y su **test** (fixture mínimo: un símbolo tipado + un error → el server devuelve
 `resolved_type` y ≥1 diagnóstico; skip limpio si el server no está, como hoy).
 

@@ -970,12 +970,59 @@ class TestDoctorMissingLanguageServer(unittest.TestCase):
     def test_language_report_carries_install_key(self):
         from memorygraf import doctor
         for r in doctor.lsp_language_report(self.CFG):
-            if r["supported"]:
+            if r["supported"] and r["install_key"]:
+                # Python/TS: auto-instalables desde doctor (--install <clave>)
                 self.assertIn(r["install_key"], doctor._INSTALLABLE)
                 # `install` sigue siendo el comando legible que usa `configure`
                 self.assertIn(r["install_key"], r["install"])
+            elif r["supported"]:
+                # M11a · Grupo A: LSP soportado, pero el server es toolchain/OS-específico
+                # → no auto-instalable (install_key=None), pero doctor da un comando legible
+                self.assertIsNone(r["install_key"])
+                self.assertTrue(r["install"])
             else:
                 self.assertIsNone(r["install_key"])
+                self.assertIsNone(r["install"])
+
+
+class TestGroupALspHints(unittest.TestCase):
+    """M11a · Grupo A: Go/Rust/C/C++ tienen capa LSP, pero su language-server es
+    toolchain/OS-específico → doctor lo DETECTA y muestra el comando correcto (no
+    lo auto-instala)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mg_ga_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_clangd_hint_is_platform_aware(self):
+        from memorygraf import doctor, ollama_setup
+        cases = {"windows": "winget", "macos": "brew", "linux": "apt", "wsl": "apt"}
+        for plat, needle in cases.items():
+            with unittest.mock.patch.object(ollama_setup, "detect_platform",
+                                            return_value=plat):
+                self.assertIn(needle, doctor._clangd_install_hint())
+
+    def test_group_a_not_auto_installable(self):
+        # los servers del Grupo A NO son claves de `--install` (frágiles por toolchain)
+        from memorygraf import doctor
+        for key in ("gopls", "rust-analyzer", "clangd", "go-lsp", "rust-lsp", "c-lsp"):
+            self.assertNotIn(key, doctor._INSTALLABLE)
+
+    def test_rust_and_cpp_reported_supported(self):
+        from memorygraf import doctor
+        for fname in ("lib.rs", "calc.cpp"):
+            open(os.path.join(self.tmp, fname), "w").close()
+        with open(os.path.join(self.tmp, "lib.rs"), "w") as f:
+            f.write("pub fn add(a: i32, b: i32) -> i32 { a + b }\n")
+        cfg = {"projects": [{"name": "p", "root": self.tmp}]}
+        report = {r["lang"]: r for r in doctor.lsp_language_report(cfg)}
+        self.assertIn("Rust", report)
+        self.assertIn("C++", report)
+        self.assertTrue(report["Rust"]["supported"])
+        self.assertIsNone(report["Rust"]["install_key"])   # no auto-install
+        self.assertTrue(report["Rust"]["install"])         # pero hay hint
 
 
 def _git_available() -> bool:
@@ -1994,6 +2041,17 @@ class TestRuntimeLsp(Base):
         self.assertEqual(lsp._lang_for_ext(".js")[1], "javascript")
         self.assertEqual(lsp._lang_for_ext(".jsx")[1], "javascriptreact")
         self.assertEqual(lsp._lang_for_ext(".mjs")[1], "javascript")
+        # M11a · Grupo A (Go/Rust/C/C++): mismas reglas, ext -> languageId LSP
+        self.assertEqual(lsp._lang_for_ext(".go")[1], "go")
+        self.assertEqual(lsp._lang_for_ext(".rs")[1], "rust")
+        self.assertEqual(lsp._lang_for_ext(".c")[1], "c")
+        self.assertEqual(lsp._lang_for_ext(".h")[1], "c")
+        self.assertEqual(lsp._lang_for_ext(".cpp")[1], "cpp")
+        self.assertEqual(lsp._lang_for_ext(".hpp")[1], "cpp")
+        self.assertEqual(lsp._lang_for_ext(".cc")[1], "cpp")
+        # C y C++ comparten un único server (clangd)
+        self.assertEqual(lsp._lang_for_ext(".c")[0]["name"], "c/c++")
+        self.assertIs(lsp._lang_for_ext(".c")[0], lsp._lang_for_ext(".cpp")[0])
         self.assertEqual(lsp._lang_for_ext(".rb"), (None, None))
         # el server de cada lenguaje: None o (binario, args)
         for spec in lsp._LANGUAGES:
@@ -2880,15 +2938,32 @@ class TestConfigureLspLangAware(unittest.TestCase):
         self.assertIn("doctor --install ts-lsp", joined)
 
     def test_report_lsp_marks_unsupported_language(self):
+        # Java sigue SIN capa LSP en MemoryGraf (indexa símbolos, no diagnósticos/tipos).
         from memorygraf import configure
+        with open(os.path.join(self.tmp, "Main.java"), "w") as f:
+            f.write("class Main { public static void main(String[] a) {} }\n")
+        cfg = {"projects": [{"name": "java", "root": self.tmp}]}
+        msgs = []
+        configure._report_lsp(cfg, ["lsp_on_sync"], msgs.append)
+        joined = "\n".join(msgs)
+        self.assertIn("java", joined)
+        self.assertIn("NO tiene LSP", joined)
+
+    def test_report_lsp_marks_group_a_supported(self):
+        # M11a: Go pasó de 'sin LSP' a soportado; sin gopls debe salir como FALTA (no
+        # como 'NO tiene LSP') y apuntar al comando de instalación por toolchain.
+        from memorygraf import configure, doctor
         with open(os.path.join(self.tmp, "main.go"), "w") as f:
             f.write("package main\nfunc main() {}\n")
         cfg = {"projects": [{"name": "go", "root": self.tmp}]}
         msgs = []
-        configure._report_lsp(cfg, ["lsp_on_sync"], msgs.append)
+        with unittest.mock.patch.object(doctor, "_has_gopls", return_value=False):
+            configure._report_lsp(cfg, ["lsp_on_sync"], msgs.append)
         joined = "\n".join(msgs)
-        self.assertIn("go", joined)
-        self.assertIn("NO tiene LSP", joined)
+        self.assertIn("Go", joined)
+        self.assertNotIn("NO tiene LSP", joined)
+        self.assertIn("FALTA", joined)
+        self.assertIn("gopls", joined)   # el hint por toolchain
 
 
 class TestBuildDirsExcluded(Base):

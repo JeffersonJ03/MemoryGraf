@@ -513,8 +513,12 @@ Parsea artefactos que el proyecto YA produce (no ejecuta nada):
   (M2) desde CONTEXTOS de cobertura (`coverage json --show-contexts`), EXTRACTED.
 - **JUnit** → `last_test_status` por símbolo de test.
 - **LSP efímero** (`runtime --lsp`): `diagnostics` + `resolved_type` por símbolo y tipos por
-  **parámetro** (M4b). **Multi-lenguaje** (M4): Python (pyright/pylsp/jedi) y TS/JS
-  (`typescript-language-server`); pyright da la mejor calidad de tipos.
+  **parámetro** (M4b). **Multi-lenguaje** (M4 + M11a): Python (pyright/pylsp/jedi) y TS/JS
+  (`typescript-language-server`); pyright da la mejor calidad de tipos. **Grupo A (M11a):**
+  Go (`gopls`), Rust (`rust-analyzer`) y C/C++ (`clangd`) — diagnósticos + `resolved_type`;
+  su server es toolchain/OS-específico, así que `doctor` lo detecta y muestra cómo instalarlo
+  (no lo auto-instala). El resto que MemoryGraf indexa (Java, C#, PHP, R, VB, asm) sigue
+  symbols-only por ahora.
 
 ### 18.3 Capa 3 · Compilador de contexto local (`context_compiler.py`)
 
