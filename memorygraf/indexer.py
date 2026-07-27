@@ -1,14 +1,17 @@
 """Indexador de MemoryGraf (DESIGN §8).
 
-Descubre archivos (respetando excludes), los despacha al extractor por lenguaje,
-re-indexa incrementalmente por hash y resuelve los imports a nodos internos
-(imports edge) o a nodos external.
+Descubre archivos (respetando excludes de dir y, si hay git, `.gitignore` — M12), los
+despacha al extractor por lenguaje, re-indexa incrementalmente por hash y resuelve los
+imports a nodos internos (imports edge) o a nodos external.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
+import shutil
+import subprocess
 from datetime import datetime, timezone
 
 from .model import (
@@ -42,13 +45,76 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _iter_files(root: str, excludes: set):
+def _index_settings(config: dict) -> tuple:
+    """(respect_gitignore, unignore) del bloque `index` de la config (M12).
+
+    Default: respetar `.gitignore` (efectivo solo si hay git; sin git es no-op → el modo
+    portable no cambia). `unignore` = rutas relativas (prefijo o glob) a RE-INCLUIR aunque
+    git las ignore (código fuente legítimo gitignorado: módulos locales, generado-que-es-código).
+    """
+    idx = (config or {}).get("index") or {}
+    return bool(idx.get("respect_gitignore", True)), tuple(idx.get("unignore", []))
+
+
+def _gitignored(root: str, paths: list) -> set:
+    """Subconjunto de `paths` (abspaths) que git considera IGNORADOS; conjunto vacío si no
+    hay git o `root` no está en un repo (degradación elegante, DESIGN §3.2).
+
+    Delega en `git check-ignore --stdin` → semántica COMPLETA de gitignore (negaciones `!`,
+    `**`, anclajes, `.gitignore` anidados) sin reimplementar nada. check-ignore respeta el
+    índice por defecto: un archivo YA rastreado NO se reporta como ignorado aunque encaje un
+    patrón — justo lo que queremos (indexar lo versionado, saltar lo generado/local)."""
+    if not paths:
+        return set()
+    git = shutil.which("git")
+    if not git:
+        return set()
+    try:
+        inside = subprocess.run(
+            [git, "-C", root, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True)
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return set()
+        proc = subprocess.run(
+            [git, "-C", root, "check-ignore", "--stdin"],
+            input="\n".join(paths), capture_output=True, text=True)
+    except OSError:
+        return set()
+    if proc.returncode not in (0, 1):   # 0=hay ignorados, 1=ninguno; 128/otros=error → nada
+        return set()
+    return {ln.strip() for ln in proc.stdout.splitlines() if ln.strip()}
+
+
+def _apply_gitignore(root: str, candidates: list, respect_gitignore: bool,
+                     unignore: tuple) -> list:
+    """Filtra de `candidates` (abspaths) los que git ignora, salvo los re-incluidos por
+    `unignore`. Capa ADICIONAL sobre los excludes de dir, no un reemplazo (M12)."""
+    if not respect_gitignore:
+        return candidates
+    ignored = _gitignored(root, candidates)
+    if not ignored:
+        return candidates
+    if unignore:
+        keep = set()
+        for p in ignored:
+            rel = os.path.relpath(p, root).replace("\\", "/")
+            if any(rel == u or rel.startswith(u.rstrip("/") + "/") or fnmatch.fnmatch(rel, u)
+                   for u in unignore):
+                keep.add(p)
+        ignored -= keep
+    return [p for p in candidates if p not in ignored]
+
+
+def _iter_files(root: str, excludes: set, respect_gitignore: bool = True,
+                unignore: tuple = ()):
+    candidates = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in excludes]
         for fn in filenames:
             ext = os.path.splitext(fn)[1].lower()
             if ext in EXT_LANG:
-                yield os.path.join(dirpath, fn)
+                candidates.append(os.path.join(dirpath, fn))
+    return _apply_gitignore(root, candidates, respect_gitignore, unignore)
 
 
 def _loads_jsonc(text: str):
@@ -198,6 +264,8 @@ class Indexer:
         self.store = store
         self.config = config
         self.excludes = DEFAULT_EXCLUDES | set(config.get("excludes", []))
+        # M12: además de los excludes de dir, respetar `.gitignore` (si hay git)
+        self.respect_gitignore, self.unignore = _index_settings(config)
         self.pending_imports = []  # (file_id, project, [raw_import,...])
         self.pending_calls = []    # (file_id, project, ext, base_dir, calls_out, bindings)
         self.py_module_index = {}  # (project, dotted) -> file_id
@@ -237,7 +305,8 @@ class Indexer:
         seen = set()
         for proj in self.config["projects"]:
             name, root = proj["name"], proj["root"]
-            for abspath in _iter_files(root, self.excludes):
+            for abspath in _iter_files(root, self.excludes,
+                                       self.respect_gitignore, self.unignore):
                 relpath = os.path.relpath(abspath, root).replace("\\", "/")
                 rel_id = f"{name}/{relpath}"
                 seen.add(rel_id)

@@ -3135,6 +3135,87 @@ class TestBuildDirsExcluded(Base):
         store.close()
 
 
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestGitignoreRespected(_GitRepo, Base):
+    """M12: el descubrimiento respeta `.gitignore` (vía `git check-ignore`), como capa
+    ADICIONAL a los excludes de dir. Escape hatch (`unignore`), flag para desactivar, y
+    degradación elegante sin git. Usa 'generated/' (NO está en DEFAULT_EXCLUDES) para
+    aislar el efecto del gitignore del de los excludes."""
+
+    def _paths(self, store):
+        return {n["path"] for n in store.all_nodes(types=["file"])}
+
+    def _index_cfg(self, index_block):
+        store = Store(self.db)
+        Indexer(store, {**self.config, "index": index_block}).index_all()
+        return store
+
+    def test_gitignored_file_is_skipped(self):
+        self.write("app.py", "def a():\n    return 1\n")
+        self.write("generated/gen.py", "def g():\n    return 2\n")
+        self.write(".gitignore", "generated/\n")
+        self._init_repo()
+        store, _ = self.index()
+        paths = self._paths(store)
+        self.assertIn("proj/app.py", paths)              # fuente entra
+        self.assertNotIn("proj/generated/gen.py", paths)  # gitignorado, fuera
+        store.close()
+
+    def test_gitignore_negation_reincludes(self):
+        # negación `!` solo funciona si se ignora el CONTENIDO (generated/*), no el dir;
+        # es una limitación de git y delegamos en su semántica exacta.
+        self.write("generated/gen.py", "def g():\n    return 2\n")
+        self.write("generated/keep.py", "def k():\n    return 3\n")
+        self.write(".gitignore", "generated/*\n!generated/keep.py\n")
+        self._init_repo()
+        store, _ = self.index()
+        paths = self._paths(store)
+        self.assertNotIn("proj/generated/gen.py", paths)
+        self.assertIn("proj/generated/keep.py", paths)   # negación respetada por git
+        store.close()
+
+    def test_respect_gitignore_false_keeps_previous_behavior(self):
+        self.write("generated/gen.py", "def g():\n    return 2\n")
+        self.write(".gitignore", "generated/\n")
+        self._init_repo()
+        store = self._index_cfg({"respect_gitignore": False})
+        self.assertIn("proj/generated/gen.py", self._paths(store))
+        store.close()
+
+    def test_unignore_reincludes_source(self):
+        # código fuente legítimo pero gitignorado: `index.unignore` lo devuelve al grafo
+        self.write("generated/gen.py", "def g():\n    return 2\n")
+        self.write(".gitignore", "generated/\n")
+        self._init_repo()
+        store = self._index_cfg({"unignore": ["generated"]})
+        self.assertIn("proj/generated/gen.py", self._paths(store))
+        store.close()
+
+    def test_without_git_falls_back_to_excludes(self):
+        # sin repo git el `.gitignore` no aplica: cae al comportamiento previo
+        # (DEFAULT_EXCLUDES; 'generated' no está ahí, así que el archivo entra)
+        self.write("generated/gen.py", "def g():\n    return 2\n")
+        self.write(".gitignore", "generated/\n")
+        # NO _init_repo() a propósito
+        store, _ = self.index()
+        self.assertIn("proj/generated/gen.py", self._paths(store))
+        store.close()
+
+    def test_gitignored_markdown_not_extracted(self):
+        # consistencia: un .md en un dir gitignorado tampoco genera doc/decisiones
+        from memorygraf import docs
+        self.write("DECISIONS.md", "# Decisión de arquitectura\nSiempre usar X.\n")
+        self.write("generated/NOTES.md", "# Decisión generada\nNunca tocar Y.\n")
+        self.write(".gitignore", "generated/\n")
+        self._init_repo()
+        store, _ = self.index()
+        docs.extract_docs(store, self.config)
+        doc_paths = {n["path"] for n in store.all_nodes(types=["doc"])}
+        self.assertIn("proj/DECISIONS.md", doc_paths)
+        self.assertNotIn("proj/generated/NOTES.md", doc_paths)
+        store.close()
+
+
 class TestWindowsBatchExec(unittest.TestCase):
     """En Windows nativo, npm y los *-language-server.cmd deben lanzarse vía `cmd /c`
     (CreateProcess no corre batch files); pip/pipx/python NO se tocan (romperían con

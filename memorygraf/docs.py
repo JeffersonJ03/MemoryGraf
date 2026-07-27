@@ -14,7 +14,7 @@ import os
 import re
 
 from .model import Node, Edge, NODE_DECISION, NODE_CONVENTION, NODE_DOC, content_hash
-from .indexer import DEFAULT_EXCLUDES
+from .indexer import DEFAULT_EXCLUDES, _apply_gitignore, _index_settings
 
 DOC_EXTS = (".md", ".markdown")
 
@@ -32,12 +32,17 @@ MAX_DECISIONS_PER_DOC = 25
 MAX_CONVENTIONS_PER_DOC = 40
 
 
-def _iter_docs(root: str, excludes: set):
+def _iter_docs(root: str, excludes: set, respect_gitignore: bool = True,
+               unignore: tuple = ()):
+    candidates = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in excludes]
         for fn in filenames:
             if os.path.splitext(fn)[1].lower() in DOC_EXTS:
-                yield os.path.join(dirpath, fn)
+                candidates.append(os.path.join(dirpath, fn))
+    # M12: mismo filtro `.gitignore` que el código (un README en un dir generado/local
+    # gitignorado no debe ensuciar decisiones/convenciones).
+    return _apply_gitignore(root, candidates, respect_gitignore, unignore)
 
 
 def _slug(text: str) -> str:
@@ -53,6 +58,7 @@ def _first_sentence(text: str) -> str:
 
 def extract_docs(store, config: dict) -> dict:
     excludes = DEFAULT_EXCLUDES | set(config.get("excludes", []))
+    respect_gitignore, unignore = _index_settings(config)   # M12
     # índice de basenames de archivos de código -> node_id (para aristas governs)
     file_index = {}
     for n in store.all_nodes(types=["file"]):
@@ -64,7 +70,7 @@ def extract_docs(store, config: dict) -> dict:
     seen_docs = set()
     for proj in config["projects"]:
         name, root = proj["name"], proj["root"]
-        for abspath in _iter_docs(root, excludes):
+        for abspath in _iter_docs(root, excludes, respect_gitignore, unignore):
             relpath = os.path.relpath(abspath, root).replace("\\", "/")
             rel_id = f"{name}/{relpath}"
             try:
