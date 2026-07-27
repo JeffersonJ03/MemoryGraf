@@ -29,6 +29,12 @@ DEFAULT_EXCLUDES = {
     "node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build",
     "worktrees", ".claude", "public", "logs", "data", "temp", "coverage",
     "assets", ".pytest_cache", "documentacion",
+    # Salida de build/caché de frameworks JS/TS: es código GENERADO (manifests,
+    # vendor-chunks minificados, hot-updates) que ensucia el grafo con cientos de
+    # nodos sin relación con tu código fuente. Se excluye por defecto.
+    ".next", ".nuxt", ".svelte-kit", ".output", ".turbo", ".astro", ".vercel",
+    ".netlify", ".angular", ".expo", ".parcel-cache", ".docusaurus", ".cache",
+    "storybook-static",
 }
 
 

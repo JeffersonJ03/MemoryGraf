@@ -2763,6 +2763,22 @@ class TestConfigureLspLangAware(unittest.TestCase):
         self.assertIn("NO tiene LSP", joined)
 
 
+class TestBuildDirsExcluded(Base):
+    """La salida de build de frameworks JS/TS (.next, .nuxt, …) es código GENERADO:
+    no debe indexarse (ensuciaba el grafo con cientos de nodos sin relación)."""
+
+    def test_next_build_output_is_not_indexed(self):
+        self.write("src/app.ts", "export function greet(n: string) { return n; }\n")
+        # artefactos típicos de Next.js (deben quedar FUERA del grafo)
+        self.write(".next/server/middleware-manifest.js", "self.__RSC_MANIFEST={};\n")
+        self.write(".next/static/webpack/abc.hot-update.js", "self.webpackHotUpdate();\n")
+        store, _ = self.index()
+        paths = [n["path"] for n in store.all_nodes(types=["file"])]
+        self.assertTrue(any("app.ts" in (p or "") for p in paths))       # el código sí
+        self.assertFalse(any(".next" in (p or "") for p in paths))       # el build no
+        store.close()
+
+
 class TestWindowsBatchExec(unittest.TestCase):
     """En Windows nativo, npm y los *-language-server.cmd deben lanzarse vía `cmd /c`
     (CreateProcess no corre batch files); pip/pipx/python NO se tocan (romperían con
