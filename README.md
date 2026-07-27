@@ -160,6 +160,31 @@ son caché regenerable. Todo es portable y agnóstico del LLM. Ver [`DESIGN.md`]
 (MCP) añade el co-cambio por **historia completa** acotado al archivo, que capta acoplamiento
 que el blame pierde; si un símbolo está muy tocado pero sin co-cambios, `impact` lo sugiere.
 
+### Señal de frescura (¿está el grafo al día?)
+
+Un grafo desactualizado es peor que no tenerlo: hace al asistente estar **seguro y
+equivocado**. Por eso cada respuesta **marca su propia frescura**, sin que haya que pedirlo:
+
+- **Por nodo:** cada nodo cuyo archivo cambió desde el último `sync` se anota con
+  `⚠ N commit(s) sin reindexar` o `⚠ editado sin commitear` (en `search`, `get`, `neighbors`,
+  `impact`, `history`, `working_set`).
+- **Global:** `overview`, `search` y `working_set` abren con un banner
+  `⚠ FRESCURA — el grafo va por detrás del código: …` cuando hay deriva; y `stats` incluye un
+  bloque `freshness` estructurado (commits detrás, archivos afectados, cambios sin commitear).
+
+Se calcula **en vivo** contra `.git` y el árbol de trabajo (caché regenerable, nunca fuente de
+verdad) y **degrada en silencio** sin git. La cura siempre es la misma: `memorygraf sync` (o
+`memorygraf watch`).
+
+Se puede **desactivar** en repos enormes donde el `git` por consulta moleste: `freshness.enabled:
+false` en la config (persistido al `sync`), o la env `MEMORYGRAF_FRESHNESS=off`; el TTL del caché
+se ajusta con `freshness.ttl_seconds` o `MEMORYGRAF_FRESHNESS_TTL`.
+
+> **Cambiar el backend de resúmenes** (p. ej. de heurístico a Ollama con `configure`) **no** se
+> aplica solo en el `sync`: es incremental y solo rellena los faltantes. Regenera los resúmenes
+> existentes con el nuevo backend usando **`memorygraf summarize --all`**. Tanto `configure` como
+> el propio `sync` te lo avisan cuando detectan el cambio.
+
 ## CLI (mismas capacidades, también sin IA)
 
 - **Consulta:** `overview` · `search [--rerank | --rerank-llm]` · `neighbors` · `get` ·
@@ -174,8 +199,13 @@ que el blame pierde; si un símbolo está muy tocado pero sin co-cambios, `impac
 **`memorygraf configure`** es un asistente interactivo que activa las capacidades opcionales
 del grafo (LLM local para resúmenes/compilador/desempate M9, co-cambio por **historia completa**
 M1, **tipos LSP en el `sync`** y variables locales M4b) mediante **paquetes por potencia**
-(portable / estándar / potencia) o **modo avanzado** opción por opción, **validando las
-dependencias** y orientando a `doctor`/`setup-ollama` si falta alguna. Escribe la config sola.
+(portable / estándar / potencia), **modo avanzado** opción por opción, o **Preferencias y
+rendimiento** (señal de frescura on/off + TTL, hilos de `git blame` en repos grandes),
+**validando las dependencias** y orientando a `doctor`/`setup-ollama` si falta alguna. La
+validación de LSP es **por lenguaje del proyecto**: en un proyecto TS/JS te pide el
+`typescript-language-server` (vía `memorygraf doctor --install ts-lsp`), no el de Python.
+`doctor` reporta el LSP por lenguaje y marca los que MemoryGraf indexa pero no cubre con LSP
+(Go, Rust, C…: símbolos sí, diagnósticos/tipos no). Escribe la config sola.
 
 `memorygraf setup-llm` configura el LLM de resúmenes y compilador de forma interactiva y
 escribe la config sola. Motores: **heuristic** (offline), **ollama** (local — elige/descarga

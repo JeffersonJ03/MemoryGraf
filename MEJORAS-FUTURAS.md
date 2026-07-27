@@ -106,6 +106,46 @@ sin Ollama degrada a heurístico. Contenido a un módulo nuevo + subcomando (pat
 
 ---
 
+## M11 · Ampliar la capa LSP a más lenguajes  (PROPUESTA)
+
+**Estado (2026-07-26).** Propuesta. Hoy `runtime/lsp.py` (`_LANGUAGES`) cubre LSP solo para
+**Python** y **TypeScript/JS**. El resto de lenguajes que MemoryGraf **sí indexa** con
+tree-sitter (Go, Rust, C/C++, Java, C#, PHP, R, VB, asm) obtiene **símbolos/`calls`/`imports`**
+pero **no** la capa LSP (diagnósticos, `resolved_type`, `param_types`). `doctor`/`configure` ya
+lo reportan honestamente ("indexado, SIN capa LSP"). No es imposibilidad: es alcance actual.
+
+**Qué exige añadir un lenguaje** (el cliente LSP efímero ya es genérico y reutilizable):
+1. Una entrada en `_LANGUAGES`: `name`, `servers` (binario + args por stdio), `ext_lang`
+   (ext→languageId). Con solo eso salen **diagnósticos + `resolved_type`** (hover).
+2. Que el server sea **detectable/instalable desde `doctor`** (patrón `ts-lsp`: `shutil.which`
+   + comando por gestor; el wrap `cmd /c` de Windows ya generaliza a cualquier `.cmd`).
+3. *(Opcional, M4b)* un **provider de offsets de params** (tipo `ts_treesitter.param_offsets`)
+   para `param_types` por posición — follow-up por lenguaje, no bloquea lo básico.
+
+**¿Todo en una sola corrida? Depende del server** — por eso conviene agrupar:
+
+- **Grupo A — UNA sola corrida (config-only, reusa el cliente tal cual):** servers LSP
+  estándar por stdio, single-binary, sin init especial → **Go (`gopls`)**, **Rust
+  (`rust-analyzer`)**, **C/C++ (`clangd`)**. Enchufarlos en `_LANGUAGES` + `doctor` ya da
+  diagnósticos + `resolved_type`. Riesgo **bajo**.
+- **Grupo B — por lenguaje (launch/init server-específico):** **Java (`jdtls`)** exige
+  workspace dedicado + JVM + `initializationOptions`; **C# (`OmniSharp`/`csharp-ls`)** es
+  solución/proyecto-aware. Cada uno es su propio PR (el cliente necesita init a medida).
+- **Grupo C — nicho / parcial:** **PHP (`intelephense` [node] o `phpactor`)**, **R
+  (`languageserver`)** — factibles, menor demanda. **VB** y **Assembly** no tienen LSP
+  standalone práctico → se quedan **symbols-only** permanente (marcarlo así en `doctor`).
+
+**Orden sugerido:** M11a = Grupo A (Go/Rust/C/C++) en una corrida · M11b = Java · M11c = C# ·
+M11d = PHP/R. Cada sub-hito con su **instalable en `doctor`** (respetando entorno/OS, como
+`ts-lsp`) y su **test** (fixture mínimo: un símbolo tipado + un error → el server devuelve
+`resolved_type` y ≥1 diagnóstico; skip limpio si el server no está, como hoy).
+
+**Riesgo/Esfuerzo.** Grupo A: **bajo** (config + tests, sin motor nuevo). Grupo B: **medio-alto**
+(init por server). Reutiliza todo el andamiaje existente (cliente efímero, mapeo a `runtime_node`,
+degradación elegante): el grueso es "conectar server + instalable + test", no lógica nueva.
+
+---
+
 ## 9. Validación de ENTORNO pendiente (no son features)
 
 Lo ÚNICO genuinamente pendiente. No requiere código nuevo, solo ejecutar el guion

@@ -63,12 +63,18 @@ _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 # --------------------------------------------------------------------------- #
 # Utilidades git
 # --------------------------------------------------------------------------- #
-def _git(args: list, cwd: str) -> str | None:
-    """Corre `git` en cwd. Devuelve stdout (str) o None si git falla/no existe."""
+def _git(args: list, cwd: str, timeout: float | None = None) -> str | None:
+    """Corre `git` en cwd. Devuelve stdout (str) o None si git falla/no existe.
+
+    `timeout` (segundos) acota comandos en rutas calientes (p. ej. la señal de
+    frescura por consulta): si git se bloquea —índice retenido, disco lento— se
+    degrada a None en vez de colgar. Por defecto None = sin límite (comportamiento
+    previo intacto para el resto de llamadas)."""
     try:
         p = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
-                           text=True, encoding="utf-8", errors="replace")
-    except (FileNotFoundError, OSError):
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None
     return p.stdout if p.returncode == 0 else None
 

@@ -426,7 +426,8 @@ def main(argv=None):
             print(f"Reporte generado: {out}", file=sys.stderr)
             print(out)
         elif args.cmd == "stats":
-            print(json.dumps(store.stats(), ensure_ascii=False, indent=2))
+            from .query import Query
+            print(json.dumps(Query(store).stats(), ensure_ascii=False, indent=2))
         elif args.cmd == "export":
             out = args.out or os.path.join(os.path.dirname(_db_path(args)), "memorygraf.json")
             store.export_json(out)

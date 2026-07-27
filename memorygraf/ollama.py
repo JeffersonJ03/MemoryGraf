@@ -25,16 +25,54 @@ DEFAULT_MODEL = "qwen2.5-coder:3b"
 _EXE = "ollama.exe" if os.name == "nt" else "ollama"
 
 
+def _install_candidates() -> list[str]:
+    """Rutas de instalación por-usuario (no en PATH) donde puede estar el binario.
+
+    En Windows importa especialmente: el instalador (GUI/winget) deja `ollama.exe`
+    en %LOCALAPPDATA%\\Programs\\Ollama y NO refresca el PATH de la terminal ya
+    abierta, así que `shutil.which` no lo ve hasta reiniciarla. Buscarlo en disco
+    evita el falso "no instalado".
+    """
+    cands = [os.path.expanduser(f"~/.local/bin/{_EXE}"),
+             os.path.expanduser(f"~/.ollama/bin/{_EXE}")]
+    if os.name == "nt":
+        for env in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+            base = os.environ.get(env)
+            if base:
+                cands.append(os.path.join(base, "Programs", "Ollama", _EXE))
+                cands.append(os.path.join(base, "Ollama", _EXE))
+    return cands
+
+
 def find_binary() -> str | None:
-    """Ubica el binario de Ollama: en el PATH o en instalaciones sin sudo."""
+    """Ubica el binario de Ollama: en el PATH o en instalaciones por-usuario.
+
+    En Windows busca además las rutas del instalador porque el PATH recién añadido
+    no está vigente en la terminal actual (hay que reiniciarla). Ver `installed()`.
+    """
     found = shutil.which("ollama") or shutil.which(_EXE)
     if found:
         return found
-    for cand in (os.path.expanduser(f"~/.local/bin/{_EXE}"),
-                 os.path.expanduser(f"~/.ollama/bin/{_EXE}")):
-        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+    for cand in _install_candidates():
+        # En Windows no todos los .exe reportan X_OK; basta con que exista el archivo.
+        if os.path.isfile(cand) and (os.name == "nt" or os.access(cand, os.X_OK)):
             return cand
     return None
+
+
+def on_path() -> bool:
+    """¿El binario es invocable como `ollama` en ESTA terminal (PATH ya vigente)?"""
+    return bool(shutil.which("ollama") or shutil.which(_EXE))
+
+
+def installed(url: str = DEFAULT_URL) -> bool:
+    """¿Ollama está presente? Binario en disco O un servidor ya respondiendo.
+
+    Más robusto que `find_binary()` a secas: en Windows el instalador arranca un
+    servicio en segundo plano, así que el servidor puede estar vivo aunque el PATH
+    de la terminal actual aún no incluya el binario.
+    """
+    return find_binary() is not None or server_up(url)
 
 
 def _get_json(url: str, path: str, timeout: float = 5):

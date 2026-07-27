@@ -319,8 +319,44 @@ def _has_pending(store: Store, rebuild: bool, only_missing: bool) -> bool:
     return False
 
 
+def _expected_backend_name(config, store: Store) -> str | None:
+    """Nombre del summarizer que el backend configurado PRODUCIRÍA. None para 'auto'
+    (no se puede saber sin resolver disponibilidad en red)."""
+    s = _resolve_summary_settings(config)
+    b = s["backend"]
+    if b == "heuristic":
+        return "heuristic-v1"
+    if b == "ollama":
+        return f"ollama:{s['model']}"
+    if b == "api":
+        return f"api:{s['api_model']}"
+    return None
+
+
+def _stale_backend(config, store: Store):
+    """(prev, esperado) si los resúmenes existentes se hicieron con OTRO backend que el
+    configurado ahora; None si coinciden o no se puede determinar. Es la causa de que un
+    cambio de backend por `configure` no se 'note' en `sync` (los resúmenes ya existen y
+    el sync incremental solo llena los faltantes)."""
+    expected = _expected_backend_name(config, store)
+    prev = store.get_meta("summarizer")
+    if expected and prev and prev != expected:
+        return (prev, expected)
+    return None
+
+
 def summarize_all(store: Store, config=None, rebuild=False, only_missing=True,
                   log=lambda m: None) -> dict:
+    # ¿El backend configurado difiere del que produjo los resúmenes existentes? Con
+    # sync (only_missing, sin rebuild) esos resúmenes NO se regeneran solos -> avisamos
+    # con el comando exacto para aplicarlo (evita el 'parece que no se aplicó nada').
+    stale = _stale_backend(config, store) if (only_missing and not rebuild) else None
+    if stale:
+        prev, expected = stale
+        log(f"⚠ backend de resúmenes: la config pide '{expected}' pero los resúmenes "
+            f"existentes son de '{prev}'.")
+        log(f"   El `sync` incremental NO los regenera. Aplica el nuevo backend con:  "
+            f"memorygraf summarize --all")
     # Cortocircuito: si no hay nada pendiente, ni tocamos el backend (no arranca Ollama).
     if not _has_pending(store, rebuild, only_missing):
         # Reporta el backend RESUELTO (config/env), no un meta obsoleto: si el usuario
@@ -333,9 +369,12 @@ def summarize_all(store: Store, config=None, rebuild=False, only_missing=True,
             name = f"ollama:{s['model']}"
         else:  # auto | api: reporta el summarizer que realmente produjo los resúmenes
             name = store.get_meta("summarizer") or "heuristic-v1"
-        return {"summarizer": name, "generated": 0, "from_cache": 0, "skipped": 0}
+        return {"summarizer": name, "generated": 0, "from_cache": 0, "skipped": 0,
+                "stale_backend": bool(stale)}
     with _summarizer_ctx(config, log) as summarizer:
-        return _run_summaries(store, summarizer, config, rebuild, only_missing, log)
+        r = _run_summaries(store, summarizer, config, rebuild, only_missing, log)
+        r["stale_backend"] = bool(stale)
+        return r
 
 
 # Cada cuántos nodos procesados se emite una línea de progreso. Clave para que un

@@ -103,7 +103,12 @@ TOOLS = [
     },
     {
         "name": "stats",
-        "description": "Estadísticas del grafo: totales de nodos/aristas por tipo y por proyecto.",
+        "description": (
+            "Estadísticas del grafo: totales de nodos/aristas por tipo y por proyecto, "
+            "MÁS un bloque 'freshness' (¿está el índice al día?): commits sin reindexar, "
+            "archivos afectados y cambios sin commitear. Úsalo para saber si puedes CONFIAR "
+            "en el grafo o conviene pedir un `memorygraf sync` primero."
+        ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -215,7 +220,7 @@ class Server:
             return q.decisions(topic=args.get("topic"),
                                budget_tokens=int(args.get("budget_tokens", 1200)))
         if name == "stats":
-            return json.dumps(self.store.stats(), ensure_ascii=False, indent=2)
+            return json.dumps(q.stats(), ensure_ascii=False, indent=2)
         if name == "working_set":
             return q.working_set(budget_tokens=int(args.get("budget_tokens", 800)),
                                  limit=int(args.get("limit", 20)))

@@ -19,8 +19,18 @@ def bump_version(store: Store) -> int:
     return cur
 
 
+def _persist_freshness_settings(store: Store, config: dict):
+    """Persiste los ajustes de la señal de frescura a `meta` para que el servidor MCP
+    (que solo tiene la BD, sin config) los honre. Ver staleness.is_enabled/ttl_seconds."""
+    fr = (config or {}).get("freshness") or {}
+    store.set_meta("freshness_enabled", "0" if fr.get("enabled") is False else "1")
+    if fr.get("ttl_seconds") is not None:
+        store.set_meta("freshness_ttl", str(fr["ttl_seconds"]))
+
+
 def full_sync(store: Store, config: dict, do_summarize: bool = True,
               do_embed: bool = True, log=lambda m: None) -> dict:
+    _persist_freshness_settings(store, config)
     idx = Indexer(store, config)
     c = idx.index_all()
     log(f"index: {c['files']} cambiados, {c['skipped']} sin cambio, "

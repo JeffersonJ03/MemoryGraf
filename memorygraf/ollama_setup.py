@@ -122,16 +122,58 @@ def _install_linux_nosudo(log=print) -> str | None:
     return binary
 
 
+def _wait_for_install(log=print, timeout: float = 60) -> str | None:
+    """Espera (acotado) a que aparezca el binario. El instalador GUI de Windows es
+    ASÍNCRONO: winget puede devolver antes de que la instalación termine. Sondea
+    disco/servidor y sale EN CUANTO lo detecta (si ya está, no espera nada). El tope
+    evita colgar la terminal si la instalación se canceló."""
+    import time
+    deadline = time.time() + timeout
+    announced = False
+    while True:
+        binary = ollama.find_binary()
+        if binary or ollama.server_up():
+            return binary or ollama.find_binary()
+        if time.time() >= deadline:
+            return None
+        if not announced:
+            log(f"==> Esperando a que termine el instalador de Ollama (hasta {int(timeout)}s; "
+                "completa la ventana de instalación si se abrió)…")
+            announced = True
+        time.sleep(2)
+
+
 def _install_windows(log=print) -> str | None:
     if shutil.which("winget"):
         log("==> Instalando con winget (Ollama.Ollama)…")
-        rc = subprocess.call([
-            "winget", "install", "--id", "Ollama.Ollama", "-e",
-            "--accept-package-agreements", "--accept-source-agreements"])
-        if rc == 0:
-            return ollama.find_binary()
+        # NO confiamos solo en el código de salida: winget puede devolver ≠0 por
+        # "ya instalado", "requiere reinicio" o porque delega en el instalador GUI
+        # (asíncrono). Verificamos la instalación REAL sondeando disco/servidor.
+        rc = 1
+        try:
+            rc = subprocess.call([
+                "winget", "install", "--id", "Ollama.Ollama", "-e",
+                "--accept-package-agreements", "--accept-source-agreements"])
+        except (FileNotFoundError, OSError):
+            pass
+        # winget OK -> la instalación ya terminó; solo damos un margen breve para que el
+        # binario aparezca en disco. winget ≠0 -> pudo delegar en la GUI: esperamos más.
+        binary = _wait_for_install(log, timeout=10 if rc == 0 else 60)
+        if binary or ollama.server_up():
+            if binary and not ollama.on_path():
+                # Causa raíz del falso "no se pudo instalar": el PATH recién añadido
+                # NO está vigente en esta terminal. MemoryGraf continúa AHORA usando la
+                # ruta completa del binario; el reinicio es solo para el comando `ollama`.
+                log("")
+                log(f"==> ✔ Ollama detectado en: {binary}")
+                log("    (aún no está en el PATH de ESTA terminal; MemoryGraf sigue con "
+                    "la ruta completa)")
+                log("    Para usar el comando `ollama` a mano: cierra y reabre la terminal.")
+                log("")
+            return binary or ollama.find_binary()
+        log("!! winget terminó pero aún no se detecta Ollama (¿instalación cancelada?).")
     log("==> Descarga e instala Ollama para Windows desde: https://ollama.com/download/windows")
-    log("    (luego vuelve a ejecutar 'memorygraf setup-ollama')")
+    log("    Tras instalar, CIERRA y REABRE la terminal y ejecuta 'memorygraf setup-ollama'.")
     return None
 
 
@@ -190,7 +232,7 @@ def run(model: str = ollama.DEFAULT_MODEL, do_pull: bool = True,
         log(f"==> Ollama ya instalado: {binary}")
     else:
         binary = _install(plat, log=log)
-        if not binary:
+        if not binary and not ollama.server_up():
             log("!! No se completó la instalación de Ollama. MemoryGraf seguirá "
                 "usando el summarizer heurístico.")
             return 1
@@ -202,6 +244,13 @@ def run(model: str = ollama.DEFAULT_MODEL, do_pull: bool = True,
                 return 1
             if ollama.model_present(url, model):
                 log(f"==> Modelo '{model}' ya presente.")
+            elif not binary:
+                # Servidor vivo pero sin binario localizable (raro): no podemos hacer
+                # `pull` a mano. Guiamos en vez de crashear.
+                log(f"!! El modelo '{model}' no está y no se localizó el binario `ollama` "
+                    "para descargarlo. Cierra y reabre la terminal, o descárgalo con:")
+                log(f"     ollama pull {model}")
+                return 1
             else:
                 log(f"==> Descargando modelo '{model}' (~2 GB, solo la primera vez)…")
                 if not ollama.pull_model(binary, model, log=log):
