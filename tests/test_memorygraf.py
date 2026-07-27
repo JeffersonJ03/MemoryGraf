@@ -970,12 +970,125 @@ class TestDoctorMissingLanguageServer(unittest.TestCase):
     def test_language_report_carries_install_key(self):
         from memorygraf import doctor
         for r in doctor.lsp_language_report(self.CFG):
-            if r["supported"]:
+            if r["supported"] and r["install_key"]:
+                # Python/TS: auto-instalables desde doctor (--install <clave>)
                 self.assertIn(r["install_key"], doctor._INSTALLABLE)
                 # `install` sigue siendo el comando legible que usa `configure`
                 self.assertIn(r["install_key"], r["install"])
+            elif r["supported"]:
+                # M11a · Grupo A: LSP soportado, pero el server es toolchain/OS-específico
+                # → no auto-instalable (install_key=None), pero doctor da un comando legible
+                self.assertIsNone(r["install_key"])
+                self.assertTrue(r["install"])
             else:
                 self.assertIsNone(r["install_key"])
+                self.assertIsNone(r["install"])
+
+
+class TestGroupALspHints(unittest.TestCase):
+    """M11a · Grupo A: Go/Rust/C/C++ tienen capa LSP, pero su language-server es
+    toolchain/OS-específico → doctor lo DETECTA y muestra el comando correcto (no
+    lo auto-instala)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mg_ga_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_clangd_hint_is_platform_aware(self):
+        from memorygraf import doctor, ollama_setup
+        cases = {"windows": "winget", "macos": "brew", "linux": "apt", "wsl": "apt"}
+        for plat, needle in cases.items():
+            with unittest.mock.patch.object(ollama_setup, "detect_platform",
+                                            return_value=plat):
+                self.assertIn(needle, doctor._clangd_install_hint())
+
+    def test_group_a_not_auto_installable(self):
+        # los servers del Grupo A NO son claves de `--install` (frágiles por toolchain)
+        from memorygraf import doctor
+        for key in ("gopls", "rust-analyzer", "clangd", "go-lsp", "rust-lsp", "c-lsp"):
+            self.assertNotIn(key, doctor._INSTALLABLE)
+
+    def test_rust_and_cpp_reported_supported(self):
+        from memorygraf import doctor
+        for fname in ("lib.rs", "calc.cpp"):
+            open(os.path.join(self.tmp, fname), "w").close()
+        with open(os.path.join(self.tmp, "lib.rs"), "w") as f:
+            f.write("pub fn add(a: i32, b: i32) -> i32 { a + b }\n")
+        cfg = {"projects": [{"name": "p", "root": self.tmp}]}
+        report = {r["lang"]: r for r in doctor.lsp_language_report(cfg)}
+        self.assertIn("Rust", report)
+        self.assertIn("C++", report)
+        self.assertTrue(report["Rust"]["supported"])
+        self.assertIsNone(report["Rust"]["install_key"])   # no auto-install
+        self.assertTrue(report["Rust"]["install"])         # pero hay hint
+
+    def test_jdtls_hint_is_platform_aware_and_mentions_jdk(self):
+        # M11b: el hint de jdtls varía por SO y siempre recuerda el requisito de JDK
+        from memorygraf import doctor, ollama_setup
+        cases = {"windows": "choco", "macos": "brew", "linux": "JDT", "wsl": "JDT"}
+        for plat, needle in cases.items():
+            with unittest.mock.patch.object(ollama_setup, "detect_platform",
+                                            return_value=plat):
+                hint = doctor._jdtls_install_hint()
+                self.assertIn(needle, hint)
+                self.assertIn("JDK", hint)
+
+    def test_java_reported_supported_not_auto_installable(self):
+        # M11b: Java pasa de symbols-only a soportado; sin jdtls sale FALTA con hint, y
+        # jdtls NO es una clave de --install (server toolchain/JVM-específico)
+        from memorygraf import doctor
+        with open(os.path.join(self.tmp, "Main.java"), "w") as f:
+            f.write("class Main {}\n")
+        cfg = {"projects": [{"name": "p", "root": self.tmp}]}
+        with unittest.mock.patch.object(doctor, "_has_jdtls", return_value=False):
+            report = {r["lang"]: r for r in doctor.lsp_language_report(cfg)}
+        self.assertIn("Java", report)
+        self.assertTrue(report["Java"]["supported"])
+        self.assertFalse(report["Java"]["ok"])
+        self.assertIsNone(report["Java"]["install_key"])
+        self.assertIn("JDK", report["Java"]["install"])
+        for key in ("jdtls", "java-lsp"):
+            self.assertNotIn(key, doctor._INSTALLABLE)
+
+    def test_csharp_reported_supported_with_dotnet_hint(self):
+        # M11c: C# pasa de symbols-only a soportado (csharp-ls); sin el server sale FALTA
+        # con el comando `dotnet tool`, y csharp-ls NO es una clave de --install
+        from memorygraf import doctor
+        with open(os.path.join(self.tmp, "Program.cs"), "w") as f:
+            f.write("class Program { static void Main() {} }\n")
+        cfg = {"projects": [{"name": "p", "root": self.tmp}]}
+        with unittest.mock.patch.object(doctor, "_has_csharp_ls", return_value=False):
+            report = {r["lang"]: r for r in doctor.lsp_language_report(cfg)}
+        self.assertIn("C#", report)
+        self.assertTrue(report["C#"]["supported"])
+        self.assertFalse(report["C#"]["ok"])
+        self.assertIsNone(report["C#"]["install_key"])
+        self.assertIn("dotnet tool", report["C#"]["install"])
+        for key in ("csharp-ls", "csharp-lsp", "omnisharp"):
+            self.assertNotIn(key, doctor._INSTALLABLE)
+
+    def test_php_and_r_reported_supported(self):
+        # M11d: PHP (intelephense) y R (languageserver) pasan a soportados; sin server
+        # salen FALTA con su hint, y ninguno es clave de --install
+        from memorygraf import doctor
+        with open(os.path.join(self.tmp, "index.php"), "w") as f:
+            f.write("<?php function suma($a, $b) { return $a + $b; }\n")
+        with open(os.path.join(self.tmp, "main.R"), "w") as f:
+            f.write("suma <- function(a, b) a + b\n")
+        cfg = {"projects": [{"name": "p", "root": self.tmp}]}
+        with unittest.mock.patch.object(doctor, "_has_php_ls", return_value=False), \
+             unittest.mock.patch.object(doctor, "_has_r_ls", return_value=False):
+            report = {r["lang"]: r for r in doctor.lsp_language_report(cfg)}
+        for lang, needle in (("PHP", "intelephense"), ("R", "languageserver")):
+            self.assertIn(lang, report)
+            self.assertTrue(report[lang]["supported"])
+            self.assertFalse(report[lang]["ok"])
+            self.assertIsNone(report[lang]["install_key"])
+            self.assertIn(needle, report[lang]["install"])
+        for key in ("intelephense", "php-lsp", "r-lsp", "languageserver"):
+            self.assertNotIn(key, doctor._INSTALLABLE)
 
 
 def _git_available() -> bool:
@@ -1994,11 +2107,108 @@ class TestRuntimeLsp(Base):
         self.assertEqual(lsp._lang_for_ext(".js")[1], "javascript")
         self.assertEqual(lsp._lang_for_ext(".jsx")[1], "javascriptreact")
         self.assertEqual(lsp._lang_for_ext(".mjs")[1], "javascript")
+        # M11a · Grupo A (Go/Rust/C/C++): mismas reglas, ext -> languageId LSP
+        self.assertEqual(lsp._lang_for_ext(".go")[1], "go")
+        self.assertEqual(lsp._lang_for_ext(".rs")[1], "rust")
+        self.assertEqual(lsp._lang_for_ext(".c")[1], "c")
+        self.assertEqual(lsp._lang_for_ext(".h")[1], "c")
+        self.assertEqual(lsp._lang_for_ext(".cpp")[1], "cpp")
+        self.assertEqual(lsp._lang_for_ext(".hpp")[1], "cpp")
+        self.assertEqual(lsp._lang_for_ext(".cc")[1], "cpp")
+        # C y C++ comparten un único server (clangd)
+        self.assertEqual(lsp._lang_for_ext(".c")[0]["name"], "c/c++")
+        self.assertIs(lsp._lang_for_ext(".c")[0], lsp._lang_for_ext(".cpp")[0])
+        # M11b · Java (jdtls)
+        self.assertEqual(lsp._lang_for_ext(".java")[1], "java")
+        # M11c · C# (csharp-ls)
+        self.assertEqual(lsp._lang_for_ext(".cs")[1], "csharp")
+        # M11d · Grupo C — PHP (intelephense) y R (languageserver vía R)
+        self.assertEqual(lsp._lang_for_ext(".php")[1], "php")
+        self.assertEqual(lsp._lang_for_ext(".r")[1], "r")
+        self.assertEqual(lsp._lang_for_ext(".R")[1], "r")   # la ext se normaliza a minúsculas
         self.assertEqual(lsp._lang_for_ext(".rb"), (None, None))
         # el server de cada lenguaje: None o (binario, args)
         for spec in lsp._LANGUAGES:
             srv = lsp._find_lang_server(spec)
             self.assertTrue(srv is None or (isinstance(srv, tuple) and len(srv) == 2))
+
+    def test_java_spec_requires_workspace(self):
+        # M11b: jdtls exige un workspace de datos propio e init a medida
+        from memorygraf.runtime import lsp
+        spec, lid = lsp._lang_for_ext(".java")
+        self.assertEqual(lid, "java")
+        self.assertTrue(spec.get("workspace"))
+        self.assertIn("settings", spec.get("init_options") or {})
+
+    def test_workspace_server_gets_data_dir_and_init_options(self):
+        # M11b: un server con workspace=True recibe `-data <dir>` (temporal, se limpia) y
+        # sus initializationOptions llegan al `initialize`. Sin servidor real: mockeamos
+        # Popen y el cliente para capturar el argv y los params.
+        from memorygraf.runtime import lsp
+        captured, seen = {}, {}
+
+        class FakeProc:
+            def terminate(self): pass
+            def wait(self, timeout=None): pass
+            def kill(self): pass
+
+        class FakeClient:
+            def __init__(self, proc): self.diagnostics = {}
+            def _send(self, method, params, notify=False):
+                captured.setdefault(method, params)
+                return 1
+            def request(self, *a, **k): return None
+
+        def fake_popen(argv, **kw):
+            seen["argv"] = argv
+            return FakeProc()
+
+        with unittest.mock.patch.object(lsp.subprocess, "Popen", fake_popen), \
+             unittest.mock.patch.object(lsp, "_LspClient", FakeClient), \
+             unittest.mock.patch.object(lsp.time, "sleep", lambda *_a, **_k: None):
+            f, d, t = lsp._run_language(
+                None, ("jdtls", []), [], {"p": "."},
+                {"hover": False, "lsp_timeout": 0}, lambda m: None,
+                workspace=True, init_options={"settings": {"java": {}}})
+
+        argv = seen["argv"]
+        self.assertIn("-data", argv)
+        data_dir = argv[argv.index("-data") + 1]
+        self.assertEqual(captured["initialize"]["initializationOptions"],
+                         {"settings": {"java": {}}})
+        # el workspace temporal se limpia al terminar (no deja basura en disco)
+        self.assertFalse(os.path.isdir(data_dir))
+        self.assertEqual((f, d, t), (0, 0, 0))
+
+    def test_non_workspace_server_has_no_data_dir(self):
+        # Grupo A (gopls/clangd/…): sin workspace=True NO se añade `-data` ni init_options
+        from memorygraf.runtime import lsp
+        captured, seen = {}, {}
+
+        class FakeProc:
+            def terminate(self): pass
+            def wait(self, timeout=None): pass
+            def kill(self): pass
+
+        class FakeClient:
+            def __init__(self, proc): self.diagnostics = {}
+            def _send(self, method, params, notify=False):
+                captured.setdefault(method, params)
+                return 1
+            def request(self, *a, **k): return None
+
+        def fake_popen(argv, **kw):
+            seen["argv"] = argv
+            return FakeProc()
+
+        with unittest.mock.patch.object(lsp.subprocess, "Popen", fake_popen), \
+             unittest.mock.patch.object(lsp, "_LspClient", FakeClient), \
+             unittest.mock.patch.object(lsp.time, "sleep", lambda *_a, **_k: None):
+            lsp._run_language(None, ("gopls", []), [], {"p": "."},
+                              {"hover": False, "lsp_timeout": 0}, lambda m: None)
+
+        self.assertNotIn("-data", seen["argv"])
+        self.assertNotIn("initializationOptions", captured.get("initialize", {}))
 
     def test_parse_hover_handles_typescript_fence(self):
         # M4: la firma se extrae descartando el fence de CUALQUIER lenguaje (no solo py)
@@ -2880,15 +3090,33 @@ class TestConfigureLspLangAware(unittest.TestCase):
         self.assertIn("doctor --install ts-lsp", joined)
 
     def test_report_lsp_marks_unsupported_language(self):
+        # VB no tiene LSP standalone práctico → queda symbols-only PERMANENTE. Canario
+        # de la degradación honesta por lenguaje (MemoryGraf indexa símbolos, no tipos).
         from memorygraf import configure
+        with open(os.path.join(self.tmp, "Mod.vb"), "w") as f:
+            f.write("Module Mod\n  Sub Main()\n  End Sub\nEnd Module\n")
+        cfg = {"projects": [{"name": "vb", "root": self.tmp}]}
+        msgs = []
+        configure._report_lsp(cfg, ["lsp_on_sync"], msgs.append)
+        joined = "\n".join(msgs)
+        self.assertIn("vb", joined)
+        self.assertIn("NO tiene LSP", joined)
+
+    def test_report_lsp_marks_group_a_supported(self):
+        # M11a: Go pasó de 'sin LSP' a soportado; sin gopls debe salir como FALTA (no
+        # como 'NO tiene LSP') y apuntar al comando de instalación por toolchain.
+        from memorygraf import configure, doctor
         with open(os.path.join(self.tmp, "main.go"), "w") as f:
             f.write("package main\nfunc main() {}\n")
         cfg = {"projects": [{"name": "go", "root": self.tmp}]}
         msgs = []
-        configure._report_lsp(cfg, ["lsp_on_sync"], msgs.append)
+        with unittest.mock.patch.object(doctor, "_has_gopls", return_value=False):
+            configure._report_lsp(cfg, ["lsp_on_sync"], msgs.append)
         joined = "\n".join(msgs)
-        self.assertIn("go", joined)
-        self.assertIn("NO tiene LSP", joined)
+        self.assertIn("Go", joined)
+        self.assertNotIn("NO tiene LSP", joined)
+        self.assertIn("FALTA", joined)
+        self.assertIn("gopls", joined)   # el hint por toolchain
 
 
 class TestBuildDirsExcluded(Base):

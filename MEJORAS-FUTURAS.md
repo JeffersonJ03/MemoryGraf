@@ -1,16 +1,17 @@
 # MemoryGraf — Deuda consciente y validación pendiente
 
-> **Estado (2026-07-27).** El backlog **M1–M10 está IMPLEMENTADO y probado**. La fuente de
+> **Estado (2026-07-27).** El backlog **M1–M11 está IMPLEMENTADO y probado** (M11 completo: capa
+> LSP para Go/Rust/C/C++, Java, C#, PHP y R — solo VB y asm quedan symbols-only). La fuente de
 > verdad es el **código + los tests (`tests/test_memorygraf.py`) + el historial de commits**;
 > este documento registra: **(a)** lo hecho, **(b)** la **deuda consciente** que conviene
-> recordar (por qué algo va gateado/acotado), **(c)** las propuestas abiertas (M11–M12 y el
+> recordar (por qué algo va gateado/acotado), **(c)** las propuestas abiertas (M12 y el
 > **Anexo M13–M20**, roadmap de paridad con Graphify) y **(d)** lo único pendiente de
 > ejecución sin código nuevo: la **validación de ENTORNO** (§9).
 > Complementa `DESIGN.md` (principios §3, vinculantes).
 
 ---
 
-## 1. Backlog M1–M10 — implementado
+## 1. Backlog M1–M11 — implementado
 
 | # | Mejora | Dónde / nota |
 |---|---|---|
@@ -24,6 +25,7 @@
 | M8 | Co-cambio **cross-project** por símbolo, gateado y conservador | `git_layer` |
 | M9 | `calls`/`imports` **cross-file** multi-lenguaje + capa LLM opcional | `ts_generic` + `indexer`. Ver §3. |
 | M10 | **Bootstrap de entidades** de dominio (`bootstrap-entities`): propone desde el código para curar | `entities_bootstrap`. Ver §M10. |
+| M11 | **Capa LSP multi-lenguaje**: +Go/Rust/C/C++ (a), Java (b), C# (c), PHP/R (d) | `runtime/lsp.py` + `doctor`. Ver §M11. |
 
 Cada mejora entró con **test de regresión** y verificación en vivo (regla DESIGN §11).
 
@@ -107,13 +109,24 @@ sin Ollama degrada a heurístico. Contenido a un módulo nuevo + subcomando (pat
 
 ---
 
-## M11 · Ampliar la capa LSP a más lenguajes  (PROPUESTA)
+## M11 · Ampliar la capa LSP a más lenguajes  (COMPLETO ✅)
 
-**Estado (2026-07-26).** Propuesta. Hoy `runtime/lsp.py` (`_LANGUAGES`) cubre LSP solo para
-**Python** y **TypeScript/JS**. El resto de lenguajes que MemoryGraf **sí indexa** con
-tree-sitter (Go, Rust, C/C++, Java, C#, PHP, R, VB, asm) obtiene **símbolos/`calls`/`imports`**
-pero **no** la capa LSP (diagnósticos, `resolved_type`, `param_types`). `doctor`/`configure` ya
-lo reportan honestamente ("indexado, SIN capa LSP"). No es imposibilidad: es alcance actual.
+**Estado (2026-07-27).** **M11a–d IMPLEMENTADOS.** `runtime/lsp.py` (`_LANGUAGES`) cubre LSP
+para **Python**, **TypeScript/JS**, **Go (`gopls`)**, **Rust (`rust-analyzer`)**, **C/C++
+(`clangd`)**, **Java (`jdtls`)**, **C# (`csharp-ls`)**, **PHP (`intelephense`, alt. `phpactor`)**
+y **R (`languageserver`, vía R)** — diagnósticos + `resolved_type` vía hover, reusando el
+cliente efímero. Para el Grupo B se añadió al cliente un **hook de init a medida** (claves
+opcionales `workspace` e `init_options` en la spec): jdtls recibe un **workspace de datos
+propio** (`-data <dir>` temporal, creado y limpiado por `_run_language`) y sus
+`initializationOptions`; requiere **JDK 17+**. C#/PHP/R resultaron config-only (reusan el cliente
+tal cual). Todos los servers son toolchain/OS-específicos, así que **no se auto-instalan**:
+`doctor` los detecta (`shutil.which`) y muestra el comando correcto (`go install …` / `rustup
+component add …` / clangd por apt·brew·winget / jdtls por brew·choco·descarga / `dotnet tool
+install --global csharp-ls` / `npm i -g intelephense` / paquete R `languageserver`). Tests en
+`tests/test_memorygraf.py` (`TestGroupALspHints`, mapeo de extensiones, hook
+`workspace`/`init_options`, reporte por lenguaje). **Solo VB y Assembly** quedan symbols-only
+(indexados con símbolos/`calls`/`imports` pero sin LSP standalone práctico); `doctor`/`configure`
+lo marcan honestamente como "indexado, SIN capa LSP".
 
 **Qué exige añadir un lenguaje** (el cliente LSP efímero ya es genérico y reutilizable):
 1. Una entrada en `_LANGUAGES`: `name`, `servers` (binario + args por stdio), `ext_lang`
@@ -129,21 +142,25 @@ lo reportan honestamente ("indexado, SIN capa LSP"). No es imposibilidad: es alc
   estándar por stdio, single-binary, sin init especial → **Go (`gopls`)**, **Rust
   (`rust-analyzer`)**, **C/C++ (`clangd`)**. Enchufarlos en `_LANGUAGES` + `doctor` ya da
   diagnósticos + `resolved_type`. Riesgo **bajo**.
-- **Grupo B — por lenguaje (launch/init server-específico):** **Java (`jdtls`)** exige
-  workspace dedicado + JVM + `initializationOptions`; **C# (`OmniSharp`/`csharp-ls`)** es
-  solución/proyecto-aware. Cada uno es su propio PR (el cliente necesita init a medida).
-- **Grupo C — nicho / parcial:** **PHP (`intelephense` [node] o `phpactor`)**, **R
-  (`languageserver`)** — factibles, menor demanda. **VB** y **Assembly** no tienen LSP
-  standalone práctico → se quedan **symbols-only** permanente (marcarlo así en `doctor`).
+- **Grupo B — por lenguaje (launch/init server-específico):** **Java (`jdtls`)** ✅ hecho
+  (M11b: workspace dedicado + JVM + `initializationOptions`, vía el hook `workspace`/`init_options`
+  del cliente); **C# (`csharp-ls`)** ✅ hecho (M11c: single-binary por stdio, config-only pese a ser
+  project-aware; OmniSharp queda como alternativa pesada).
+- **Grupo C — nicho / parcial:** **PHP (`intelephense` [node] o `phpactor`)** ✅ y **R
+  (`languageserver`, vía R)** ✅ hechos (M11d, config-only). **VB** y **Assembly** no tienen LSP
+  standalone práctico → se quedan **symbols-only** permanente (marcado así en `doctor`).
 
-**Orden sugerido:** M11a = Grupo A (Go/Rust/C/C++) en una corrida · M11b = Java · M11c = C# ·
-M11d = PHP/R. Cada sub-hito con su **instalable en `doctor`** (respetando entorno/OS, como
-`ts-lsp`) y su **test** (fixture mínimo: un símbolo tipado + un error → el server devuelve
-`resolved_type` y ≥1 diagnóstico; skip limpio si el server no está, como hoy).
+**Orden ejecutado:** ~~M11a = Grupo A (Go/Rust/C/C++)~~ ✅ · ~~M11b = Java~~ ✅ · ~~M11c = C#~~ ✅ ·
+~~M11d = PHP/R (Grupo C)~~ ✅. Cada sub-hito entró con su **detectable en `doctor`** (respetando
+entorno/OS) y su **test** (mapeo de extensión, reporte por lenguaje supported con hint, skip
+limpio si el server no está). Los servers de M11 se **detectan y sugieren** (no se auto-instalan,
+por ser toolchain/OS-específicos): el hint dice qué correr; ejecutar la instalación queda al
+usuario.
 
-**Riesgo/Esfuerzo.** Grupo A: **bajo** (config + tests, sin motor nuevo). Grupo B: **medio-alto**
-(init por server). Reutiliza todo el andamiaje existente (cliente efímero, mapeo a `runtime_node`,
-degradación elegante): el grueso es "conectar server + instalable + test", no lógica nueva.
+**Riesgo/Esfuerzo (retrospectiva).** Grupo A/C#/PHP/R: **bajo** (config + tests, sin motor
+nuevo). Grupo B (Java): **medio** — la única lógica nueva fue el hook `workspace`/`init_options`
+del cliente, que luego C# ni siquiera necesitó. Todo reutilizó el andamiaje existente (cliente
+efímero, mapeo a `runtime_node`, degradación elegante).
 
 ---
 

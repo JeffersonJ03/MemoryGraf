@@ -155,6 +155,82 @@ def _ts_lsp_install_command() -> list[str]:
     return ["npm", "install", "-g", "typescript-language-server", "typescript"]
 
 
+# M11a · Grupo A — language-servers de Go/Rust/C/C++. Se DETECTAN (shutil.which) igual
+# que ts-lsp, pero NO se auto-instalan: cada uno depende de un toolchain/gestor externo
+# (Go, rustup, apt/brew/winget) que varía por SO. Coherente con la honestidad del
+# proyecto, `doctor` MUESTRA el comando correcto y deja la instalación al usuario.
+def _has_gopls() -> bool:
+    return shutil.which("gopls") is not None
+
+
+def _has_rust_analyzer() -> bool:
+    return shutil.which("rust-analyzer") is not None
+
+
+def _has_clangd() -> bool:
+    return shutil.which("clangd") is not None
+
+
+def _clangd_install_hint() -> str:
+    """Comando para instalar clangd (paquete de sistema), según la plataforma."""
+    from . import ollama_setup
+    plat = ollama_setup.detect_platform()   # windows | macos | wsl | linux
+    if plat == "windows":
+        return "winget install LLVM.LLVM   (incluye clangd)"
+    if plat == "macos":
+        return "brew install llvm   (incluye clangd)"
+    return "sudo apt install clangd   (Debian/Ubuntu · o el paquete clang/llvm de tu distro)"
+
+
+# M11b · Grupo B — jdtls (Eclipse JDT LS). No es single-binary trivial: corre sobre JVM
+# (JDK 17+) y suele instalarse por gestor o descarga. Igual que el Grupo A: se detecta y
+# se muestra el comando por plataforma, no se auto-instala.
+def _has_jdtls() -> bool:
+    return shutil.which("jdtls") is not None
+
+
+def _jdtls_install_hint() -> str:
+    """Cómo obtener jdtls según la plataforma (requiere JDK 17+ en el PATH)."""
+    from . import ollama_setup
+    plat = ollama_setup.detect_platform()   # windows | macos | wsl | linux
+    if plat == "windows":
+        return "choco install jdtls   (o descarga Eclipse JDT LS · requiere JDK 17+)"
+    if plat == "macos":
+        return "brew install jdtls   (requiere JDK 17+)"
+    return ("descarga Eclipse JDT LS o instálalo por gestor (coursier/mason) · "
+            "requiere JDK 17+")
+
+
+# M11c · C# — csharp-ls es una herramienta global de .NET (`dotnet tool`), cross-platform:
+# el comando es uniforme, solo exige el .NET SDK. Igual que el resto: se detecta y se sugiere,
+# no se auto-instala. (OmniSharp es la alternativa pesada; ver docs.)
+def _has_csharp_ls() -> bool:
+    return shutil.which("csharp-ls") is not None
+
+
+def _csharp_install_hint() -> str:
+    return "dotnet tool install --global csharp-ls   (requiere .NET SDK; alt.: OmniSharp)"
+
+
+# M11d · Grupo C. PHP: intelephense (Node) es el más usado; phpactor como alternativa.
+# R: no hay binario LSP propio, el paquete `languageserver` corre a través de R — detectamos
+# R en el PATH y recordamos instalar el paquete (si falta, el server no arranca y se omite).
+def _has_php_ls() -> bool:
+    return shutil.which("intelephense") is not None or shutil.which("phpactor") is not None
+
+
+def _has_r_ls() -> bool:
+    return shutil.which("Rscript") is not None or shutil.which("R") is not None
+
+
+def _php_install_hint() -> str:
+    return "npm i -g intelephense   (requiere Node.js; alt.: phpactor)"
+
+
+def _r_install_hint() -> str:
+    return "instala R y el paquete: Rscript -e 'install.packages(\"languageserver\")'"
+
+
 # Escaneo de lenguajes del proyecto (para el reporte LSP por-lenguaje).
 _TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 _SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist",
@@ -229,13 +305,32 @@ _TS_LSP_CAP = {
 # Todo lo instalable por `doctor --install <clave>` (capacidades pip + ts-lsp por npm).
 _INSTALLABLE = {**_CAP_BY_KEY, "ts-lsp": _TS_LSP_CAP}
 
-# MemoryGraf tiene capa LSP SOLO para estos lenguajes; el resto que indexa
-# (tree-sitter: Go, Rust, C, Java…) tiene símbolos pero NO diagnósticos/tipos LSP.
+# Lenguajes con capa LSP en MemoryGraf. Python y TS/JS tienen instalador propio
+# (`--install`); el Grupo A (M11a: Go/Rust/C/C++), Java (M11b, jdtls), C# (M11c, csharp-ls) y
+# PHP/R (M11d) también tienen capa LSP, pero su language-server es toolchain/OS-específico → no
+# se auto-instala (`install_key=None`): `doctor` muestra el comando correcto vía `hint`. Solo
+# VB y Assembly quedan sin capa LSP (símbolos sí, tipos no): no hay LSP standalone práctico.
 _LSP_SUPPORTED = {
     "python": {"label": "Python", "detect": lambda: _has_lsp() or _has_pyright(),
                "install_key": "lsp"},
     "typescript": {"label": "TypeScript/JS", "detect": lambda: _has_ts_lsp(),
                    "install_key": "ts-lsp"},
+    "go": {"label": "Go", "detect": _has_gopls, "install_key": None,
+           "hint": lambda: "go install golang.org/x/tools/gopls@latest   (requiere Go)"},
+    "rust": {"label": "Rust", "detect": _has_rust_analyzer, "install_key": None,
+             "hint": lambda: "rustup component add rust-analyzer   (requiere rustup)"},
+    "c": {"label": "C", "detect": _has_clangd, "install_key": None,
+          "hint": _clangd_install_hint},
+    "cpp": {"label": "C++", "detect": _has_clangd, "install_key": None,
+            "hint": _clangd_install_hint},
+    "java": {"label": "Java", "detect": _has_jdtls, "install_key": None,
+             "hint": _jdtls_install_hint},   # M11b
+    "csharp": {"label": "C#", "detect": _has_csharp_ls, "install_key": None,
+               "hint": _csharp_install_hint},   # M11c
+    "php": {"label": "PHP", "detect": _has_php_ls, "install_key": None,
+            "hint": _php_install_hint},          # M11d
+    "r": {"label": "R", "detect": _has_r_ls, "install_key": None,
+          "hint": _r_install_hint},              # M11d
 }
 
 
@@ -285,8 +380,15 @@ def lsp_language_report(config: dict | None) -> list:
                         "install_key": spec["install_key"],
                         "install": f"memorygraf doctor --install {spec['install_key']}"})
     for lg in sorted(langs["other"]):
-        out.append({"lang": lg, "supported": False, "ok": False,
-                    "install_key": None, "install": None})
+        spec = _LSP_SUPPORTED.get(lg)
+        if spec:   # M11a: Go/Rust/C/C++ tienen LSP, pero el server no se auto-instala
+            out.append({"lang": spec["label"], "supported": True,
+                        "ok": bool(spec["detect"]()),
+                        "install_key": None,
+                        "install": spec["hint"]()})
+        else:
+            out.append({"lang": lg, "supported": False, "ok": False,
+                        "install_key": None, "install": None})
     return out
 
 
@@ -470,7 +572,8 @@ def _render_lsp_langs(report: list, log=print) -> None:
     if not report:
         return
     log("")
-    log("  LSP por lenguaje del proyecto (MemoryGraf cubre LSP solo para Python y TS/JS):")
+    log("  LSP por lenguaje del proyecto (MemoryGraf cubre LSP para Python, TS/JS, "
+        "Go, Rust, C/C++, Java, C#, PHP y R):")
     for r in report:
         if not r["supported"]:
             log(f"    [–] {r['lang']:<14} indexado (símbolos) · SIN capa LSP en MemoryGraf")
