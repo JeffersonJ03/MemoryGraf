@@ -22,6 +22,11 @@ def _loc(n: dict) -> str:
     return n["path"]
 
 
+def _fid(n: dict | None) -> str | None:
+    """File id de respaldo de un nodo (file o symbol): su campo `path` ya lo es."""
+    return n.get("path") if n else None
+
+
 def _runtime_line(rt: dict) -> str:
     """Línea compacta de verdad de runtime: cobertura, estado de test, diagnósticos."""
     import json as _json
@@ -85,6 +90,8 @@ class Query:
     def __init__(self, store: Store):
         self.store = store
         self._searcher = None  # SemanticSearcher perezoso
+        self._fresh_obj = None  # Staleness cacheado (TTL corto)
+        self._fresh_ts = 0.0
 
     @property
     def searcher(self):
@@ -93,10 +100,27 @@ class Query:
             self._searcher = SemanticSearcher(self.store)
         return self._searcher
 
+    def _fresh(self):
+        """Frescura del grafo, recalculada como mucho cada 2 s (barata pero no gratis).
+
+        El TTL evita re-lanzar `git` en ráfagas de consultas del mismo cliente MCP,
+        sin dejar de detectar commits nuevos entre tareas.
+        """
+        import time
+        from . import staleness
+        now = time.monotonic()
+        if self._fresh_obj is None or now - self._fresh_ts > staleness.ttl_seconds(self.store):
+            self._fresh_obj = staleness.Staleness(self.store)
+            self._fresh_ts = now
+        return self._fresh_obj
+
     # --- overview: mapa de alto nivel; reemplaza volcar CLAUDE.md entero ---
     def overview(self, scope: str | None = None, budget_tokens: int = 1500) -> str:
         st = self.store.stats()
         lines = ["# MemoryGraf overview"]
+        banner = self._fresh().banner()
+        if banner:
+            lines.append(banner)
         lines.append(f"proyectos: {', '.join(f'{k}={v}' for k,v in st['nodes_by_project'].items() if k)}")
         lines.append(f"nodos={st['nodes_total']} aristas={st['edges_total']}")
         lines.append("")
@@ -142,13 +166,17 @@ class Query:
                 mode += "+rerank"
             by_id = {n["id"]: n for n in results}
             results = [by_id[i] for i in order if i in by_id]
+        fresh = self._fresh()
         lines = [f"# search: {query}  ({len(results)} resultados · {mode})"]
+        banner = fresh.banner()
+        if banner:
+            lines.append(banner)
         for n in results:
             loc = _loc(n)
             tag = f"[{n['type']}]"
             extra = f" {n['signature']}" if n.get("signature") else ""
             s = f" — {n['summary']}" if n.get("summary") else ""
-            lines.append(f"- {tag} {n['name']}{extra}  @{loc}{s}")
+            lines.append(f"- {tag} {n['name']}{extra}  @{loc}{s}{fresh.marker(_fid(n))}")
         return _budget("\n".join(lines), budget_tokens)
 
     def _hybrid_search(self, query: str, types, limit: int):
@@ -195,7 +223,7 @@ class Query:
         if not node:
             return f"(nodo no encontrado: {node_id})"
         edges = self.store.neighbors(node_id, edge_types=edge_types)
-        lines = [f"# neighbors: {node['name']} @{_loc(node)}",
+        lines = [f"# neighbors: {node['name']} @{_loc(node)}{self._fresh().marker(_fid(node))}",
                  f"({len(edges)} relaciones)"]
         from . import confidence
         def _conf(e):   # marca solo las deducidas (INFERRED/AMBIGUOUS); EXTRACTED = default
@@ -272,6 +300,9 @@ class Query:
             lines.append(f"git: {g['churn']} cambios{frag}"
                          + (f", edad {age}d" if age is not None else "")
                          + (f", últ. {g['last_changed']}" if g.get("last_changed") else ""))
+        marker = self._fresh().marker(_fid(n)).strip()
+        if marker:
+            lines.append(f"frescura: {marker.lstrip('⚠ ').strip()}")
         rt = self.store.runtime_node_get(node_id)
         if rt:
             lines.append(_runtime_line(rt))
@@ -287,7 +318,11 @@ class Query:
         if not ws["dirty"] and not ws["recent"]:
             return ("(working set vacío: sin cambios sin commitear y sin historia Git. "
                     "¿Falta 'memorygraf sync' o no es un repo git?)")
+        fresh = self._fresh()
         lines = ["# working_set — qué se está tocando ahora"]
+        banner = fresh.banner()
+        if banner:
+            lines.append(banner)
         if ws["dirty"]:
             lines.append(f"## sin commitear ({len(ws['dirty'])})")
             for fid in ws["dirty"]:
@@ -297,7 +332,7 @@ class Query:
         if ws["recent"]:
             lines.append("## cambiados recientemente")
             for fid, last, churn in ws["recent"]:
-                lines.append(f"- {fid}  (últ. {last}, {churn} cambios)")
+                lines.append(f"- {fid}  (últ. {last}, {churn} cambios){fresh.marker(fid)}")
         return _budget("\n".join(lines), budget_tokens)
 
     # --- impact: llamadas estáticas ∪ co-cambio (predice mejor el impacto) ---
@@ -338,8 +373,10 @@ class Query:
             nid, reasons = item
             has_co = any(r.startswith("co-cambio") for r in reasons)
             return (0 if has_co else 1, nid)
+        fresh = self._fresh()
         if why:
-            lines = [f"# impact: {node['name']} @{_loc(node)}  ({len(why)} nodos, prof {depth})",
+            lines = [f"# impact: {node['name']} @{_loc(node)}  ({len(why)} nodos, prof {depth})"
+                     f"{fresh.marker(_fid(node))}",
                      "# unión de llamadas/imports estáticos ∪ co-cambio (Git)"]
             from . import context_compiler
             for nid, reasons in sorted(why.items(), key=_rank):
@@ -347,7 +384,8 @@ class Query:
                 nm = tgt["name"] if tgt else nid
                 loc = _loc(tgt) if tgt else ""
                 tag = _runtime_tag(self.store, nid)   # ¿seguro de cambiar el afectado?
-                lines.append(f"- {nm}  @{loc}  [{', '.join(sorted(reasons))}]{tag}")
+                lines.append(f"- {nm}  @{loc}  [{', '.join(sorted(reasons))}]{tag}"
+                             f"{fresh.marker(_fid(tgt))}")
                 if any(r.startswith("co-cambio") for r in reasons):
                     note = context_compiler.cochange_note(self.store, node_id, nid)
                     if note:
@@ -416,7 +454,7 @@ class Query:
             return (f"# history: {node['name']} @{_loc(node)}\n"
                     "(sin historia Git; ¿repo sin commits o capa temporal desactivada?)")
         age = git_layer.age_days(g.get("first_changed"))
-        lines = [f"# history: {node['name']} @{_loc(node)}",
+        lines = [f"# history: {node['name']} @{_loc(node)}{self._fresh().marker(_fid(node))}",
                  f"cambios (churn): {g['churn']}"
                  + (f" · fragilidad (fix): {g['fix_touches']}" if g.get("fix_touches") else "")
                  + (f" · edad: {age}d" if age is not None else "")]
@@ -454,6 +492,12 @@ class Query:
                 note = context_compiler.cochange_note(self.store, node_id, other)
                 lines.append(f"  {nm} ({strength})" + (f" ↳ {note}" if note else ""))
         return _budget("\n".join(lines), budget_tokens)
+
+    # --- stats: métricas del grafo + frescura (¿está el índice al día?) ---
+    def stats(self) -> dict:
+        st = self.store.stats()
+        st["freshness"] = self._fresh().as_dict()
+        return st
 
 
 def _budget(text: str, budget_tokens: int) -> str:

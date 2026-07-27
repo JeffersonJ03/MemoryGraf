@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
 from memorygraf.store import Store
 from memorygraf.indexer import Indexer
@@ -2518,6 +2519,299 @@ class TestExtractorRobustness(Base):
         self.assertIn("proj/bad.py", ids)              # se indexa como archivo
         self.assertIn("proj/ok.py::fine", ids)         # el resto se indexa igual
         store.close()
+
+
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestStaleness(_GitRepo, Base):
+    """Señal de FRESCURA: el grafo avisa cuándo va por detrás del código (por nodo
+    y global), y queda limpio tras reindexar. Degrada en silencio sin git."""
+
+    def _indexed_store(self):
+        store, _ = self.index()
+        git_layer.sync(store, self.config)
+        store.set_meta("indexed_at", "2026-01-01T00:00:00+00:00")
+        store.commit()
+        return store
+
+    def test_fresh_after_sync_has_no_signal(self):
+        from memorygraf import staleness
+        self._init_repo()
+        self.write("app.py", "def greet(n):\n    return n\n")
+        self._commit("c1")
+        store = self._indexed_store()
+        s = staleness.Staleness(store)
+        self.assertTrue(s.enabled)
+        self.assertFalse(s.stale)
+        self.assertEqual(s.banner(), "")
+        self.assertEqual(s.marker("proj/app.py"), "")
+        store.close()
+
+    def test_commits_behind_are_counted_per_node(self):
+        from memorygraf import staleness
+        self._init_repo()
+        self.write("app.py", "def greet(n):\n    return n\n")
+        self.write("util.py", "def helper():\n    return 1\n")
+        self._commit("c1")
+        store = self._indexed_store()
+        # dos commits que tocan SOLO app.py, DESPUÉS de indexar
+        self.write("app.py", "def greet(n):\n    return n + '!'\n")
+        self._commit("c2")
+        self.write("app.py", "def greet(n):\n    return n + '!!'\n")
+        self._commit("c3")
+        s = staleness.Staleness(store)
+        self.assertTrue(s.stale)
+        self.assertEqual(s.behind_by_fid.get("proj/app.py"), 2)
+        self.assertNotIn("proj/util.py", s.behind_by_fid)  # no lo tocaron
+        self.assertIn("2 commit(s) sin reindexar", s.marker("proj/app.py"))
+        self.assertEqual(s.marker("proj/util.py"), "")      # util sigue fresco
+        self.assertIn("2 commit(s) sin reindexar", s.banner())
+        store.close()
+
+    def test_uncommitted_edit_is_flagged(self):
+        from memorygraf import staleness
+        self._init_repo()
+        self.write("app.py", "def greet(n):\n    return n\n")
+        self._commit("c1")
+        store = self._indexed_store()
+        self.write("app.py", "def greet(n):\n    return n  # editado\n")  # SIN commitear
+        s = staleness.Staleness(store)
+        self.assertIn("proj/app.py", s.dirty)
+        self.assertIn("sin commitear", s.marker("proj/app.py"))
+        self.assertEqual(s.as_dict()["uncommitted_files"], 1)
+        store.close()
+
+    def test_query_surfaces_signal_in_search_and_stats(self):
+        self._init_repo()
+        self.write("app.py", "def greet(n):\n    return n\n")
+        self._commit("c1")
+        store = self._indexed_store()
+        self.write("app.py", "def greet(n):\n    return n + '!'\n")
+        self._commit("c2")
+        q = Query(store)
+        out = q.search("greet")
+        self.assertIn("⚠", out)                       # marca por-nodo visible
+        self.assertIn("FRESCURA", out)                # banner global visible
+        self.assertFalse(q.stats()["freshness"]["fresh"])
+        store.close()
+
+    def test_commits_outside_project_subdir_are_not_counted(self):
+        # Monorepo: el proyecto es un SUBDIR; los commits que tocan otras carpetas del
+        # repo NO deben contar como "sin reindexar" (regresión del pathspec `-- .`).
+        from memorygraf import staleness
+        appdir = os.path.join(self.proj, "app")
+        os.makedirs(appdir)
+        cfg = {"projects": [{"name": "app", "root": appdir}]}
+        self._init_repo()
+        self.write("app/main.py", "def greet(n):\n    return n\n")
+        self.write("other/readme.txt", "hola\n")
+        self._commit("c1")
+        store, _ = Store(self.db), None
+        Indexer(store, cfg).index_all()
+        git_layer.sync(store, cfg)
+        store.set_meta("indexed_at", "2026-01-01T00:00:00+00:00")
+        store.commit()
+        # un commit fuera del proyecto + uno dentro
+        self.write("other/readme.txt", "cambio fuera\n")
+        self._commit("toca fuera")
+        self.write("app/main.py", "def greet(n):\n    return n + '!'\n")
+        self._commit("toca app")
+        s = staleness.Staleness(store)
+        self.assertEqual(s.total_commits, 1)                 # solo el de app/
+        self.assertEqual(s.behind_by_fid.get("app/main.py"), 1)
+        store.close()
+
+    def test_shared_repo_commit_counted_once(self):
+        # Dos proyectos en el MISMO repo: un commit que toca ambos subárboles cuenta
+        # UNA vez en el banner global (dedupe por top-level), no una por proyecto.
+        from memorygraf import staleness
+        a = os.path.join(self.proj, "a")
+        b = os.path.join(self.proj, "b")
+        os.makedirs(a); os.makedirs(b)
+        cfg = {"projects": [{"name": "a", "root": a}, {"name": "b", "root": b}]}
+        self._init_repo()
+        self.write("a/x.py", "def fa():\n    return 1\n")
+        self.write("b/y.py", "def fb():\n    return 2\n")
+        self._commit("c1")
+        store = Store(self.db)
+        Indexer(store, cfg).index_all()
+        git_layer.sync(store, cfg)
+        store.set_meta("indexed_at", "2026-01-01T00:00:00+00:00")
+        store.commit()
+        self.write("a/x.py", "def fa():\n    return 11\n")
+        self.write("b/y.py", "def fb():\n    return 22\n")
+        self._commit("toca ambos")
+        s = staleness.Staleness(store)
+        self.assertEqual(s.total_commits, 1)                 # no 2
+        self.assertEqual(s.behind_by_fid.get("a/x.py"), 1)
+        self.assertEqual(s.behind_by_fid.get("b/y.py"), 1)
+        store.close()
+
+    def test_degrades_without_git(self):
+        from memorygraf import staleness
+        # proyecto SIN repo git: la capa temporal nunca corre -> sin señal, sin romper
+        self.write("app.py", "def f():\n    return 1\n")
+        store, _ = self.index()
+        s = staleness.Staleness(store)
+        self.assertFalse(s.enabled)
+        self.assertFalse(s.stale)
+        self.assertEqual(s.banner(), "")
+        self.assertEqual(Query(store).stats()["freshness"]["fresh"], True)
+        store.close()
+
+
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestFreshnessToggle(_GitRepo, Base):
+    """La señal de frescura se puede desactivar (repos enormes) por env o config→meta."""
+
+    def _stale_store(self):
+        self._init_repo()
+        self.write("app.py", "def g(n):\n    return n\n")
+        self._commit("c1")
+        store, _ = self.index()
+        git_layer.sync(store, self.config)
+        store.set_meta("indexed_at", "2026-01-01T00:00:00+00:00")
+        store.commit()
+        self.write("app.py", "def g(n):\n    return n + '!'\n")
+        self._commit("c2")   # ahora hay 1 commit sin reindexar
+        return store
+
+    def test_env_disables(self):
+        from memorygraf import staleness
+        store = self._stale_store()
+        self.assertTrue(staleness.Staleness(store).stale)         # activa por defecto
+        with unittest.mock.patch.dict(os.environ, {"MEMORYGRAF_FRESHNESS": "off"}):
+            self.assertFalse(staleness.is_enabled(store))
+            self.assertFalse(staleness.Staleness(store).stale)    # sin señal
+        store.close()
+
+    def test_meta_disables_and_sets_ttl(self):
+        from memorygraf import staleness
+        store = self._stale_store()
+        store.set_meta("freshness_enabled", "0")
+        self.assertFalse(staleness.Staleness(store).stale)
+        store.set_meta("freshness_enabled", "1")
+        store.set_meta("freshness_ttl", "45")
+        self.assertTrue(staleness.Staleness(store).stale)
+        self.assertEqual(staleness.ttl_seconds(store), 45.0)
+        store.close()
+
+
+class TestSummaryBackendSwitch(Base):
+    """Cambiar el backend de resúmenes (p. ej. heurístico -> Ollama vía `configure`) NO
+    se aplica en el `sync` incremental; `summarize_all` debe DETECTARLO y avisar."""
+
+    def test_backend_change_is_flagged(self):
+        from memorygraf import summarizer
+        self.write("a.py", "def foo():\n    return 1\n")
+        store, _ = self.index()
+        # sync inicial: heurístico fija meta 'summarizer'
+        summarizer.summarize_all(store, config=self.config, only_missing=True)
+        self.assertEqual(store.get_meta("summarizer"), "heuristic-v1")
+        # el usuario cambia a Ollama; el sync incremental debe avisar (stale_backend)
+        cfg = {**self.config, "summary": {"backend": "ollama",
+                                          "ollama": {"model": "qwen2.5-coder:3b"}}}
+        msgs = []
+        r = summarizer.summarize_all(store, config=cfg, only_missing=True, log=msgs.append)
+        self.assertTrue(r["stale_backend"])
+        self.assertTrue(any("summarize --all" in m for m in msgs))
+        # con rebuild/only_missing=False NO avisa (regenera todo)
+        r2 = summarizer.summarize_all(store, config=cfg, only_missing=False)
+        self.assertFalse(r2["stale_backend"])
+        store.close()
+
+
+class TestConfigureLspLangAware(unittest.TestCase):
+    """La validación LSP de `configure` mira los lenguajes REALES del proyecto: un
+    proyecto TS no debe recibir un 'OK' por tener el server de Python."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="mg_cfg_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_detects_typescript(self):
+        from memorygraf import configure
+        with open(os.path.join(self.tmp, "index.ts"), "w") as f:
+            f.write("export const x = 1;\n")
+        langs = configure._project_langs({"projects": [{"name": "ts", "root": self.tmp}]})
+        self.assertEqual(langs, {"typescript"})
+
+    def test_report_lsp_flags_missing_ts_server(self):
+        from memorygraf import configure, doctor
+        with open(os.path.join(self.tmp, "index.ts"), "w") as f:
+            f.write("export const x = 1;\n")
+        cfg = {"projects": [{"name": "ts", "root": self.tmp}]}
+        msgs = []
+        with unittest.mock.patch.object(doctor, "_has_ts_lsp", return_value=False):
+            configure._report_lsp(cfg, ["lsp_on_sync"], msgs.append)
+        joined = "\n".join(msgs)
+        self.assertIn("TypeScript", joined)
+        self.assertIn("FALTA", joined)
+        # Consistente: apunta a `doctor` para instalar (no a npm crudo)
+        self.assertIn("doctor --install ts-lsp", joined)
+
+    def test_report_lsp_marks_unsupported_language(self):
+        from memorygraf import configure
+        with open(os.path.join(self.tmp, "main.go"), "w") as f:
+            f.write("package main\nfunc main() {}\n")
+        cfg = {"projects": [{"name": "go", "root": self.tmp}]}
+        msgs = []
+        configure._report_lsp(cfg, ["lsp_on_sync"], msgs.append)
+        joined = "\n".join(msgs)
+        self.assertIn("go", joined)
+        self.assertIn("NO tiene LSP", joined)
+
+
+class TestWindowsBatchExec(unittest.TestCase):
+    """En Windows nativo, npm y los *-language-server.cmd deben lanzarse vía `cmd /c`
+    (CreateProcess no corre batch files); pip/pipx/python NO se tocan (romperían con
+    specs como 'tree-sitter>=0.23')."""
+
+    def test_doctor_wraps_npm_not_pip(self):
+        from memorygraf import doctor
+        with unittest.mock.patch.object(os, "name", "nt"):
+            self.assertEqual(doctor._win_exec(["npm", "install", "-g", "x"]),
+                             ["cmd", "/c", "npm", "install", "-g", "x"])
+            self.assertEqual(doctor._win_exec([r"C:\n\foo.cmd", "a"]),
+                             ["cmd", "/c", r"C:\n\foo.cmd", "a"])
+            # pip/pipx/python NO se envuelven (el '>' de las specs rompería en cmd)
+            self.assertEqual(doctor._win_exec(["pipx", "inject", "m", "tree-sitter>=0.23"]),
+                             ["pipx", "inject", "m", "tree-sitter>=0.23"])
+            self.assertEqual(doctor._win_exec([r"C:\py\python.exe", "-m", "pip"]),
+                             [r"C:\py\python.exe", "-m", "pip"])
+        # POSIX: nunca cambia
+        with unittest.mock.patch.object(os, "name", "posix"):
+            self.assertEqual(doctor._win_exec(["npm", "i"]), ["npm", "i"])
+
+    def test_lsp_wraps_cmd_server(self):
+        from memorygraf.runtime import lsp
+        with unittest.mock.patch.object(os, "name", "nt"):
+            self.assertEqual(lsp._win_exec([r"C:\n\typescript-language-server.cmd", "--stdio"]),
+                             ["cmd", "/c", r"C:\n\typescript-language-server.cmd", "--stdio"])
+            self.assertEqual(lsp._win_exec([r"C:\py\pylsp.exe"]), [r"C:\py\pylsp.exe"])
+        with unittest.mock.patch.object(os, "name", "posix"):
+            self.assertEqual(lsp._win_exec(["/usr/bin/pylsp"]), ["/usr/bin/pylsp"])
+
+
+class TestOllamaDetection(unittest.TestCase):
+    """Detección robusta de Ollama en Windows: el binario del instalador no está en
+    el PATH de la terminal actual, así que hay que buscarlo en disco (y no romper)."""
+
+    def test_install_candidates_include_windows_paths(self):
+        from memorygraf import ollama
+        with unittest.mock.patch.object(os, "name", "nt"), \
+             unittest.mock.patch.dict(os.environ,
+                                      {"LOCALAPPDATA": r"C:\Users\x\AppData\Local"}):
+            cands = ollama._install_candidates()
+        self.assertTrue(any("Programs" in c and "Ollama" in c for c in cands))
+        self.assertTrue(all(c.endswith("ollama.exe") or c.endswith("ollama") for c in cands))
+
+    def test_helpers_never_raise(self):
+        from memorygraf import ollama
+        # No deben lanzar aunque no haya binario ni servidor.
+        self.assertIsInstance(ollama.on_path(), bool)
+        self.assertIsInstance(ollama.installed(), bool)
 
 
 if __name__ == "__main__":

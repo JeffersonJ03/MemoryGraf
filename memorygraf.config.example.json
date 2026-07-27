@@ -38,5 +38,11 @@
   "_resolver_comment": "Opcional (M9). llm=true activa el desempate LLM de calls cross-file AMBIGUAS (>1 candidato): el resolutor estático solo enlaza lo inequívoco; con esto el LLM local (usa la config de 'compiler') elige entre candidatos, con confidence baja + provenance 'llm' y fallback determinista (sin Ollama no añade nada). OFF por defecto (portabilidad). Equivale a la env MEMORYGRAF_XLINK_LLM=1.",
   "resolver": {
     "llm": false
+  },
+
+  "_freshness_comment": "Señal de FRESCURA: marca en cada respuesta cuántos commits/ediciones lleva el grafo sin reindexar (por nodo y global). ON por defecto; 'enabled':false la apaga (útil en repos ENORMES donde el 'git' por consulta moleste). 'ttl_seconds' = caché de la comprobación (2 por defecto). Equivale a las env MEMORYGRAF_FRESHNESS=off y MEMORYGRAF_FRESHNESS_TTL. Config vía 'memorygraf configure' > opción 3 (Preferencias).",
+  "freshness": {
+    "enabled": true,
+    "ttl_seconds": 2
   }
 }

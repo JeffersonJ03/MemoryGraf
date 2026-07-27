@@ -30,6 +30,36 @@ def _dep_ok(dep: str) -> bool:
     return True
 
 
+def _project_langs(cfg: dict) -> set:
+    """Lenguajes con LSP soportado presentes en el proyecto (delegado a doctor)."""
+    from . import doctor
+    d = doctor.detect_languages(cfg)
+    return {k for k in ("python", "typescript") if d[k]}
+
+
+def _report_lsp(cfg: dict, enabled_keys, log):
+    """Valida el language-server por LENGUAJE presente en el proyecto (no genérico).
+
+    Consistente con las demás dependencias: apunta a `doctor` para instalar (que sabe
+    instalar tanto el server de Python como el de TS/JS)."""
+    lsp_feats = [k for k in enabled_keys if _FEAT_BY_KEY[k].get("dep") == "lsp"]
+    if not lsp_feats:
+        return
+    from . import doctor
+    report = doctor.lsp_language_report(cfg)
+    if not report:
+        return
+    for r in report:
+        if not r["supported"]:
+            log(f"  LSP · {r['lang']}: MemoryGraf indexa símbolos pero NO tiene LSP para "
+                "este lenguaje (sin diagnósticos/tipos).")
+            continue
+        log(f"  dependencia LSP · {r['lang']}: {'OK ✓' if r['ok'] else 'FALTA ✗'}")
+        if not r["ok"]:
+            log(f"    → {r['install']}")
+    log("  (sin el servidor de un lenguaje, ese lenguaje se omite en el `sync`; el resto sigue.)")
+
+
 _DEP_LABEL = {"ollama": "Ollama (LLM local)", "lsp": "language server (pylsp/pyright)"}
 _DEP_HINT = {
     "ollama": "memorygraf setup-ollama          # instala Ollama + un modelo local",
@@ -138,9 +168,22 @@ def _deps_needed(keys) -> list:
     return out
 
 
+def _apply_hint(enabled_keys, log):
+    """Indica el/los comando(s) para APLICAR lo configurado. Clave: activar el LLM de
+    resúmenes cambia el backend, pero el `sync` incremental NO regenera los resúmenes
+    ya existentes (solo llena faltantes) -> hay que forzarlo con `summarize --all`."""
+    log("   Aplica con:  memorygraf sync")
+    if "summary_llm" in enabled_keys:
+        log("   Y para REGENERAR los resúmenes con el LLM local (el sync no rehace los")
+        log("   ya existentes):  memorygraf summarize --all   # puede tardar en CPU")
+
+
 def _report_deps(enabled_keys, log) -> int:
-    """Valida dependencias de las features activadas. Devuelve nº de dependencias faltantes."""
-    deps = _deps_needed(enabled_keys)
+    """Valida dependencias de las features activadas. Devuelve nº de dependencias faltantes.
+
+    'lsp' se valida aparte (por lenguaje del proyecto) en `_report_lsp`, así que aquí se
+    omite para no dar un 'OK' genérico engañoso."""
+    deps = [d for d in _deps_needed(enabled_keys) if d != "lsp"]
     if not deps:
         return 0
     missing = [d for d in deps if not _dep_ok(d)]
@@ -183,9 +226,10 @@ def _presets_screen(cfg, config_path, log, ask) -> int:
         log("   Activadas: " + ", ".join(_FEAT_BY_KEY[k]["title"] for k in preset["on"]))
         log("   Validando dependencias:")
         _report_deps(preset["on"], log)
+        _report_lsp(cfg, preset["on"], log)
     else:
         log("   Todo en modo portable (heurístico/offline).")
-    log("   Aplica con:  memorygraf sync")
+    _apply_hint(preset["on"], log)
     return 0
 
 
@@ -213,7 +257,53 @@ def _advanced_screen(cfg, config_path, log, ask) -> int:
     if enabled_now:
         log("   Validando dependencias de lo activado:")
         _report_deps(enabled_now, log)
+        _report_lsp(cfg, enabled_now, log)
+    _apply_hint(enabled_now, log)
+    return 0
+
+
+def _prefs_screen(cfg, config_path, log, ask) -> int:
+    """Ajustes de PREFERENCIA/rendimiento (no dependen de dependencias externas):
+    señal de frescura (on/off + TTL) e hilos de `git blame` en repos grandes."""
+    log("\nPreferencias y rendimiento (no requieren dependencias externas):")
+
+    # 1) Señal de frescura ------------------------------------------------------
+    fr = cfg.get("freshness") or {}
+    cur = fr.get("enabled", True)
+    log(f"\n  [{'ON ' if cur else 'off'}] Señal de frescura")
+    log("        Marca en cada respuesta cuántos commits/ediciones lleva el grafo sin")
+    log("        reindexar (por nodo y global). Útil casi siempre; apágala en repos")
+    log("        ENORMES donde el `git` por consulta moleste.")
+    ans = (ask("        ¿activar? (s/n, Enter=igual) > ") or "").strip().lower()
+    if ans in ("s", "si", "sí", "y", "yes"):
+        cur = True
+    elif ans in ("n", "no"):
+        cur = False
+    cfg.setdefault("freshness", {})["enabled"] = cur
+    if cur:
+        ttl = fr.get("ttl_seconds", 2)
+        a2 = (ask(f"        TTL del caché en segundos [{ttl}] (Enter=igual) > ") or "").strip()
+        if a2:
+            try:
+                cfg["freshness"]["ttl_seconds"] = max(0.0, float(a2))
+            except ValueError:
+                log("        (valor inválido; se deja como está)")
+
+    # 2) Hilos de git blame (repos grandes) ------------------------------------
+    bw = (cfg.get("git") or {}).get("blame_workers", 0)
+    log(f"\n  Hilos de 'git blame' (capa Git; acelera repos grandes) [{bw}]")
+    log("        0 = auto (min(8, cpu+2))  ·  1 = secuencial  ·  N = fija N hilos")
+    a3 = (ask("        nuevo valor (Enter=igual) > ") or "").strip()
+    if a3:
+        try:
+            cfg.setdefault("git", {})["blame_workers"] = max(0, int(a3))
+        except ValueError:
+            log("        (valor inválido; se deja como está)")
+
+    _save(config_path, cfg)
+    log(f"\n==> Preferencias guardadas: {config_path}")
     log("   Aplica con:  memorygraf sync")
+    log("   (la frescura también se puede apagar al vuelo con la env MEMORYGRAF_FRESHNESS=off)")
     return 0
 
 
@@ -230,6 +320,7 @@ def run(config_path: str | None, log=print, ask=input) -> int:
     while True:
         log("\n  1) Paquetes recomendados (elige por potencia)")
         log("  2) Opciones avanzadas (activa cada una a gusto)")
+        log("  3) Preferencias y rendimiento (frescura, repos grandes)")
         log("  0) Salir")
         try:
             choice = (ask("> ") or "").strip()
@@ -243,5 +334,7 @@ def run(config_path: str | None, log=print, ask=input) -> int:
                 return 0
         elif choice == "2":
             return _advanced_screen(cfg, config_path, log, ask)
+        elif choice == "3":
+            return _prefs_screen(cfg, config_path, log, ask)
         else:
             log("Opción inválida.")

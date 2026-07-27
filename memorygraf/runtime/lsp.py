@@ -50,6 +50,13 @@ _LANGUAGES = [
     },
 ]
 
+# Cómo instalar el language-server de cada lenguaje (para el mensaje de "omitido":
+# que el usuario sepa QUÉ instalar en vez de solo ver que se saltó).
+_INSTALL_HINT = {
+    "python": "pip install python-lsp-server   (o pyright:  npm i -g pyright)",
+    "typescript": "npm i -g typescript-language-server typescript",
+}
+
 _SEVERITY = {1: "error", 2: "warning", 3: "info", 4: "hint"}
 # etiquetas de fence/idioma a descartar al extraer la firma del hover (multi-lenguaje)
 _FENCE_TAGS = {"python", "typescript", "javascript", "typescriptreact",
@@ -63,6 +70,17 @@ def _find_lang_server(spec: dict) -> tuple | None:
         if found:
             return found, args
     return None
+
+
+def _win_exec(argv: list) -> list:
+    """En Windows nativo, `subprocess`/CreateProcess NO ejecuta archivos .cmd/.bat
+    directamente (p. ej. typescript-language-server.cmd que instala npm): hay que
+    lanzarlos vía `cmd /c`. En POSIX (Linux/macOS/WSL) no cambia nada."""
+    if os.name != "nt" or not argv:
+        return argv
+    if argv[0].lower().endswith((".cmd", ".bat")):
+        return ["cmd", "/c", *argv]
+    return argv
 
 
 def _lang_for_ext(ext: str) -> tuple:
@@ -343,7 +361,7 @@ def _run_language(store, server, files, roots, rt, log, param_provider=None,
     store (los `runtime_clear` los hace `sync` una vez, antes de todos los lenguajes)."""
     binary, args = server
     try:
-        proc = subprocess.Popen([binary, *args], stdin=subprocess.PIPE,
+        proc = subprocess.Popen(_win_exec([binary, *args]), stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
         log(f"runtime/lsp: no se pudo lanzar {os.path.basename(binary)} -> omitido")
@@ -440,9 +458,15 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
             missing.append(spec["name"])
     if not runnable:
         log(f"runtime/lsp: sin language-server para {', '.join(missing)} -> omitido")
+        for lang in missing:
+            if lang in _INSTALL_HINT:
+                log(f"           instala el servidor de {lang}:  {_INSTALL_HINT[lang]}")
         return {"enabled": False, "reason": "sin language-server", "missing": missing}
     if missing:
         log(f"runtime/lsp: sin servidor para {', '.join(missing)} (se omiten esos lenguajes)")
+        for lang in missing:
+            if lang in _INSTALL_HINT:
+                log(f"           para {lang}:  {_INSTALL_HINT[lang]}")
 
     # limpia UNA vez: en multi-lenguaje cada lenguaje solo AÑADE sus resultados
     store.runtime_clear("diagnostics")

@@ -145,10 +145,31 @@ def _pyright_install_command() -> list[str]:
     return [sys.executable, "-m", "pip", "install", "pyright"]
 
 
+def _has_ts_lsp() -> bool:
+    """Servidor LSP de TypeScript/JavaScript (no es un paquete pip: es de npm)."""
+    return shutil.which("typescript-language-server") is not None
+
+
+def _ts_lsp_install_command() -> list[str]:
+    """typescript-language-server se instala global con npm (requiere Node.js/npm)."""
+    return ["npm", "install", "-g", "typescript-language-server", "typescript"]
+
+
+# Escaneo de lenguajes del proyecto (para el reporte LSP por-lenguaje).
+_TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
+_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist",
+              "build", ".next", "out", ".memorygraf"}
+
+
 def _has_ollama() -> tuple[bool, str]:
     from . import ollama
     binary = ollama.find_binary()
-    return (bool(binary), binary or "")
+    if binary:
+        detail = binary if ollama.on_path() else f"{binary}  (reabre la terminal para el PATH)"
+        return (True, detail)
+    if ollama.server_up():   # servidor vivo aunque no ubiquemos el binario (Windows)
+        return (True, "(servidor en ejecución)")
+    return (False, "")
 
 
 # Tabla de capacidades. Las specs de paquete reflejan los extras de pyproject.toml.
@@ -195,9 +216,80 @@ _CAPS = [
 
 _CAP_BY_KEY = {c["key"]: c for c in _CAPS}
 
+# LSP de TS/JS: instalable por `doctor --install ts-lsp`, pero NO se lista como una
+# capacidad pip genérica (solo es relevante si el proyecto tiene TS/JS). Se ofrece
+# a través del reporte LSP por-lenguaje.
+_TS_LSP_CAP = {
+    "key": "ts-lsp", "pkgs": [],
+    "detect": _has_ts_lsp, "install_cmd": _ts_lsp_install_command,
+    "on": "`runtime --lsp`: diagnósticos + tipos TS/JS (typescript-language-server)",
+    "off": "LSP de TS/JS omitido (sin diagnósticos/tipos)",
+    "after": "memorygraf runtime --lsp   # (o `memorygraf sync` si 'runtime.lsp' está on)",
+}
+# Todo lo instalable por `doctor --install <clave>` (capacidades pip + ts-lsp por npm).
+_INSTALLABLE = {**_CAP_BY_KEY, "ts-lsp": _TS_LSP_CAP}
 
-def collect() -> dict:
-    """Devuelve el estado de cada capacidad (para --json o para render)."""
+# MemoryGraf tiene capa LSP SOLO para estos lenguajes; el resto que indexa
+# (tree-sitter: Go, Rust, C, Java…) tiene símbolos pero NO diagnósticos/tipos LSP.
+_LSP_SUPPORTED = {
+    "python": {"label": "Python", "detect": lambda: _has_lsp() or _has_pyright(),
+               "install": "memorygraf doctor --install lsp"},
+    "typescript": {"label": "TypeScript/JS", "detect": lambda: _has_ts_lsp(),
+                   "install": "memorygraf doctor --install ts-lsp"},
+}
+
+
+def detect_languages(config: dict | None) -> dict:
+    """Lenguajes con archivos en el proyecto: {python, typescript, other:{go,rust,…}}.
+
+    `other` = lenguajes que MemoryGraf INDEXA (tree-sitter) pero para los que NO tiene
+    capa LSP → símbolos sí, diagnósticos/tipos no (los marcamos como 'sin LSP')."""
+    from .extractors import ts_generic
+    other_by_ext = {"." + e: lang for e, lang in ts_generic._GRAMMAR_BY_EXT.items()}
+    res = {"python": False, "typescript": False, "other": set()}
+    scanned = 0
+    for p in (config or {}).get("projects", []):
+        root = p.get("root")
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+            for f in files:
+                e = os.path.splitext(f)[1].lower()
+                if e == ".py":
+                    res["python"] = True
+                elif e in _TS_EXTS:
+                    res["typescript"] = True
+                elif e in other_by_ext:
+                    res["other"].add(other_by_ext[e])
+                scanned += 1
+                if scanned > 40000:   # cota dura: no barrer proyectos gigantes sin fin
+                    return res
+    return res
+
+
+def lsp_language_report(config: dict | None) -> list:
+    """Estado LSP por lenguaje presente en el proyecto (para doctor y configure).
+
+    Cada item: {lang, supported, ok, install}. `supported=False` = MemoryGraf no tiene
+    LSP para ese lenguaje (incompatibilidad honesta, no un fallo de instalación)."""
+    langs = detect_languages(config)
+    out = []
+    for key in ("python", "typescript"):
+        if langs[key]:
+            spec = _LSP_SUPPORTED[key]
+            out.append({"lang": spec["label"], "supported": True,
+                        "ok": bool(spec["detect"]()), "install": spec["install"]})
+    for lg in sorted(langs["other"]):
+        out.append({"lang": lg, "supported": False, "ok": False, "install": None})
+    return out
+
+
+def collect(config: dict | None = None) -> dict:
+    """Devuelve el estado de cada capacidad (para --json o para render).
+
+    Si se pasa `config` (proyecto), añade `lsp_langs`: el estado LSP por lenguaje
+    presente, incluidos los que MemoryGraf indexa pero no cubre con LSP."""
     caps = []
     for c in _CAPS:
         active = bool(c["detect"]())
@@ -215,6 +307,7 @@ def collect() -> dict:
         "environment": _environment(),
         "platform": _platform_label(),
         "capabilities": caps,
+        "lsp_langs": lsp_language_report(config) if config else [],
         "ollama": {
             "active": ollama_ok,
             "binary": ollama_bin,
@@ -228,12 +321,29 @@ def collect() -> dict:
 # --------------------------------------------------------------------------- #
 # Instalación (consciente del entorno)
 # --------------------------------------------------------------------------- #
+def _win_exec(argv: list[str]) -> list[str]:
+    """Envuelve para Windows SOLO los comandos batch que usamos (npm, *.cmd/.bat): en
+    Windows nativo `subprocess`/CreateProcess no corre archivos .cmd/.bat directamente,
+    hay que pasar por `cmd /c`. NO se envuelven pip/pipx/python (subprocess les añade
+    .exe solo, y `cmd /c` rompería specs como 'tree-sitter>=0.23' por el '>'). POSIX: sin
+    cambios."""
+    if os.name != "nt" or not argv:
+        return argv
+    exe = argv[0].lower()
+    if exe == "npm" or exe.endswith((".cmd", ".bat")):
+        return ["cmd", "/c", *argv]
+    return argv
+
+
 def _run_install(cmd: list[str], log=print) -> bool:
     log(f"==> {' '.join(_shq(a) for a in cmd)}")
     try:
-        rc = subprocess.call(cmd)
-    except FileNotFoundError as e:
-        log(f"!! No se encontró el ejecutable ({e}). ¿Está pipx en el PATH?")
+        rc = subprocess.call(_win_exec(cmd))
+    except FileNotFoundError:
+        exe = cmd[0] if cmd else "?"
+        extra = " (instala Node.js para tener npm)" if exe == "npm" else \
+                " (¿está en el PATH?)"
+        log(f"!! No se encontró el ejecutable '{exe}'{extra}.")
         return False
     if rc != 0:
         log(f"!! La instalación falló (código {rc}).")
@@ -252,7 +362,7 @@ def install_keys(keys: list[str], log=print) -> int:
 
     Agrupa las extras pip por defecto en UN comando; las que traen `install_cmd` propio
     (p.ej. pyright: app pipx) se ejecutan aparte."""
-    keys = [k for k in keys if k in _CAP_BY_KEY]
+    keys = [k for k in keys if k in _INSTALLABLE]
     if not keys:
         log("==> Nada que instalar.")
         return 0
@@ -260,7 +370,7 @@ def install_keys(keys: list[str], log=print) -> int:
     default_pkgs: list[str] = []
     commands: list[list[str]] = []
     for k in keys:
-        cap = _CAP_BY_KEY[k]
+        cap = _INSTALLABLE[k]
         if cap.get("install_cmd"):
             commands.append(_cap_command(cap))
         else:
@@ -280,11 +390,11 @@ def install_keys(keys: list[str], log=print) -> int:
     log("==> Instalado. Verificación:")
     all_ok = True
     for k in keys:
-        ok = bool(_CAP_BY_KEY[k]["detect"]())
+        ok = bool(_INSTALLABLE[k]["detect"]())
         all_ok = all_ok and ok
         mark = "✓" if ok else "·"
         log(f"  [{mark}] {k}: {'activo' if ok else 'aún no detectado (reabre la terminal y reintenta)'}")
-        log(f"      siguiente: {_CAP_BY_KEY[k]['after']}")
+        log(f"      siguiente: {_INSTALLABLE[k]['after']}")
     return 0 if all_ok else 1
 
 
@@ -346,15 +456,44 @@ def _render(data: dict, log=print) -> None:
     state = "POTENCIA" if oll["active"] else "portable"
     detail = oll["enables"] if oll["active"] else oll["fallback"]
     log(f"  [{mark}] {'ollama':<8} {state:<9} {detail}")
+    _render_lsp_langs(data.get("lsp_langs") or [], log)
+
+
+def _render_lsp_langs(report: list, log=print) -> None:
+    """LSP por lenguaje del proyecto: qué servidor falta y qué lenguajes MemoryGraf no
+    cubre con LSP (indexa símbolos pero no diagnósticos/tipos)."""
+    if not report:
+        return
+    log("")
+    log("  LSP por lenguaje del proyecto (MemoryGraf cubre LSP solo para Python y TS/JS):")
+    for r in report:
+        if not r["supported"]:
+            log(f"    [–] {r['lang']:<14} indexado (símbolos) · SIN capa LSP en MemoryGraf")
+            continue
+        mark = "✓" if r["ok"] else "✗"
+        state = "servidor OK" if r["ok"] else "FALTA el language-server"
+        log(f"    [{mark}] {r['lang']:<14} {state}")
+        if not r["ok"]:
+            log(f"        → {r['install']}")
 
 
 def run(as_json: bool = False, install: str | None = None,
-        log=print, ask=input, is_tty: bool | None = None) -> int:
+        log=print, ask=input, is_tty: bool | None = None,
+        config: dict | None = None) -> int:
     """Reporta y (opcional/interactivo) activa capacidades faltantes.
 
     install:  None -> interactivo si hay TTY; "all" o "a,b" -> instala sin preguntar.
+    config:   proyecto (para el reporte LSP por-lenguaje). Si None, se resuelve
+              best-effort desde el workspace; sin proyecto, se omite esa sección.
     """
-    data = collect()
+    if config is None:
+        try:
+            from . import workspace
+            cp = workspace.resolve_config_path(None)
+            config = workspace.load_config(cp) if cp else None
+        except Exception:
+            config = None
+    data = collect(config)
     if as_json:
         log(json.dumps(data, ensure_ascii=False, indent=2))
         return 0
@@ -377,11 +516,16 @@ def run(as_json: bool = False, install: str | None = None,
 
     # ¿Qué activar?
     if install is not None:
-        keys = _parse_selection(install, missing_keys)
+        # 'all' = solo las capacidades pip faltantes (no arrastra ts-lsp/npm).
+        # Claves explícitas: se permite cualquier instalable, incl. 'ts-lsp'.
+        if install.strip().lower() in ("a", "all", "todas", "todo", "*"):
+            keys = list(missing_keys)
+        else:
+            keys = _parse_selection(install, list(_INSTALLABLE))
         if not keys:
             log("")
-            log(f"'--install {install}' no coincide con nada pendiente "
-                f"({', '.join(missing_keys)}).")
+            log(f"'--install {install}' no coincide con nada instalable "
+                f"({', '.join(_INSTALLABLE)}).")
             return 0
     else:
         if is_tty is None:
