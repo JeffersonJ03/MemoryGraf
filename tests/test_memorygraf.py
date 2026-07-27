@@ -1069,6 +1069,27 @@ class TestGroupALspHints(unittest.TestCase):
         for key in ("csharp-ls", "csharp-lsp", "omnisharp"):
             self.assertNotIn(key, doctor._INSTALLABLE)
 
+    def test_php_and_r_reported_supported(self):
+        # M11d: PHP (intelephense) y R (languageserver) pasan a soportados; sin server
+        # salen FALTA con su hint, y ninguno es clave de --install
+        from memorygraf import doctor
+        with open(os.path.join(self.tmp, "index.php"), "w") as f:
+            f.write("<?php function suma($a, $b) { return $a + $b; }\n")
+        with open(os.path.join(self.tmp, "main.R"), "w") as f:
+            f.write("suma <- function(a, b) a + b\n")
+        cfg = {"projects": [{"name": "p", "root": self.tmp}]}
+        with unittest.mock.patch.object(doctor, "_has_php_ls", return_value=False), \
+             unittest.mock.patch.object(doctor, "_has_r_ls", return_value=False):
+            report = {r["lang"]: r for r in doctor.lsp_language_report(cfg)}
+        for lang, needle in (("PHP", "intelephense"), ("R", "languageserver")):
+            self.assertIn(lang, report)
+            self.assertTrue(report[lang]["supported"])
+            self.assertFalse(report[lang]["ok"])
+            self.assertIsNone(report[lang]["install_key"])
+            self.assertIn(needle, report[lang]["install"])
+        for key in ("intelephense", "php-lsp", "r-lsp", "languageserver"):
+            self.assertNotIn(key, doctor._INSTALLABLE)
+
 
 def _git_available() -> bool:
     try:
@@ -2101,6 +2122,10 @@ class TestRuntimeLsp(Base):
         self.assertEqual(lsp._lang_for_ext(".java")[1], "java")
         # M11c · C# (csharp-ls)
         self.assertEqual(lsp._lang_for_ext(".cs")[1], "csharp")
+        # M11d · Grupo C — PHP (intelephense) y R (languageserver vía R)
+        self.assertEqual(lsp._lang_for_ext(".php")[1], "php")
+        self.assertEqual(lsp._lang_for_ext(".r")[1], "r")
+        self.assertEqual(lsp._lang_for_ext(".R")[1], "r")   # la ext se normaliza a minúsculas
         self.assertEqual(lsp._lang_for_ext(".rb"), (None, None))
         # el server de cada lenguaje: None o (binario, args)
         for spec in lsp._LANGUAGES:
@@ -3065,16 +3090,16 @@ class TestConfigureLspLangAware(unittest.TestCase):
         self.assertIn("doctor --install ts-lsp", joined)
 
     def test_report_lsp_marks_unsupported_language(self):
-        # PHP sigue SIN capa LSP en MemoryGraf (indexa símbolos, no diagnósticos/tipos)
-        # hasta M11d. Sirve de canario de la degradación honesta por lenguaje.
+        # VB no tiene LSP standalone práctico → queda symbols-only PERMANENTE. Canario
+        # de la degradación honesta por lenguaje (MemoryGraf indexa símbolos, no tipos).
         from memorygraf import configure
-        with open(os.path.join(self.tmp, "index.php"), "w") as f:
-            f.write("<?php function suma($a, $b) { return $a + $b; }\n")
-        cfg = {"projects": [{"name": "php", "root": self.tmp}]}
+        with open(os.path.join(self.tmp, "Mod.vb"), "w") as f:
+            f.write("Module Mod\n  Sub Main()\n  End Sub\nEnd Module\n")
+        cfg = {"projects": [{"name": "vb", "root": self.tmp}]}
         msgs = []
         configure._report_lsp(cfg, ["lsp_on_sync"], msgs.append)
         joined = "\n".join(msgs)
-        self.assertIn("php", joined)
+        self.assertIn("vb", joined)
         self.assertIn("NO tiene LSP", joined)
 
     def test_report_lsp_marks_group_a_supported(self):

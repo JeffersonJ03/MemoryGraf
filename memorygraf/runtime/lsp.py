@@ -90,6 +90,23 @@ _LANGUAGES = [
         "servers": [("csharp-ls", [])],
         "ext_lang": {".cs": "csharp"},
     },
+    # M11d · Grupo C — config-only:
+    # PHP → intelephense (Node, `--stdio`), el más usado; phpactor como alternativa.
+    {
+        "name": "php",
+        "servers": [("intelephense", ["--stdio"]),
+                    ("phpactor", ["language-server"])],
+        "ext_lang": {".php": "php"},
+    },
+    # R → no hay binario LSP propio: el paquete `languageserver` se ejecuta a través de R
+    # (Rscript/R). Si R está pero falta el paquete, el server no arranca → se omite en
+    # silencio (degradación elegante). `doctor` recuerda instalar el paquete.
+    {
+        "name": "r",
+        "servers": [("Rscript", ["-e", "languageserver::run()"]),
+                    ("R", ["--slave", "-e", "languageserver::run()"])],
+        "ext_lang": {".r": "r"},
+    },
 ]
 
 # Cómo instalar el language-server de cada lenguaje (para el mensaje de "omitido":
@@ -105,13 +122,17 @@ _INSTALL_HINT = {
     "java": "instala jdtls (brew/apt/descarga · requiere JDK 17+ · ver `memorygraf doctor`)",
     # M11c:
     "csharp": "dotnet tool install --global csharp-ls   (requiere .NET SDK)",
+    # M11d · Grupo C:
+    "php": "npm i -g intelephense   (requiere Node.js; alt.: phpactor)",
+    "r": "Rscript -e 'install.packages(\"languageserver\")'   (requiere R)",
 }
 
 _SEVERITY = {1: "error", 2: "warning", 3: "info", 4: "hint"}
 # etiquetas de fence/idioma a descartar al extraer la firma del hover (multi-lenguaje)
 _FENCE_TAGS = {"python", "typescript", "javascript", "typescriptreact",
                "javascriptreact", "ts", "js", "tsx", "jsx", "text", "plaintext",
-               "go", "rust", "rs", "c", "cpp", "c++", "java", "csharp", "c#"}
+               "go", "rust", "rs", "c", "cpp", "c++", "java", "csharp", "c#",
+               "php", "r"}
 
 
 def _find_lang_server(spec: dict) -> tuple | None:
@@ -135,7 +156,11 @@ def _win_exec(argv: list) -> list:
 
 
 def _lang_for_ext(ext: str) -> tuple:
-    """(spec, languageId) para una extensión, o (None, None) si no hay soporte."""
+    """(spec, languageId) para una extensión, o (None, None) si no hay soporte.
+
+    Normaliza a minúsculas: R usa `.R` (mayúscula) canónicamente, y así no dependemos de
+    que el llamador la baje (los de `sync`/didOpen ya lo hacen; esto es defensa barata)."""
+    ext = (ext or "").lower()
     for spec in _LANGUAGES:
         if ext in spec["ext_lang"]:
             return spec, spec["ext_lang"][ext]
@@ -501,8 +526,8 @@ def _run_language(store, server, files, roots, rt, log, param_provider=None,
 
 def sync(store, config: dict, log=lambda m: None) -> dict:
     """Arranca un LSP efímero POR LENGUAJE presente, recoge diagnósticos y tipos y los
-    mapea a nodos. Multi-lenguaje (M4 + M11a/b/c): Python, TS/JS, Go, Rust, C/C++, Java y C#
-    (cada uno si su servidor está instalado; los que falten se omiten con degradación elegante)."""
+    mapea a nodos. Multi-lenguaje (M4 + M11a–d): Python, TS/JS, Go, Rust, C/C++, Java, C#, PHP
+    y R (cada uno si su servidor está instalado; los que falten se omiten con degradación elegante)."""
     rt = (config or {}).get("runtime") or {}
     if rt.get("enabled") is False or rt.get("lsp") is False:
         return {"enabled": False, "reason": "deshabilitado"}

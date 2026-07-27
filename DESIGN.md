@@ -513,15 +513,16 @@ Parsea artefactos que el proyecto YA produce (no ejecuta nada):
   (M2) desde CONTEXTOS de cobertura (`coverage json --show-contexts`), EXTRACTED.
 - **JUnit** → `last_test_status` por símbolo de test.
 - **LSP efímero** (`runtime --lsp`): `diagnostics` + `resolved_type` por símbolo y tipos por
-  **parámetro** (M4b). **Multi-lenguaje** (M4 + M11a/b/c): Python (pyright/pylsp/jedi) y TS/JS
+  **parámetro** (M4b). **Multi-lenguaje** (M4 + M11a–d): Python (pyright/pylsp/jedi) y TS/JS
   (`typescript-language-server`); pyright da la mejor calidad de tipos. **Grupo A (M11a):**
   Go (`gopls`), Rust (`rust-analyzer`) y C/C++ (`clangd`) — servers estándar por stdio.
   **Grupo B (M11b):** Java (`jdtls`) — necesita init a medida (workspace `-data <dir>` propio,
   que el cliente crea y limpia; JVM/JDK 17+). **C# (M11c):** `csharp-ls` — project-aware pero
-  single-binary por stdio, así que vuelve a ser config-only (OmniSharp es alternativa pesada).
-  Todos aportan diagnósticos + `resolved_type`; su server es toolchain/OS-específico, así que
-  `doctor` lo detecta y muestra cómo instalarlo (no lo auto-instala). El resto que MemoryGraf
-  indexa (PHP, R, VB, asm) sigue symbols-only.
+  single-binary por stdio, config-only (OmniSharp es alternativa pesada). **Grupo C (M11d):**
+  PHP (`intelephense`, alt. `phpactor`) y R (`languageserver`, ejecutado a través de R) —
+  config-only. Todos aportan diagnósticos + `resolved_type`; su server es toolchain/OS-específico,
+  así que `doctor` lo detecta y muestra cómo instalarlo (no lo auto-instala). Solo **VB** y
+  **Assembly** quedan symbols-only (no hay LSP standalone práctico); `doctor` lo marca así.
 
 ### 18.3 Capa 3 · Compilador de contexto local (`context_compiler.py`)
 

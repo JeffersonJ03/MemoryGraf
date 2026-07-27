@@ -212,6 +212,25 @@ def _csharp_install_hint() -> str:
     return "dotnet tool install --global csharp-ls   (requiere .NET SDK; alt.: OmniSharp)"
 
 
+# M11d · Grupo C. PHP: intelephense (Node) es el más usado; phpactor como alternativa.
+# R: no hay binario LSP propio, el paquete `languageserver` corre a través de R — detectamos
+# R en el PATH y recordamos instalar el paquete (si falta, el server no arranca y se omite).
+def _has_php_ls() -> bool:
+    return shutil.which("intelephense") is not None or shutil.which("phpactor") is not None
+
+
+def _has_r_ls() -> bool:
+    return shutil.which("Rscript") is not None or shutil.which("R") is not None
+
+
+def _php_install_hint() -> str:
+    return "npm i -g intelephense   (requiere Node.js; alt.: phpactor)"
+
+
+def _r_install_hint() -> str:
+    return "instala R y el paquete: Rscript -e 'install.packages(\"languageserver\")'"
+
+
 # Escaneo de lenguajes del proyecto (para el reporte LSP por-lenguaje).
 _TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 _SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist",
@@ -287,10 +306,10 @@ _TS_LSP_CAP = {
 _INSTALLABLE = {**_CAP_BY_KEY, "ts-lsp": _TS_LSP_CAP}
 
 # Lenguajes con capa LSP en MemoryGraf. Python y TS/JS tienen instalador propio
-# (`--install`); el Grupo A (M11a: Go/Rust/C/C++), Java (M11b, jdtls) y C# (M11c, csharp-ls)
-# también tienen capa LSP, pero su language-server es toolchain/OS-específico → no se
-# auto-instala (`install_key=None`): `doctor` muestra el comando correcto vía `hint`. El
-# resto que MemoryGraf indexa (PHP, R, VB, asm…) sigue sin capa LSP (símbolos sí, tipos no).
+# (`--install`); el Grupo A (M11a: Go/Rust/C/C++), Java (M11b, jdtls), C# (M11c, csharp-ls) y
+# PHP/R (M11d) también tienen capa LSP, pero su language-server es toolchain/OS-específico → no
+# se auto-instala (`install_key=None`): `doctor` muestra el comando correcto vía `hint`. Solo
+# VB y Assembly quedan sin capa LSP (símbolos sí, tipos no): no hay LSP standalone práctico.
 _LSP_SUPPORTED = {
     "python": {"label": "Python", "detect": lambda: _has_lsp() or _has_pyright(),
                "install_key": "lsp"},
@@ -308,6 +327,10 @@ _LSP_SUPPORTED = {
              "hint": _jdtls_install_hint},   # M11b
     "csharp": {"label": "C#", "detect": _has_csharp_ls, "install_key": None,
                "hint": _csharp_install_hint},   # M11c
+    "php": {"label": "PHP", "detect": _has_php_ls, "install_key": None,
+            "hint": _php_install_hint},          # M11d
+    "r": {"label": "R", "detect": _has_r_ls, "install_key": None,
+          "hint": _r_install_hint},              # M11d
 }
 
 
@@ -550,7 +573,7 @@ def _render_lsp_langs(report: list, log=print) -> None:
         return
     log("")
     log("  LSP por lenguaje del proyecto (MemoryGraf cubre LSP para Python, TS/JS, "
-        "Go, Rust, C/C++, Java y C#):")
+        "Go, Rust, C/C++, Java, C#, PHP y R):")
     for r in report:
         if not r["supported"]:
             log(f"    [–] {r['lang']:<14} indexado (símbolos) · SIN capa LSP en MemoryGraf")
