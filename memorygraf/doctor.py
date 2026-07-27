@@ -182,6 +182,25 @@ def _clangd_install_hint() -> str:
     return "sudo apt install clangd   (Debian/Ubuntu · o el paquete clang/llvm de tu distro)"
 
 
+# M11b · Grupo B — jdtls (Eclipse JDT LS). No es single-binary trivial: corre sobre JVM
+# (JDK 17+) y suele instalarse por gestor o descarga. Igual que el Grupo A: se detecta y
+# se muestra el comando por plataforma, no se auto-instala.
+def _has_jdtls() -> bool:
+    return shutil.which("jdtls") is not None
+
+
+def _jdtls_install_hint() -> str:
+    """Cómo obtener jdtls según la plataforma (requiere JDK 17+ en el PATH)."""
+    from . import ollama_setup
+    plat = ollama_setup.detect_platform()   # windows | macos | wsl | linux
+    if plat == "windows":
+        return "choco install jdtls   (o descarga Eclipse JDT LS · requiere JDK 17+)"
+    if plat == "macos":
+        return "brew install jdtls   (requiere JDK 17+)"
+    return ("descarga Eclipse JDT LS o instálalo por gestor (coursier/mason) · "
+            "requiere JDK 17+")
+
+
 # Escaneo de lenguajes del proyecto (para el reporte LSP por-lenguaje).
 _TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 _SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist",
@@ -257,10 +276,10 @@ _TS_LSP_CAP = {
 _INSTALLABLE = {**_CAP_BY_KEY, "ts-lsp": _TS_LSP_CAP}
 
 # Lenguajes con capa LSP en MemoryGraf. Python y TS/JS tienen instalador propio
-# (`--install`); el Grupo A (M11a: Go/Rust/C/C++) también tiene capa LSP, pero su
-# language-server es toolchain/OS-específico → no se auto-instala (`install_key=None`):
-# `doctor` muestra el comando correcto vía `hint`. El resto que MemoryGraf indexa
-# (Java, C#, PHP, R, VB, asm…) sigue sin capa LSP (símbolos sí, diagnósticos/tipos no).
+# (`--install`); el Grupo A (M11a: Go/Rust/C/C++) y Java (M11b, vía jdtls) también
+# tienen capa LSP, pero su language-server es toolchain/OS-específico → no se auto-instala
+# (`install_key=None`): `doctor` muestra el comando correcto vía `hint`. El resto que
+# MemoryGraf indexa (C#, PHP, R, VB, asm…) sigue sin capa LSP (símbolos sí, tipos no).
 _LSP_SUPPORTED = {
     "python": {"label": "Python", "detect": lambda: _has_lsp() or _has_pyright(),
                "install_key": "lsp"},
@@ -274,6 +293,8 @@ _LSP_SUPPORTED = {
           "hint": _clangd_install_hint},
     "cpp": {"label": "C++", "detect": _has_clangd, "install_key": None,
             "hint": _clangd_install_hint},
+    "java": {"label": "Java", "detect": _has_jdtls, "install_key": None,
+             "hint": _jdtls_install_hint},   # M11b
 }
 
 
@@ -516,7 +537,7 @@ def _render_lsp_langs(report: list, log=print) -> None:
         return
     log("")
     log("  LSP por lenguaje del proyecto (MemoryGraf cubre LSP para Python, TS/JS, "
-        "Go, Rust y C/C++):")
+        "Go, Rust, C/C++ y Java):")
     for r in report:
         if not r["supported"]:
             log(f"    [–] {r['lang']:<14} indexado (símbolos) · SIN capa LSP en MemoryGraf")

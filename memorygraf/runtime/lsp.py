@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -70,6 +71,17 @@ _LANGUAGES = [
                      ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".c++": "cpp",
                      ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp"},
     },
+    # M11b · Grupo B — server con init a medida: jdtls (Eclipse JDT LS) exige un
+    # workspace de datos propio (`-data <dir>`, lo crea/limpia _run_language) y corre
+    # sobre JVM (JDK 17+). Sin proyecto de build completo da diagnósticos acotados, pero
+    # el andamiaje (diagnostics + resolved_type + degradación elegante) es el mismo.
+    {
+        "name": "java",
+        "servers": [("jdtls", [])],
+        "ext_lang": {".java": "java"},
+        "workspace": True,                       # jdtls: -data <workspace>
+        "init_options": {"settings": {"java": {}}},
+    },
 ]
 
 # Cómo instalar el language-server de cada lenguaje (para el mensaje de "omitido":
@@ -81,13 +93,15 @@ _INSTALL_HINT = {
     "go": "go install golang.org/x/tools/gopls@latest   (requiere Go)",
     "rust": "rustup component add rust-analyzer   (requiere rustup)",
     "c/c++": "instala clangd (apt/brew/winget · ver `memorygraf doctor`)",
+    # M11b · Grupo B:
+    "java": "instala jdtls (brew/apt/descarga · requiere JDK 17+ · ver `memorygraf doctor`)",
 }
 
 _SEVERITY = {1: "error", 2: "warning", 3: "info", 4: "hint"}
 # etiquetas de fence/idioma a descartar al extraer la firma del hover (multi-lenguaje)
 _FENCE_TAGS = {"python", "typescript", "javascript", "typescriptreact",
                "javascriptreact", "ts", "js", "tsx", "jsx", "text", "plaintext",
-               "go", "rust", "rs", "c", "cpp", "c++"}
+               "go", "rust", "rs", "c", "cpp", "c++", "java"}
 
 
 def _find_lang_server(spec: dict) -> tuple | None:
@@ -382,26 +396,44 @@ def _uri(path: str) -> str:
 
 
 def _run_language(store, server, files, roots, rt, log, param_provider=None,
-                  local_provider=None) -> tuple:
+                  local_provider=None, workspace=False, init_options=None) -> tuple:
     """Ciclo LSP efímero para UN lenguaje: abre sus archivos, mapea diagnósticos y
     puebla tipos. Devuelve (archivos_abiertos, diagnósticos, tipos). Solo AÑADE al
-    store (los `runtime_clear` los hace `sync` una vez, antes de todos los lenguajes)."""
+    store (los `runtime_clear` los hace `sync` una vez, antes de todos los lenguajes).
+
+    M11b (Grupo B): algunos servers exigen init a medida:
+      - `workspace=True`: el server necesita un directorio de datos propio (p.ej. jdtls
+        con `-data <dir>`). Se crea uno TEMPORAL y se limpia al terminar.
+      - `init_options`: `initializationOptions` a enviar en el `initialize`.
+    """
     binary, args = server
+    data_dir = None
+    extra_args: list = []
+    if workspace:
+        # jdtls y similares indexan en un workspace propio; efímero y regenerable.
+        data_dir = tempfile.mkdtemp(prefix="mg_lsp_")
+        extra_args = ["-data", data_dir]
     try:
-        proc = subprocess.Popen(_win_exec([binary, *args]), stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(_win_exec([binary, *args, *extra_args]),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL)
     except OSError:
         log(f"runtime/lsp: no se pudo lanzar {os.path.basename(binary)} -> omitido")
+        if data_dir:
+            shutil.rmtree(data_dir, ignore_errors=True)
         return 0, 0, 0
 
     client = _LspClient(proc)
     root_uri = _uri(next(iter(roots.values()), "."))
     try:
-        client._send("initialize", {
+        init_params = {
             "processId": os.getpid(), "rootUri": root_uri,
             "capabilities": {"textDocument": {
                 "publishDiagnostics": {},
-                "hover": {"contentFormat": ["markdown", "plaintext"]}}}})
+                "hover": {"contentFormat": ["markdown", "plaintext"]}}}}
+        if init_options:
+            init_params["initializationOptions"] = init_options
+        client._send("initialize", init_params)
         time.sleep(0.3)
         client._send("initialized", {}, notify=True)
         opened = []
@@ -453,12 +485,14 @@ def _run_language(store, server, files, roots, rt, log, param_provider=None,
                 proc.kill()
             except Exception:
                 pass
+        if data_dir:
+            shutil.rmtree(data_dir, ignore_errors=True)
 
 
 def sync(store, config: dict, log=lambda m: None) -> dict:
     """Arranca un LSP efímero POR LENGUAJE presente, recoge diagnósticos y tipos y los
-    mapea a nodos. Multi-lenguaje (M4 + M11a): Python, TS/JS, Go, Rust y C/C++ (cada uno
-    si su servidor está instalado; los que falten se omiten con degradación elegante)."""
+    mapea a nodos. Multi-lenguaje (M4 + M11a/b): Python, TS/JS, Go, Rust, C/C++ y Java (cada
+    uno si su servidor está instalado; los que falten se omiten con degradación elegante)."""
     rt = (config or {}).get("runtime") or {}
     if rt.get("enabled") is False or rt.get("lsp") is False:
         return {"enabled": False, "reason": "deshabilitado"}
@@ -506,7 +540,9 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
     for spec, srv, files in runnable:
         f, d, t = _run_language(store, srv, files, roots, rt, log,
                                 param_provider=spec.get("params"),
-                                local_provider=spec.get("locals"))
+                                local_provider=spec.get("locals"),
+                                workspace=spec.get("workspace", False),
+                                init_options=spec.get("init_options"))
         tot_files += f
         tot_diags += d
         tot_types += t
