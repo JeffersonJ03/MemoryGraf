@@ -40,7 +40,7 @@ def is_enabled(store) -> bool:
     el último `sync` desde `freshness.enabled` (config); por defecto sí. Permite
     apagarla en repos enormes donde el coste de `git` por consulta moleste."""
     env = os.environ.get("MEMORYGRAF_FRESHNESS")
-    if env is not None:
+    if env:   # no-vacío: el env manda. Vacío ("") = sin override -> cae al meta.
         return env.strip().lower() not in _OFF
     return (store.get_meta("freshness_enabled") or "1") != "0"
 
@@ -76,11 +76,13 @@ class Staleness:
         self.total_commits = 0
         self.capped = False
         self._commits_by_top: dict[str, set] = {}  # top-level repo -> SHAs (dedupe)
-        self.indexed_at = store.get_meta("indexed_at")
+        self.indexed_at = None
         try:
+            # TODA lectura de meta va dentro del try: la frescura es un EXTRA y
+            # jamás debe tumbar una consulta (ni un get_meta con la BD bloqueada).
+            self.indexed_at = store.get_meta("indexed_at")
             self._compute(max_commits)
         except Exception:
-            # La frescura es un EXTRA: si algo falla, jamás debe tumbar una consulta.
             self.enabled = False
 
     @property
@@ -103,10 +105,10 @@ class Staleness:
         file_ids = {n["id"] for n in self._store.all_nodes(types=["file"])}
 
         for name, root in roots.items():
-            top = git_layer._toplevel(root) if os.path.isdir(root) else None
+            top = git_layer._toplevel(root, timeout=_GIT_TIMEOUT) if os.path.isdir(root) else None
             if not top:
                 continue
-            head = git_layer._head(root)
+            head = git_layer._head(root, timeout=_GIT_TIMEOUT)
             indexed = self._store.get_meta(f"git_head_sha:{name}")
             if not head or not indexed:
                 continue  # capa temporal no corrió para este repo -> no opinamos
@@ -116,7 +118,7 @@ class Staleness:
 
             if head == indexed:
                 continue
-            if not git_layer._is_ancestor(indexed, root):
+            if not git_layer._is_ancestor(indexed, root, timeout=_GIT_TIMEOUT):
                 self.rewritten.append(name)   # historia reescrita: no se puede contar
                 continue
             self._collect_behind(name, root, top, indexed, file_ids, max_commits)

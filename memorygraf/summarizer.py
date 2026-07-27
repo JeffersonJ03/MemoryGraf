@@ -329,7 +329,7 @@ def _expected_backend_name(config, store: Store) -> str | None:
     if b == "ollama":
         return f"ollama:{s['model']}"
     if b == "api":
-        return f"api:{s['api_model']}"
+        return f"llm:{s['api_model']}"   # DEBE coincidir con ApiSummarizer.name (f"llm:{model}")
     return None
 
 

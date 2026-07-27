@@ -266,9 +266,15 @@ def _prefs_screen(cfg, config_path, log, ask) -> int:
     """Ajustes de PREFERENCIA/rendimiento (no dependen de dependencias externas):
     señal de frescura (on/off + TTL) e hilos de `git blame` en repos grandes."""
     log("\nPreferencias y rendimiento (no requieren dependencias externas):")
+    # Normaliza bloques que podrían venir como null en una config a mano (setdefault
+    # NO protege contra None: devolvería None y None["k"]=... lanzaría TypeError).
+    if not isinstance(cfg.get("freshness"), dict):
+        cfg["freshness"] = {}
+    if not isinstance(cfg.get("git"), dict):
+        cfg["git"] = {}
 
     # 1) Señal de frescura ------------------------------------------------------
-    fr = cfg.get("freshness") or {}
+    fr = cfg["freshness"]
     cur = fr.get("enabled", True)
     log(f"\n  [{'ON ' if cur else 'off'}] Señal de frescura")
     log("        Marca en cada respuesta cuántos commits/ediciones lleva el grafo sin")
@@ -279,24 +285,24 @@ def _prefs_screen(cfg, config_path, log, ask) -> int:
         cur = True
     elif ans in ("n", "no"):
         cur = False
-    cfg.setdefault("freshness", {})["enabled"] = cur
+    fr["enabled"] = cur
     if cur:
         ttl = fr.get("ttl_seconds", 2)
         a2 = (ask(f"        TTL del caché en segundos [{ttl}] (Enter=igual) > ") or "").strip()
         if a2:
             try:
-                cfg["freshness"]["ttl_seconds"] = max(0.0, float(a2))
+                fr["ttl_seconds"] = max(0.0, float(a2))
             except ValueError:
                 log("        (valor inválido; se deja como está)")
 
     # 2) Hilos de git blame (repos grandes) ------------------------------------
-    bw = (cfg.get("git") or {}).get("blame_workers", 0)
+    bw = cfg["git"].get("blame_workers", 0)
     log(f"\n  Hilos de 'git blame' (capa Git; acelera repos grandes) [{bw}]")
     log("        0 = auto (min(8, cpu+2))  ·  1 = secuencial  ·  N = fija N hilos")
     a3 = (ask("        nuevo valor (Enter=igual) > ") or "").strip()
     if a3:
         try:
-            cfg.setdefault("git", {})["blame_workers"] = max(0, int(a3))
+            cfg["git"]["blame_workers"] = max(0, int(a3))
         except ValueError:
             log("        (valor inválido; se deja como está)")
 

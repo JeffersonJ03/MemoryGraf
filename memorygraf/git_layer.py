@@ -79,22 +79,22 @@ def _git(args: list, cwd: str, timeout: float | None = None) -> str | None:
     return p.stdout if p.returncode == 0 else None
 
 
-def _toplevel(root: str) -> str | None:
-    out = _git(["rev-parse", "--show-toplevel"], root)
+def _toplevel(root: str, timeout: float | None = None) -> str | None:
+    out = _git(["rev-parse", "--show-toplevel"], root, timeout=timeout)
     return out.strip() if out else None
 
 
-def _head(root: str) -> str | None:
-    out = _git(["rev-parse", "HEAD"], root)
+def _head(root: str, timeout: float | None = None) -> str | None:
+    out = _git(["rev-parse", "HEAD"], root, timeout=timeout)
     return out.strip() if out else None
 
 
-def _is_ancestor(sha: str, root: str) -> bool:
+def _is_ancestor(sha: str, root: str, timeout: float | None = None) -> bool:
     try:
         p = subprocess.run(["git", "merge-base", "--is-ancestor", sha, "HEAD"],
-                           cwd=root, capture_output=True)
+                           cwd=root, capture_output=True, timeout=timeout)
         return p.returncode == 0
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return False
 
 
