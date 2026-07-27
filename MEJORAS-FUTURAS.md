@@ -146,6 +146,46 @@ degradación elegante): el grueso es "conectar server + instalable + test", no l
 
 ---
 
+## M12 · Respetar `.gitignore` en el indexado  (PROPUESTA)
+
+**Estado (2026-07-26).** Propuesta. Hoy el descubrimiento de archivos (`indexer._iter_files`)
+filtra por **`DEFAULT_EXCLUDES` + `config.excludes`** (nombres de directorio), pero **NO
+consulta `.gitignore`**. MemoryGraf mira el **disco**, no el índice de git: por eso un dir
+gitignorado como `.next/` (build de Next.js) se indexaba igual hasta añadirlo a los defaults
+(ver commit del fix; en un Next.js real eran 476/993 nodos = 48% de ruido generado).
+
+**Problema.** `DEFAULT_EXCLUDES` es una **lista fija** que persigue frameworks uno a uno
+(`.next`, `.nuxt`, `.turbo`, …). Siempre llegará tarde al siguiente framework/dir generado.
+El propio proyecto **ya declara** qué NO es código fuente en su `.gitignore` — esa es la
+fuente de verdad natural para "esto es generado/local, no lo indexes".
+
+**Propuesta.** Filtrar también por `.gitignore` durante el descubrimiento, con degradación
+elegante y sin romper el modo portable:
+1. **Si hay git** (ya es dependencia opcional de la capa temporal): resolver los archivos
+   ignorados con `git check-ignore --stdin` (batch, rápido) o `git ls-files` sobre los
+   candidatos. Cero parsing propio de patrones → fidelidad total (negaciones `!`, `**`,
+   anclajes, `.gitignore` anidados) sin reimplementar la semántica de git.
+2. **Sin git / sin repo:** se mantiene el comportamiento actual (`DEFAULT_EXCLUDES` +
+   `config.excludes`). Nada se rompe (regla DESIGN §3.2).
+3. **Escape hatch:** algunos proyectos tienen **código fuente legítimo gitignorado** (módulos
+   locales, generado-que-sí-es-código). Config `index.respect_gitignore` (evaluar default:
+   `true` cuando hay git, pero reversible) + posibilidad de "des-ignorar" por `config` para
+   volver a incluir rutas concretas.
+
+**Interacción con lo existente.** `DEFAULT_EXCLUDES` se queda (cubre el caso sin git y da un
+mínimo sano); `.gitignore` es una capa ADICIONAL, no un reemplazo. Orden: excludes de dir
+(barato, poda ramas del `os.walk`) → luego filtro gitignore sobre los archivos que sobrevivan.
+
+**Pruebas.** Fixture con repo git: un `.ts` fuente + un `build/generado.js` gitignorado →
+el fuente entra, el gitignorado no. Sin git: cae a `DEFAULT_EXCLUDES` (el gitignorado entra
+salvo que su dir esté en la lista). `respect_gitignore=false` → comportamiento previo.
+Negación (`!keep.js`) respetada vía `git check-ignore`.
+
+**Riesgo/Esfuerzo.** Bajo-medio. Sin parser propio (delega en git) el riesgo baja mucho; el
+grueso es cablear el filtro en `_iter_files` con batch a git y el flag de config + su default.
+
+---
+
 ## 9. Validación de ENTORNO pendiente (no son features)
 
 Lo ÚNICO genuinamente pendiente. No requiere código nuevo, solo ejecutar el guion
