@@ -233,9 +233,9 @@ _INSTALLABLE = {**_CAP_BY_KEY, "ts-lsp": _TS_LSP_CAP}
 # (tree-sitter: Go, Rust, C, Java…) tiene símbolos pero NO diagnósticos/tipos LSP.
 _LSP_SUPPORTED = {
     "python": {"label": "Python", "detect": lambda: _has_lsp() or _has_pyright(),
-               "install": "memorygraf doctor --install lsp"},
+               "install_key": "lsp"},
     "typescript": {"label": "TypeScript/JS", "detect": lambda: _has_ts_lsp(),
-                   "install": "memorygraf doctor --install ts-lsp"},
+                   "install_key": "ts-lsp"},
 }
 
 
@@ -271,17 +271,22 @@ def detect_languages(config: dict | None) -> dict:
 def lsp_language_report(config: dict | None) -> list:
     """Estado LSP por lenguaje presente en el proyecto (para doctor y configure).
 
-    Cada item: {lang, supported, ok, install}. `supported=False` = MemoryGraf no tiene
-    LSP para ese lenguaje (incompatibilidad honesta, no un fallo de instalación)."""
+    Cada item: {lang, supported, ok, install_key, install}. `install_key` es la clave
+    activable desde doctor (lo que consumen la selección interactiva y `--install`);
+    `install` es su comando legible. `supported=False` = MemoryGraf no tiene LSP para
+    ese lenguaje (incompatibilidad honesta, no un fallo de instalación)."""
     langs = detect_languages(config)
     out = []
     for key in ("python", "typescript"):
         if langs[key]:
             spec = _LSP_SUPPORTED[key]
             out.append({"lang": spec["label"], "supported": True,
-                        "ok": bool(spec["detect"]()), "install": spec["install"]})
+                        "ok": bool(spec["detect"]()),
+                        "install_key": spec["install_key"],
+                        "install": f"memorygraf doctor --install {spec['install_key']}"})
     for lg in sorted(langs["other"]):
-        out.append({"lang": lg, "supported": False, "ok": False, "install": None})
+        out.append({"lang": lg, "supported": False, "ok": False,
+                    "install_key": None, "install": None})
     return out
 
 
@@ -428,7 +433,7 @@ def _prompt_selection(missing_keys: list[str], log=print, ask=input) -> list[str
     log("")
     log("¿Activar alguna ahora? Se instalará en el entorno detectado arriba.")
     for i, k in enumerate(missing_keys, 1):
-        log(f"  {i}) {k:<8} — {_CAP_BY_KEY[k]['on']}")
+        log(f"  {i}) {k:<8} — {_INSTALLABLE[k]['on']}")
     log("  a) todas")
     log("Selección [números/claves separados por coma · 'a' todas · Enter para salir]:")
     try:
@@ -500,7 +505,33 @@ def run(as_json: bool = False, install: str | None = None,
 
     _render(data, log)
 
+    # Lo activable desde aquí = capacidades pip faltantes + los language-servers que
+    # faltan para los lenguajes REALES del proyecto (p.ej. ts-lsp si hay TS/JS). Sin
+    # esto último, un proyecto TS con todo lo pip instalado se declaraba "todo en
+    # POTENCIA" mientras el reporte por-lenguaje mostraba el server ✗ FALTA.
     missing_keys = [c["key"] for c in data["capabilities"] if not c["active"]]
+    for r in data.get("lsp_langs") or []:
+        key = r.get("install_key")
+        if r["supported"] and not r["ok"] and key and key not in missing_keys:
+            missing_keys.append(key)
+
+    # --install explícito se atiende SIEMPRE, antes de cualquier corte por "no falta
+    # nada": el usuario ya dijo qué quiere instalar.
+    if install is not None:
+        if install.strip().lower() in ("a", "all", "todas", "todo", "*"):
+            keys = list(missing_keys)
+        else:
+            keys = _parse_selection(install, list(_INSTALLABLE))
+        if not keys:
+            log("")
+            if not missing_keys:
+                log("Todo en modo POTENCIA. No hay nada que activar. 🎉")
+            else:
+                log(f"'--install {install}' no coincide con nada instalable "
+                    f"({', '.join(_INSTALLABLE)}).")
+            return 0
+        return install_keys(keys, log=log)
+
     if not missing_keys and data["ollama"]["active"]:
         log("")
         log("Todo en modo POTENCIA. No hay nada que activar. 🎉")
@@ -514,34 +545,21 @@ def run(as_json: bool = False, install: str | None = None,
     if not missing_keys:
         return 0
 
-    # ¿Qué activar?
-    if install is not None:
-        # 'all' = solo las capacidades pip faltantes (no arrastra ts-lsp/npm).
-        # Claves explícitas: se permite cualquier instalable, incl. 'ts-lsp'.
-        if install.strip().lower() in ("a", "all", "todas", "todo", "*"):
-            keys = list(missing_keys)
-        else:
-            keys = _parse_selection(install, list(_INSTALLABLE))
-        if not keys:
-            log("")
-            log(f"'--install {install}' no coincide con nada instalable "
-                f"({', '.join(_INSTALLABLE)}).")
-            return 0
-    else:
-        if is_tty is None:
-            is_tty = sys.stdin.isatty()
-        if not is_tty:
-            # Sin TTY y sin --install: solo reporte + los comandos manuales.
-            log("")
-            log("Para activar lo que falta (o usa 'memorygraf doctor --install <claves>'):")
-            for c in data["capabilities"]:
-                if not c["active"]:
-                    log(f"  # {c['enables']}")
-                    log(f"  {c['install']}")
-            return 0
-        keys = _prompt_selection(missing_keys, log=log, ask=ask)
-        if not keys:
-            log("Nada seleccionado. (Puedes activar luego: memorygraf doctor)")
-            return 0
+    if is_tty is None:
+        is_tty = sys.stdin.isatty()
+    if not is_tty:
+        # Sin TTY y sin --install: solo reporte + los comandos manuales.
+        log("")
+        log("Para activar lo que falta (o usa 'memorygraf doctor --install <claves>'):")
+        for k in missing_keys:
+            cap = _INSTALLABLE[k]
+            log(f"  # {cap['on']}")
+            log(f"  {_cap_hint(cap)}")
+        return 0
+
+    keys = _prompt_selection(missing_keys, log=log, ask=ask)
+    if not keys:
+        log("Nada seleccionado. (Puedes activar luego: memorygraf doctor)")
+        return 0
 
     return install_keys(keys, log=log)

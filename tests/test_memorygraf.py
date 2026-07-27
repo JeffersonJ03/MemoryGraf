@@ -906,6 +906,78 @@ class TestDoctor(Base):
         self.assertEqual(rc, 0)
 
 
+class TestDoctorMissingLanguageServer(unittest.TestCase):
+    """Todas las capacidades pip activas, pero al proyecto (TS/JS) le falta su
+    language-server: doctor debe ofrecerlo e instalarlo, no declarar 'nada que activar'."""
+
+    CFG = {"projects": [{"root": "."}]}
+
+    def _patched(self):
+        """doctor con: todo pip+ollama en POTENCIA y solo ts-lsp faltante."""
+        from memorygraf import doctor
+
+        def collect(config=None):
+            return {
+                "python": "3.12.10", "executable": "py.exe", "environment": "pipx",
+                "platform": "windows",
+                "capabilities": [{"key": c["key"], "active": True, "enables": c["on"],
+                                  "fallback": c["off"], "install": None}
+                                 for c in doctor._CAPS],
+                "lsp_langs": [{"lang": "TypeScript/JS", "supported": True, "ok": False,
+                               "install_key": "ts-lsp",
+                               "install": "memorygraf doctor --install ts-lsp"}],
+                "ollama": {"active": True, "binary": "x", "enables": "e",
+                           "fallback": "f", "install": None},
+            }
+
+        installed: list[list[str]] = []
+        return doctor, collect, installed
+
+    def _run(self, **kwargs):
+        from unittest import mock
+        doctor, collect, installed = self._patched()
+        with mock.patch.object(doctor, "collect", collect), \
+             mock.patch.object(doctor, "install_keys",
+                               lambda keys, log=print: installed.append(list(keys)) or 0):
+            lines: list[str] = []
+            rc = doctor.run(config=self.CFG, log=lines.append, **kwargs)
+        return rc, installed, lines
+
+    def test_install_key_reaches_installer(self):
+        rc, installed, lines = self._run(install="ts-lsp")
+        self.assertEqual(rc, 0)
+        self.assertEqual(installed, [["ts-lsp"]])
+        # y NO debe afirmar que no hay nada que activar
+        self.assertFalse(any("nada que activar" in l for l in lines))
+
+    def test_install_all_includes_missing_language_server(self):
+        _, installed, _ = self._run(install="all")
+        self.assertEqual(installed, [["ts-lsp"]])
+
+    def test_interactive_offers_the_missing_language_server(self):
+        rc, installed, lines = self._run(is_tty=True, ask=lambda _p: "1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(installed, [["ts-lsp"]])
+        self.assertTrue(any("1) ts-lsp" in l for l in lines))
+
+    def test_non_tty_prints_the_real_install_command(self):
+        from memorygraf import doctor
+        _, installed, lines = self._run(is_tty=False)
+        self.assertEqual(installed, [])   # sin TTY no instala: solo reporta
+        hint = doctor._cap_hint(doctor._TS_LSP_CAP)
+        self.assertTrue(any(hint in l for l in lines), lines)
+
+    def test_language_report_carries_install_key(self):
+        from memorygraf import doctor
+        for r in doctor.lsp_language_report(self.CFG):
+            if r["supported"]:
+                self.assertIn(r["install_key"], doctor._INSTALLABLE)
+                # `install` sigue siendo el comando legible que usa `configure`
+                self.assertIn(r["install_key"], r["install"])
+            else:
+                self.assertIsNone(r["install_key"])
+
+
 def _git_available() -> bool:
     try:
         return subprocess.run(["git", "--version"], capture_output=True).returncode == 0
