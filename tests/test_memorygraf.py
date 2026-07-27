@@ -1052,6 +1052,23 @@ class TestGroupALspHints(unittest.TestCase):
         for key in ("jdtls", "java-lsp"):
             self.assertNotIn(key, doctor._INSTALLABLE)
 
+    def test_csharp_reported_supported_with_dotnet_hint(self):
+        # M11c: C# pasa de symbols-only a soportado (csharp-ls); sin el server sale FALTA
+        # con el comando `dotnet tool`, y csharp-ls NO es una clave de --install
+        from memorygraf import doctor
+        with open(os.path.join(self.tmp, "Program.cs"), "w") as f:
+            f.write("class Program { static void Main() {} }\n")
+        cfg = {"projects": [{"name": "p", "root": self.tmp}]}
+        with unittest.mock.patch.object(doctor, "_has_csharp_ls", return_value=False):
+            report = {r["lang"]: r for r in doctor.lsp_language_report(cfg)}
+        self.assertIn("C#", report)
+        self.assertTrue(report["C#"]["supported"])
+        self.assertFalse(report["C#"]["ok"])
+        self.assertIsNone(report["C#"]["install_key"])
+        self.assertIn("dotnet tool", report["C#"]["install"])
+        for key in ("csharp-ls", "csharp-lsp", "omnisharp"):
+            self.assertNotIn(key, doctor._INSTALLABLE)
+
 
 def _git_available() -> bool:
     try:
@@ -2082,6 +2099,8 @@ class TestRuntimeLsp(Base):
         self.assertIs(lsp._lang_for_ext(".c")[0], lsp._lang_for_ext(".cpp")[0])
         # M11b · Java (jdtls)
         self.assertEqual(lsp._lang_for_ext(".java")[1], "java")
+        # M11c · C# (csharp-ls)
+        self.assertEqual(lsp._lang_for_ext(".cs")[1], "csharp")
         self.assertEqual(lsp._lang_for_ext(".rb"), (None, None))
         # el server de cada lenguaje: None o (binario, args)
         for spec in lsp._LANGUAGES:
@@ -3046,16 +3065,16 @@ class TestConfigureLspLangAware(unittest.TestCase):
         self.assertIn("doctor --install ts-lsp", joined)
 
     def test_report_lsp_marks_unsupported_language(self):
-        # C# sigue SIN capa LSP en MemoryGraf (indexa símbolos, no diagnósticos/tipos)
-        # hasta M11c. Sirve de canario de la degradación honesta por lenguaje.
+        # PHP sigue SIN capa LSP en MemoryGraf (indexa símbolos, no diagnósticos/tipos)
+        # hasta M11d. Sirve de canario de la degradación honesta por lenguaje.
         from memorygraf import configure
-        with open(os.path.join(self.tmp, "Program.cs"), "w") as f:
-            f.write("class Program { static void Main() {} }\n")
-        cfg = {"projects": [{"name": "cs", "root": self.tmp}]}
+        with open(os.path.join(self.tmp, "index.php"), "w") as f:
+            f.write("<?php function suma($a, $b) { return $a + $b; }\n")
+        cfg = {"projects": [{"name": "php", "root": self.tmp}]}
         msgs = []
         configure._report_lsp(cfg, ["lsp_on_sync"], msgs.append)
         joined = "\n".join(msgs)
-        self.assertIn("csharp", joined)
+        self.assertIn("php", joined)
         self.assertIn("NO tiene LSP", joined)
 
     def test_report_lsp_marks_group_a_supported(self):

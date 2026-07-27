@@ -82,6 +82,14 @@ _LANGUAGES = [
         "workspace": True,                       # jdtls: -data <workspace>
         "init_options": {"settings": {"java": {}}},
     },
+    # M11c · C# — csharp-ls es single-binary por stdio: aunque es project-aware (busca
+    # .sln/.csproj desde rootUri), NO necesita -data ni init especial, así que vuelve a ser
+    # config-only como el Grupo A. OmniSharp es una alternativa más pesada (ver docs/doctor).
+    {
+        "name": "csharp",
+        "servers": [("csharp-ls", [])],
+        "ext_lang": {".cs": "csharp"},
+    },
 ]
 
 # Cómo instalar el language-server de cada lenguaje (para el mensaje de "omitido":
@@ -95,13 +103,15 @@ _INSTALL_HINT = {
     "c/c++": "instala clangd (apt/brew/winget · ver `memorygraf doctor`)",
     # M11b · Grupo B:
     "java": "instala jdtls (brew/apt/descarga · requiere JDK 17+ · ver `memorygraf doctor`)",
+    # M11c:
+    "csharp": "dotnet tool install --global csharp-ls   (requiere .NET SDK)",
 }
 
 _SEVERITY = {1: "error", 2: "warning", 3: "info", 4: "hint"}
 # etiquetas de fence/idioma a descartar al extraer la firma del hover (multi-lenguaje)
 _FENCE_TAGS = {"python", "typescript", "javascript", "typescriptreact",
                "javascriptreact", "ts", "js", "tsx", "jsx", "text", "plaintext",
-               "go", "rust", "rs", "c", "cpp", "c++", "java"}
+               "go", "rust", "rs", "c", "cpp", "c++", "java", "csharp", "c#"}
 
 
 def _find_lang_server(spec: dict) -> tuple | None:
@@ -491,8 +501,8 @@ def _run_language(store, server, files, roots, rt, log, param_provider=None,
 
 def sync(store, config: dict, log=lambda m: None) -> dict:
     """Arranca un LSP efímero POR LENGUAJE presente, recoge diagnósticos y tipos y los
-    mapea a nodos. Multi-lenguaje (M4 + M11a/b): Python, TS/JS, Go, Rust, C/C++ y Java (cada
-    uno si su servidor está instalado; los que falten se omiten con degradación elegante)."""
+    mapea a nodos. Multi-lenguaje (M4 + M11a/b/c): Python, TS/JS, Go, Rust, C/C++, Java y C#
+    (cada uno si su servidor está instalado; los que falten se omiten con degradación elegante)."""
     rt = (config or {}).get("runtime") or {}
     if rt.get("enabled") is False or rt.get("lsp") is False:
         return {"enabled": False, "reason": "deshabilitado"}
