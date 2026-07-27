@@ -4,7 +4,7 @@
 > LSP para Go/Rust/C/C++, Java, C#, PHP y R — solo VB y asm quedan symbols-only). La fuente de
 > verdad es el **código + los tests (`tests/test_memorygraf.py`) + el historial de commits**;
 > este documento registra: **(a)** lo hecho, **(b)** la **deuda consciente** que conviene
-> recordar (por qué algo va gateado/acotado), **(c)** las propuestas abiertas (M12 y el
+> recordar (por qué algo va gateado/acotado), **(c)** las propuestas abiertas (el
 > **Anexo M13–M20**, roadmap de paridad con Graphify) y **(d)** lo único pendiente de
 > ejecución sin código nuevo: la **validación de ENTORNO** (§9).
 > Complementa `DESIGN.md` (principios §3, vinculantes).
@@ -164,43 +164,55 @@ efímero, mapeo a `runtime_node`, degradación elegante).
 
 ---
 
-## M12 · Respetar `.gitignore` en el indexado  (PROPUESTA)
+## M12 · Respetar `.gitignore` en el indexado  (IMPLEMENTADO ✅)
 
-**Estado (2026-07-26).** Propuesta. Hoy el descubrimiento de archivos (`indexer._iter_files`)
-filtra por **`DEFAULT_EXCLUDES` + `config.excludes`** (nombres de directorio), pero **NO
-consulta `.gitignore`**. MemoryGraf mira el **disco**, no el índice de git: por eso un dir
-gitignorado como `.next/` (build de Next.js) se indexaba igual hasta añadirlo a los defaults
-(ver commit del fix; en un Next.js real eran 476/993 nodos = 48% de ruido generado).
+**Estado (2026-07-27).** **IMPLEMENTADO.** El descubrimiento (`indexer._iter_files` y
+`docs._iter_docs`) ahora respeta `.gitignore` como capa **adicional** a los excludes de dir.
+Helpers en `indexer.py`: `_gitignored(root, paths)` (delega en `git check-ignore --stdin`, batch),
+`_apply_gitignore(...)` (aplica el filtro + escape hatch) y `_index_settings(config)` (lee el
+bloque `index`). Config: `index.respect_gitignore` (default `true`; sin git es no-op) e
+`index.unignore` (rutas relativas por prefijo/glob a RE-INCLUIR). Tests: `TestGitignoreRespected`
+(fuente entra / gitignorado fuera, negación `!` vía contenido, `respect_gitignore=false`,
+`unignore`, sin-git cae a excludes, y `.md` gitignorado no genera docs). **Nota clave:**
+`check-ignore` respeta el índice → los archivos YA rastreados nunca se saltan aunque encajen un
+patrón; M12 solo elimina lo **no versionado** que git ignora (generado/local), que por definición
+no es parte del proyecto.
+
+**Contexto (por qué).** Antes se filtraba solo por **`DEFAULT_EXCLUDES` + `config.excludes`**
+(nombres de directorio), sin consultar `.gitignore`: MemoryGraf miraba el **disco**, no el índice
+de git, así que un dir gitignorado como `.next/` se indexaba igual hasta añadirlo a los defaults
+(en un Next.js real eran 476/993 nodos = 48% de ruido generado).
 
 **Problema.** `DEFAULT_EXCLUDES` es una **lista fija** que persigue frameworks uno a uno
 (`.next`, `.nuxt`, `.turbo`, …). Siempre llegará tarde al siguiente framework/dir generado.
 El propio proyecto **ya declara** qué NO es código fuente en su `.gitignore` — esa es la
 fuente de verdad natural para "esto es generado/local, no lo indexes".
 
-**Propuesta.** Filtrar también por `.gitignore` durante el descubrimiento, con degradación
-elegante y sin romper el modo portable:
-1. **Si hay git** (ya es dependencia opcional de la capa temporal): resolver los archivos
-   ignorados con `git check-ignore --stdin` (batch, rápido) o `git ls-files` sobre los
-   candidatos. Cero parsing propio de patrones → fidelidad total (negaciones `!`, `**`,
-   anclajes, `.gitignore` anidados) sin reimplementar la semántica de git.
-2. **Sin git / sin repo:** se mantiene el comportamiento actual (`DEFAULT_EXCLUDES` +
+**Diseño (implementado).** Filtrar también por `.gitignore` durante el descubrimiento, con
+degradación elegante y sin romper el modo portable:
+1. **Si hay git** (ya es dependencia opcional de la capa temporal): los archivos ignorados se
+   resuelven con `git check-ignore --stdin` (batch, rápido). Cero parsing propio de patrones →
+   fidelidad total (negaciones `!`, `**`, anclajes, `.gitignore` anidados) sin reimplementar la
+   semántica de git.
+2. **Sin git / sin repo:** se mantiene el comportamiento previo (`DEFAULT_EXCLUDES` +
    `config.excludes`). Nada se rompe (regla DESIGN §3.2).
 3. **Escape hatch:** algunos proyectos tienen **código fuente legítimo gitignorado** (módulos
-   locales, generado-que-sí-es-código). Config `index.respect_gitignore` (evaluar default:
-   `true` cuando hay git, pero reversible) + posibilidad de "des-ignorar" por `config` para
-   volver a incluir rutas concretas.
+   locales, generado-que-sí-es-código). `index.respect_gitignore` (default `true`, reversible) +
+   `index.unignore` para volver a incluir rutas concretas (prefijo/glob).
 
 **Interacción con lo existente.** `DEFAULT_EXCLUDES` se queda (cubre el caso sin git y da un
 mínimo sano); `.gitignore` es una capa ADICIONAL, no un reemplazo. Orden: excludes de dir
 (barato, poda ramas del `os.walk`) → luego filtro gitignore sobre los archivos que sobrevivan.
 
-**Pruebas.** Fixture con repo git: un `.ts` fuente + un `build/generado.js` gitignorado →
-el fuente entra, el gitignorado no. Sin git: cae a `DEFAULT_EXCLUDES` (el gitignorado entra
-salvo que su dir esté en la lista). `respect_gitignore=false` → comportamiento previo.
-Negación (`!keep.js`) respetada vía `git check-ignore`.
+**Pruebas (`TestGitignoreRespected`).** Repo git: un `.py` fuente + un `generated/gen.py`
+gitignorado → el fuente entra, el gitignorado no. Negación respetada (vía `generated/*` +
+`!generated/keep.py`; git no permite re-incluir bajo un dir excluido, delegamos en su semántica).
+Sin git: cae a `DEFAULT_EXCLUDES`. `respect_gitignore=false` → comportamiento previo. `unignore`
+re-incluye. Un `.md` gitignorado tampoco genera docs (consistencia `_iter_docs`).
 
-**Riesgo/Esfuerzo.** Bajo-medio. Sin parser propio (delega en git) el riesgo baja mucho; el
-grueso es cablear el filtro en `_iter_files` con batch a git y el flag de config + su default.
+**Riesgo/Esfuerzo (retrospectiva).** Bajo. Sin parser propio (delega en git) el riesgo fue
+mínimo; el grueso fue cablear el filtro en `_iter_files`/`_iter_docs` con batch a git y el
+bloque de config. Se aplicó también a la extracción de docs por consistencia.
 
 ---
 

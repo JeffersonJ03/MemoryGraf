@@ -6,6 +6,12 @@
   ],
   "excludes": [],
 
+  "_index_comment": "Opcional (M12). Descubrimiento de archivos. Además de 'excludes' (nombres de dir), si hay git se respeta '.gitignore' vía 'git check-ignore' (semántica completa: negaciones, **, anclajes, .gitignore anidados; los archivos YA rastreados nunca se saltan aunque encajen un patrón). 'respect_gitignore':false vuelve al comportamiento previo (solo excludes). 'unignore' RE-INCLUYE rutas relativas (prefijo o glob) aunque git las ignore: para código fuente legítimo pero gitignorado (módulos locales, generado-que-sí-es-código). Sin git es no-op (modo portable intacto).",
+  "index": {
+    "respect_gitignore": true,
+    "unignore": []
+  },
+
   "_runtime_comment": "Opcional (autodescubre en reports/, coverage/, ...). 'memorygraf runtime' ingiere coverage.xml (cobertura por símbolo) y junit.xml (estado de tests). Para tested_by SÍMBOLO→test, genera coverage.json con contextos: pytest --cov-context=test && coverage json --show-contexts. Con --lsp: diagnósticos + resolved_type; 'param_types':false desactiva el hover por parámetro (M4b, mejor con pyright).",
 
   "_git_comment": "Opcional. Ajustes de la capa Git. 'blame_workers': hilos para el 'git blame' (I/O-bound) en repos grandes; 0=auto (min(8, cpu+2)), 1=secuencial. Co-cambio CROSS-PROJECT por símbolo (M8, muy conservador): solo enlaza símbolos de proyectos que comparten repo git, superando umbrales estrictos (cochange_cross_min, cochange_cross_threshold) y CONFIRMADOS por cross_link/endpoints (cochange_cross_confirm=true). Pon cochange_cross_confirm=false para permitirlo sin endpoints compartidos (solo umbral). Co-cambio de símbolo por HISTORIA COMPLETA (M1, OPT-IN): symbol_cochange_full=true capta el acoplamiento que el blame pierde (líneas reescritas) re-extrayendo cada commit; cuesta ~14-23x, por eso va apagado y acotado por cochange_full_depth (nº de commits). Aristas con provenance 'git-cochange-sym-full'.",
