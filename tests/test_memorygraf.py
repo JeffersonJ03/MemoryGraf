@@ -3201,6 +3201,22 @@ class TestGitignoreRespected(_GitRepo, Base):
         self.assertIn("proj/generated/gen.py", self._paths(store))
         store.close()
 
+    def test_check_ignore_returns_paths_verbatim(self):
+        """`git check-ignore` en modo texto aplica C-quoting, y en Windows un abspath
+        siempre lo dispara: devolvía la ruta entrecomillada, con los separadores
+        duplicados y un CR del CRLF, así que no casaba con la enviada y el filtro era un
+        no-op SILENCIOSO. Con `-z` vuelve tal cual: se exige identidad, no que ignore
+        'algo' (los demás tests de la clase pasaban en Linux y no veían la regresión)."""
+        from memorygraf.indexer import _gitignored
+        self.write("generated/gen.py", "def g():\n    return 2\n")
+        self.write("app.py", "def a():\n    return 1\n")
+        self.write(".gitignore", "generated/\n")
+        self._init_repo()
+        root = os.path.join(self.tmp, "proj")
+        enviados = [os.path.join(root, "generated", "gen.py"),
+                    os.path.join(root, "app.py")]
+        self.assertEqual(_gitignored(root, enviados), {enviados[0]})
+
     def test_gitignored_markdown_not_extracted(self):
         # consistencia: un .md en un dir gitignorado tampoco genera doc/decisiones
         from memorygraf import docs

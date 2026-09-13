@@ -63,7 +63,14 @@ def _gitignored(root: str, paths: list) -> set:
     Delega en `git check-ignore --stdin` → semántica COMPLETA de gitignore (negaciones `!`,
     `**`, anclajes, `.gitignore` anidados) sin reimplementar nada. check-ignore respeta el
     índice por defecto: un archivo YA rastreado NO se reporta como ignorado aunque encaje un
-    patrón — justo lo que queremos (indexar lo versionado, saltar lo generado/local)."""
+    patrón — justo lo que queremos (indexar lo versionado, saltar lo generado/local).
+
+    Se usa `-z` (entrada y salida separadas por NUL). En modo texto git aplica
+    C-quoting a las rutas "raras", y en Windows un abspath siempre lo es: la
+    devuelve entrecomillada, con los separadores duplicados y un CR del CRLF, así
+    que no casaba con lo enviado y el filtro quedaba en un no-op silencioso. Con
+    `-z` la ruta vuelve verbatim y la comparación contra `paths` es exacta en
+    toda plataforma."""
     if not paths:
         return set()
     git = shutil.which("git")
@@ -76,13 +83,13 @@ def _gitignored(root: str, paths: list) -> set:
         if inside.returncode != 0 or inside.stdout.strip() != "true":
             return set()
         proc = subprocess.run(
-            [git, "-C", root, "check-ignore", "--stdin"],
-            input="\n".join(paths), capture_output=True, text=True)
+            [git, "-C", root, "check-ignore", "-z", "--stdin"],
+            input="\0".join(paths), capture_output=True, text=True)
     except OSError:
         return set()
     if proc.returncode not in (0, 1):   # 0=hay ignorados, 1=ninguno; 128/otros=error → nada
         return set()
-    return {ln.strip() for ln in proc.stdout.splitlines() if ln.strip()}
+    return {p for p in proc.stdout.split("\0") if p}
 
 
 def _apply_gitignore(root: str, candidates: list, respect_gitignore: bool,
