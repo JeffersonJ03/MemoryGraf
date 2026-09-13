@@ -1090,6 +1090,22 @@ class TestGroupALspHints(unittest.TestCase):
         for key in ("intelephense", "php-lsp", "r-lsp", "languageserver"):
             self.assertNotIn(key, doctor._INSTALLABLE)
 
+    def test_lsp_detectors_are_patchable(self):
+        """Los tests de hints parchean `doctor._has_x`, pero la tabla guardaba la función
+        POR REFERENCIA al importar: el mock no la alcanzaba y el test medía el PATH real
+        (windows-latest trae R -> PHP/R fallaba solo ahí). Todo detector debe obedecer
+        al mock, en ambos sentidos, sea cual sea la máquina."""
+        from memorygraf import doctor
+        detectors = {"go": "_has_gopls", "rust": "_has_rust_analyzer", "c": "_has_clangd",
+                     "cpp": "_has_clangd", "java": "_has_jdtls", "csharp": "_has_csharp_ls",
+                     "php": "_has_php_ls", "r": "_has_r_ls", "typescript": "_has_ts_lsp"}
+        self.assertEqual(set(detectors) | {"python"}, set(doctor._LSP_SUPPORTED))
+        for lang, fn in detectors.items():
+            for value in (True, False):
+                with unittest.mock.patch.object(doctor, fn, return_value=value):
+                    self.assertIs(bool(doctor._LSP_SUPPORTED[lang]["detect"]()), value,
+                                  f"{lang}: detect no obedece al mock de {fn}")
+
 
 def _alias_path(path: str, scratch: str) -> str | None:
     """Otra grafía del MISMO directorio, de las que git no respeta: nombre corto 8.3 en
