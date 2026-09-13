@@ -208,11 +208,25 @@ def _hover_position(lines: list, span_start: int, name: str):
     return (span_start - 1, col + (len(short) // 2 or 1))
 
 
+def _balanced(s: str) -> bool:
+    """Firma sintácticamente cerrada: delimitadores emparejados."""
+    return (s.count("(") == s.count(")") and s.count("[") == s.count("]")
+            and s.count("{") == s.count("}"))
+
+
 def _parse_hover(result) -> str | None:
     """Extrae un tipo/firma conciso del resultado de textDocument/hover.
 
     Soporta MarkupContent, MarkedString y listas. Toma la primera línea significativa
-    (la firma), sin fences de código. None si no hay contenido usable."""
+    (la firma), sin fences de código. None si no hay contenido usable.
+
+    Pyright — el servidor que `doctor` instala por calidad — parte las firmas largas en
+    varias líneas (`(function) def f(` / `a: int,` / `) -> int`), así que quedarse con la
+    primera perdía justo los tipos. Si esa primera línea está SIN CERRAR se anexan las
+    siguientes hasta emparejar los delimitadores (cota de líneas y de longitud, y corte en
+    el separador markdown que abre el docstring). Si nunca cierra se devuelve la primera
+    línea tal cual: los servidores tipo jedi ya la dan completa, así que ese camino —
+    balanceado desde el principio — no cambia."""
     if not result:
         return None
     contents = result.get("contents")
@@ -226,12 +240,29 @@ def _parse_hover(result) -> str | None:
         text = "\n".join(p for p in parts if p)
     if not text:
         return None
+    lines = []
     for line in text.splitlines():
         s = line.strip().strip("`").strip()
         if not s or s.lower() in _FENCE_TAGS:   # fence/idioma (python|typescript|...)
             continue
-        return s[:200]
-    return None
+        lines.append(s)
+    if not lines:
+        return None
+    first = lines[0][:200]
+    if _balanced(lines[0]):                     # firma en una línea (jedi, MarkedString)
+        return first
+    sig = lines[0]
+    for s in lines[1:31]:
+        if set(s) <= {"-", "_", "*"}:           # regla markdown: empieza el docstring
+            break
+        sig += " " + s
+        if len(sig) > 200 or _balanced(sig):
+            break
+    if not _balanced(sig):                      # nunca cerró: comportamiento previo
+        return first
+    sig = " ".join(sig.split())                 # la firma partida trae sangría
+    sig = sig.replace("( ", "(").replace(" )", ")").replace(" ,", ",")
+    return sig[:200]
 
 
 def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None,

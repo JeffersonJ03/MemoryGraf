@@ -2221,6 +2221,26 @@ class TestRuntimeLsp(Base):
             lsp._parse_hover({"contents": "```python\ndef f() -> int\n```"}),
             "def f() -> int")
 
+    def test_parse_hover_joins_multiline_signature(self):
+        """Pyright parte las firmas largas en varias líneas; quedarse con la primera
+        devolvía '(function) def suma(' — sin un solo tipo. Se unen hasta cerrar."""
+        from memorygraf.runtime import lsp
+        self.assertEqual(
+            lsp._parse_hover({"contents": {"kind": "markdown", "value":
+                "```python\n(function) def suma(\n    a: int,\n    b: int\n) -> int\n"
+                "```\n---\nSuma dos enteros."}}),
+            "(function) def suma(a: int, b: int) -> int")
+        # una sola línea (jedi/pylsp) NO cambia: ya viene cerrada
+        self.assertEqual(
+            lsp._parse_hover({"contents": {"kind": "markdown", "value":
+                "```python\nsuma(a: int, b: int) -> int\n```\n\nSuma dos enteros."}}),
+            "suma(a: int, b: int) -> int")
+        # si nunca cierra se cae al comportamiento previo (primera línea): no se
+        # arrastra el docstring entero detrás de un paréntesis suelto
+        self.assertEqual(
+            lsp._parse_hover({"contents": "texto ( que no cierra\nsegunda línea"}),
+            "texto ( que no cierra")
+
     def test_sync_skips_language_without_server(self):
         # M4: con archivos .ts pero sin typescript-language-server, ese lenguaje se
         # omite con degradación elegante (no crashea, lo reporta en 'missing').
