@@ -1091,6 +1091,23 @@ class TestGroupALspHints(unittest.TestCase):
             self.assertNotIn(key, doctor._INSTALLABLE)
 
 
+def _alias_path(path: str, scratch: str) -> str | None:
+    """Otra grafía del MISMO directorio, de las que git no respeta: nombre corto 8.3 en
+    Windows, symlink en POSIX. None si el entorno no permite fabricarla."""
+    if os.name == "nt":
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(path, buf, len(buf))
+        short = buf.value if n else ""
+        return short if short and short.lower() != path.lower() else None
+    link = os.path.join(scratch, "alias_proj")
+    try:
+        os.symlink(path, link)
+    except (OSError, NotImplementedError):
+        return None
+    return link
+
+
 def _git_available() -> bool:
     try:
         return subprocess.run(["git", "--version"], capture_output=True).returncode == 0
@@ -1207,6 +1224,28 @@ class TestGitLayer(_GitRepo, Base):
         self.assertEqual(g["fix_touches"], 1)      # "fix bug" cuenta
         self.assertIn("Alice", g["authors"])
         self.assertIn("Tester", g["authors"])
+        store.close()
+
+    def test_root_spelled_differently_than_git_toplevel(self):
+        """`--show-toplevel` devuelve la ruta FÍSICA: en Windows expande los nombres cortos
+        8.3 (el runner de CI tiene TEMP en `RUNNER~1`) y en POSIX resuelve symlinks. Con
+        esa raíz, `relpath(ruta_de_git, root)` salía con `..`, cada archivo se descartaba
+        y la capa temporal quedaba vacía EN SILENCIO (sync con enabled=True y 0 datos).
+        Aquí el proyecto se configura con OTRA grafía del mismo directorio."""
+        alias = _alias_path(self.proj, self.tmp)
+        if not alias:
+            self.skipTest("el FS no permite otra grafía (sin 8.3 ni symlinks)")
+        self._init_repo()
+        self.write("a.py", "def f():\n    return 1\n")
+        self._commit("add a")
+        self.config = {"projects": [{"name": "proj", "root": alias}]}
+        top = git_layer._toplevel(alias)
+        self.assertFalse(os.path.relpath(alias, top).startswith(".."))
+        store, _ = self.index()
+        self.assertTrue(self._sync_git(store)["enabled"])
+        g = store.git_node_get("proj/a.py")
+        self.assertIsNotNone(g)                    # antes: None -> capa vacía
+        self.assertEqual(g["churn"], 1)
         store.close()
 
     def test_history_follows_rename(self):
