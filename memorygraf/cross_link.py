@@ -37,7 +37,20 @@ def _normalize(raw: str) -> str | None:
     - Ruta relativa: /api/orders/:id               -> /api/orders/:p (>=2 segmentos)
     """
     if raw.startswith(("http://", "https://")):
-        u = urlparse(raw)
+        try:
+            u = urlparse(raw)
+        except ValueError:
+            # Lo que entra aqui es texto raspado de archivos fuente, no una URL
+            # verificada: basta con que EMPIECE por http:// para llegar. Como la
+            # regex trata el backtick como delimitador (por los template literals
+            # de JS), tambien captura el inline code de Markdown dentro de los
+            # comentarios, donde abundan las plantillas de documentacion. Una de
+            # ellas, `http://<SERVER>[:<PORT>]/<path>`, tumbaba el sync entero:
+            # urlparse valida lo que va entre corchetes del netloc como IPv6 y
+            # lanza ValueError("Invalid IPv6 URL"). Un literal que ni siquiera se
+            # puede parsear no es un punto de integracion: None, como el resto de
+            # los descartes de esta funcion.
+            return None
         path = _clean_path(u.path)
         segs = [s for s in path.split("/") if s]
         if not segs:                       # base URL sin ruta -> host de integración
