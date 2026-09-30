@@ -1090,6 +1090,39 @@ class TestGroupALspHints(unittest.TestCase):
         for key in ("intelephense", "php-lsp", "r-lsp", "languageserver"):
             self.assertNotIn(key, doctor._INSTALLABLE)
 
+    def test_lsp_detectors_are_patchable(self):
+        """Los tests de hints parchean `doctor._has_x`, pero la tabla guardaba la función
+        POR REFERENCIA al importar: el mock no la alcanzaba y el test medía el PATH real
+        (windows-latest trae R -> PHP/R fallaba solo ahí). Todo detector debe obedecer
+        al mock, en ambos sentidos, sea cual sea la máquina."""
+        from memorygraf import doctor
+        detectors = {"go": "_has_gopls", "rust": "_has_rust_analyzer", "c": "_has_clangd",
+                     "cpp": "_has_clangd", "java": "_has_jdtls", "csharp": "_has_csharp_ls",
+                     "php": "_has_php_ls", "r": "_has_r_ls", "typescript": "_has_ts_lsp"}
+        self.assertEqual(set(detectors) | {"python"}, set(doctor._LSP_SUPPORTED))
+        for lang, fn in detectors.items():
+            for value in (True, False):
+                with unittest.mock.patch.object(doctor, fn, return_value=value):
+                    self.assertIs(bool(doctor._LSP_SUPPORTED[lang]["detect"]()), value,
+                                  f"{lang}: detect no obedece al mock de {fn}")
+
+
+def _alias_path(path: str, scratch: str) -> str | None:
+    """Otra grafía del MISMO directorio, de las que git no respeta: nombre corto 8.3 en
+    Windows, symlink en POSIX. None si el entorno no permite fabricarla."""
+    if os.name == "nt":
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(path, buf, len(buf))
+        short = buf.value if n else ""
+        return short if short and short.lower() != path.lower() else None
+    link = os.path.join(scratch, "alias_proj")
+    try:
+        os.symlink(path, link)
+    except (OSError, NotImplementedError):
+        return None
+    return link
+
 
 def _git_available() -> bool:
     try:
@@ -1207,6 +1240,28 @@ class TestGitLayer(_GitRepo, Base):
         self.assertEqual(g["fix_touches"], 1)      # "fix bug" cuenta
         self.assertIn("Alice", g["authors"])
         self.assertIn("Tester", g["authors"])
+        store.close()
+
+    def test_root_spelled_differently_than_git_toplevel(self):
+        """`--show-toplevel` devuelve la ruta FÍSICA: en Windows expande los nombres cortos
+        8.3 (el runner de CI tiene TEMP en `RUNNER~1`) y en POSIX resuelve symlinks. Con
+        esa raíz, `relpath(ruta_de_git, root)` salía con `..`, cada archivo se descartaba
+        y la capa temporal quedaba vacía EN SILENCIO (sync con enabled=True y 0 datos).
+        Aquí el proyecto se configura con OTRA grafía del mismo directorio."""
+        alias = _alias_path(self.proj, self.tmp)
+        if not alias:
+            self.skipTest("el FS no permite otra grafía (sin 8.3 ni symlinks)")
+        self._init_repo()
+        self.write("a.py", "def f():\n    return 1\n")
+        self._commit("add a")
+        self.config = {"projects": [{"name": "proj", "root": alias}]}
+        top = git_layer._toplevel(alias)
+        self.assertFalse(os.path.relpath(alias, top).startswith(".."))
+        store, _ = self.index()
+        self.assertTrue(self._sync_git(store)["enabled"])
+        g = store.git_node_get("proj/a.py")
+        self.assertIsNotNone(g)                    # antes: None -> capa vacía
+        self.assertEqual(g["churn"], 1)
         store.close()
 
     def test_history_follows_rename(self):
@@ -2221,6 +2276,26 @@ class TestRuntimeLsp(Base):
             lsp._parse_hover({"contents": "```python\ndef f() -> int\n```"}),
             "def f() -> int")
 
+    def test_parse_hover_joins_multiline_signature(self):
+        """Pyright parte las firmas largas en varias líneas; quedarse con la primera
+        devolvía '(function) def suma(' — sin un solo tipo. Se unen hasta cerrar."""
+        from memorygraf.runtime import lsp
+        self.assertEqual(
+            lsp._parse_hover({"contents": {"kind": "markdown", "value":
+                "```python\n(function) def suma(\n    a: int,\n    b: int\n) -> int\n"
+                "```\n---\nSuma dos enteros."}}),
+            "(function) def suma(a: int, b: int) -> int")
+        # una sola línea (jedi/pylsp) NO cambia: ya viene cerrada
+        self.assertEqual(
+            lsp._parse_hover({"contents": {"kind": "markdown", "value":
+                "```python\nsuma(a: int, b: int) -> int\n```\n\nSuma dos enteros."}}),
+            "suma(a: int, b: int) -> int")
+        # si nunca cierra se cae al comportamiento previo (primera línea): no se
+        # arrastra el docstring entero detrás de un paréntesis suelto
+        self.assertEqual(
+            lsp._parse_hover({"contents": "texto ( que no cierra\nsegunda línea"}),
+            "texto ( que no cierra")
+
     def test_sync_skips_language_without_server(self):
         # M4: con archivos .ts pero sin typescript-language-server, ese lenguaje se
         # omite con degradación elegante (no crashea, lo reporta en 'missing').
@@ -3200,6 +3275,22 @@ class TestGitignoreRespected(_GitRepo, Base):
         store, _ = self.index()
         self.assertIn("proj/generated/gen.py", self._paths(store))
         store.close()
+
+    def test_check_ignore_returns_paths_verbatim(self):
+        """`git check-ignore` en modo texto aplica C-quoting, y en Windows un abspath
+        siempre lo dispara: devolvía la ruta entrecomillada, con los separadores
+        duplicados y un CR del CRLF, así que no casaba con la enviada y el filtro era un
+        no-op SILENCIOSO. Con `-z` vuelve tal cual: se exige identidad, no que ignore
+        'algo' (los demás tests de la clase pasaban en Linux y no veían la regresión)."""
+        from memorygraf.indexer import _gitignored
+        self.write("generated/gen.py", "def g():\n    return 2\n")
+        self.write("app.py", "def a():\n    return 1\n")
+        self.write(".gitignore", "generated/\n")
+        self._init_repo()
+        root = os.path.join(self.tmp, "proj")
+        enviados = [os.path.join(root, "generated", "gen.py"),
+                    os.path.join(root, "app.py")]
+        self.assertEqual(_gitignored(root, enviados), {enviados[0]})
 
     def test_gitignored_markdown_not_extracted(self):
         # consistencia: un .md en un dir gitignorado tampoco genera doc/decisiones

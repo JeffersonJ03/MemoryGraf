@@ -310,26 +310,29 @@ _INSTALLABLE = {**_CAP_BY_KEY, "ts-lsp": _TS_LSP_CAP}
 # PHP/R (M11d) también tienen capa LSP, pero su language-server es toolchain/OS-específico → no
 # se auto-instala (`install_key=None`): `doctor` muestra el comando correcto vía `hint`. Solo
 # VB y Assembly quedan sin capa LSP (símbolos sí, tipos no): no hay LSP standalone práctico.
+# `detect` SIEMPRE como lambda (resolución tardía): una referencia directa congela la función
+# al importar, y `mock.patch.object(doctor, "_has_x")` no la alcanza -> el test mide el PATH
+# real de la máquina (el runner windows-latest trae R y hacía fallar el de PHP/R).
 _LSP_SUPPORTED = {
     "python": {"label": "Python", "detect": lambda: _has_lsp() or _has_pyright(),
                "install_key": "lsp"},
     "typescript": {"label": "TypeScript/JS", "detect": lambda: _has_ts_lsp(),
                    "install_key": "ts-lsp"},
-    "go": {"label": "Go", "detect": _has_gopls, "install_key": None,
+    "go": {"label": "Go", "detect": lambda: _has_gopls(), "install_key": None,
            "hint": lambda: "go install golang.org/x/tools/gopls@latest   (requiere Go)"},
-    "rust": {"label": "Rust", "detect": _has_rust_analyzer, "install_key": None,
+    "rust": {"label": "Rust", "detect": lambda: _has_rust_analyzer(), "install_key": None,
              "hint": lambda: "rustup component add rust-analyzer   (requiere rustup)"},
-    "c": {"label": "C", "detect": _has_clangd, "install_key": None,
+    "c": {"label": "C", "detect": lambda: _has_clangd(), "install_key": None,
           "hint": _clangd_install_hint},
-    "cpp": {"label": "C++", "detect": _has_clangd, "install_key": None,
+    "cpp": {"label": "C++", "detect": lambda: _has_clangd(), "install_key": None,
             "hint": _clangd_install_hint},
-    "java": {"label": "Java", "detect": _has_jdtls, "install_key": None,
+    "java": {"label": "Java", "detect": lambda: _has_jdtls(), "install_key": None,
              "hint": _jdtls_install_hint},   # M11b
-    "csharp": {"label": "C#", "detect": _has_csharp_ls, "install_key": None,
+    "csharp": {"label": "C#", "detect": lambda: _has_csharp_ls(), "install_key": None,
                "hint": _csharp_install_hint},   # M11c
-    "php": {"label": "PHP", "detect": _has_php_ls, "install_key": None,
+    "php": {"label": "PHP", "detect": lambda: _has_php_ls(), "install_key": None,
             "hint": _php_install_hint},          # M11d
-    "r": {"label": "R", "detect": _has_r_ls, "install_key": None,
+    "r": {"label": "R", "detect": lambda: _has_r_ls(), "install_key": None,
           "hint": _r_install_hint},              # M11d
 }
 

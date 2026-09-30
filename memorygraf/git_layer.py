@@ -80,8 +80,30 @@ def _git(args: list, cwd: str, timeout: float | None = None) -> str | None:
 
 
 def _toplevel(root: str, timeout: float | None = None) -> str | None:
-    out = _git(["rev-parse", "--show-toplevel"], root, timeout=timeout)
-    return out.strip() if out else None
+    """Raíz del repo que contiene `root`, escrita con la MISMA grafía que `root`.
+
+    No se usa `--show-toplevel`: git devuelve la ruta FÍSICA canónica (en Windows expande
+    los nombres cortos 8.3 como `RUNNER~1`; resuelve symlinks, junctions y unidades
+    `subst`; en macOS `/tmp` sale como `/private/tmp`). Todo este módulo —y
+    `deep_history`/`staleness`— hace `relpath` entre esa raíz y `root`: si difieren en
+    grafía, el relpath sale con `..`, cada ruta se descarta y la capa temporal queda
+    vacía EN SILENCIO. `--show-cdup` da el camino relativo hasta la raíz (`../..` o
+    vacío) y se aplica sobre `root` tal cual -> mismo prefijo, relpath exacto.
+
+    Para comparar IDENTIDAD de repo entre proyectos usar `_repo_key`, no esta ruta."""
+    out = _git(["rev-parse", "--show-cdup"], root, timeout=timeout)
+    if out is None:
+        return None
+    return os.path.normpath(os.path.join(root, out.strip()))
+
+
+def _repo_key(top: str) -> str:
+    """Clave canónica de un repo para comparar/deduplicar entre proyectos.
+
+    `_toplevel` conserva la grafía de cada `root`, así que dos proyectos del mismo repo
+    configurados con grafías distintas darían raíces distintas como texto; esto las
+    reduce a la ruta física (y a minúsculas donde el FS no distingue)."""
+    return os.path.normcase(os.path.realpath(top))
 
 
 def _head(root: str, timeout: float | None = None) -> str | None:
@@ -525,7 +547,7 @@ def _rebuild_symbol_cochange(store, st, repos) -> int:
     by_sha = store.git_symbol_commit_by_sha()
     max_syms = st.get("cochange_max_symbols", 20)
     # cross-project: raíz de repo por proyecto + confirmación por cross_link
-    top_by_proj = {name: top for name, (_root, top, _head) in repos.items()}
+    top_by_proj = {name: _repo_key(top) for name, (_root, top, _head) in repos.items()}
     related = (_related_project_pairs(store, set(top_by_proj))
                if st.get("cochange_cross_confirm", True) else None)
     pair_cnt: dict = {}

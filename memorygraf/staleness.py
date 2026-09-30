@@ -141,7 +141,7 @@ class Staleness:
              "--relative", f"{indexed}..HEAD", "--", "."], root, timeout=_GIT_TIMEOUT)
         if not out:
             return
-        shas = self._commits_by_top.setdefault(top, set())
+        shas = self._commits_by_top.setdefault(git_layer._repo_key(top), set())
         seen_commits = 0
         cur_files: set[str] = set()
         for line in out.splitlines():
