@@ -17,3 +17,7 @@ for e in st.all_edges(): print("EDGE", e["source"], "->", e["target"], e["type"]
 r = an.analyze(st); print("ANALYZE", json.dumps({k: r[k] for k in ("totals", "thresholds", "god_nodes")}, default=str))
 c = os.path.join("tests", "fixtures", "crossfile", "c")
 print("walk C", list(os.walk(c)))
+vals = [4, 4, 0, 0, 0, 0, 0, 0, 0, 0]
+m = sum(vals) / 10; var = sum((v - m) ** 2 for v in vals) / 10
+import math
+print("EXACT mean", repr(m), "var", repr(var), "pow", repr(var ** 0.5), "sqrt", repr(math.sqrt(var)), "thr", repr(an._threshold(vals)))
