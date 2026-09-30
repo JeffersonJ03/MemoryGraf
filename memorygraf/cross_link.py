@@ -8,6 +8,7 @@ proyectos como un solo sistema.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from collections import defaultdict
@@ -29,6 +30,32 @@ def _clean_path(path: str) -> str:
     return path.rstrip("/")
 
 
+def _bad_brackets(raw: str) -> bool:
+    """¿El netloc de `raw` lleva corchetes que NO encierran un IPv6 válido?
+
+    Replica la validación que urlsplit hace desde CPython 3.11.4/3.12 (gh-103848), que
+    no existe en todas las versiones soportadas: el 3.10.11 que instala setup-python en
+    Windows —el último 3.10 con binarios para Windows— acepta
+    `http://<SERVER>[:<PORT>]/x` sin quejarse y lo devuelve como ruta `/x`. Hacerla
+    aquí da el mismo resultado en cualquier Python."""
+    netloc = raw.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if "[" not in netloc and "]" not in netloc:
+        return False
+    before, has_open, bracketed = netloc.rpartition("@")[2].partition("[")
+    if not has_open or before:
+        return True
+    host, has_close, port = bracketed.partition("]")
+    if not has_close or "[" in host or "]" in port or (port and not port.startswith(":")):
+        return True
+    if host.startswith("v"):                          # IPvFuture (RFC 3986)
+        return re.fullmatch(r"v[0-9A-Fa-f]+\..+", host) is None
+    try:
+        ipaddress.IPv6Address(host)
+    except ValueError:
+        return True
+    return False
+
+
 def _normalize(raw: str) -> str | None:
     """Devuelve un endpoint canónico, o None si no es un punto de integración útil.
 
@@ -37,7 +64,23 @@ def _normalize(raw: str) -> str | None:
     - Ruta relativa: /api/orders/:id               -> /api/orders/:p (>=2 segmentos)
     """
     if raw.startswith(("http://", "https://")):
-        u = urlparse(raw)
+        try:
+            if _bad_brackets(raw):
+                raise ValueError("Invalid IPv6 URL")
+            u = urlparse(raw)
+        except ValueError:
+            # Lo que entra aqui es texto raspado de archivos fuente, no una URL
+            # verificada: basta con que EMPIECE por http:// para llegar. Como la
+            # regex trata el backtick como delimitador (por los template literals
+            # de JS), tambien captura el inline code de Markdown dentro de los
+            # comentarios, donde abundan las plantillas de documentacion. Una de
+            # ellas, `http://<SERVER>[:<PORT>]/<path>`, tumbaba el sync entero:
+            # urlparse valida lo que va entre corchetes del netloc como IPv6 y
+            # lanza ValueError("Invalid IPv6 URL") (en los Python que no lo hacen,
+            # lo hace `_bad_brackets`). Un literal que ni siquiera se
+            # puede parsear no es un punto de integracion: None, como el resto de
+            # los descartes de esta funcion.
+            return None
         path = _clean_path(u.path)
         segs = [s for s in path.split("/") if s]
         if not segs:                       # base URL sin ruta -> host de integración

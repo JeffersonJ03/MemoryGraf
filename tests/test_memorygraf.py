@@ -2903,6 +2903,60 @@ class TestExtractorRobustness(Base):
         store.close()
 
 
+class TestCrossLinkRobustness(Base):
+    """Un literal que PARECE una URL pero no lo es no debe tumbar el sync.
+
+    A `_normalize` llega texto raspado de archivos fuente: basta con que empiece
+    por `http://`. Y como la regex trata el backtick como delimitador (por los
+    template literals de JS), tambien entra el inline code de Markdown de los
+    comentarios, donde abundan las plantillas de documentacion. Una de ellas,
+    `http://<SERVER>[:<PORT>]/<path>`, hacia que urlparse lanzara
+    ValueError('Invalid IPv6 URL') —valida lo que va entre corchetes del netloc
+    como IPv6— y abortaba full_sync despues del index, dejando el grafo a medias
+    y sin subir sync_version.
+    """
+
+    # Literales que urlparse rechaza: corchetes en el netloc que no son IPv6.
+    NO_PARSEABLES = (
+        "http://<SERVER>[:<PORT>]/<path de URL>",   # plantilla en un JSDoc
+        "http://host[0]/x",
+        "http://a]b/x",
+    )
+
+    def test_literal_no_parseable_se_descarta_sin_crashear(self):
+        from memorygraf.cross_link import _normalize
+        for raw in self.NO_PARSEABLES:
+            self.assertIsNone(_normalize(raw), raw)
+
+    def test_ipv6_valido_sigue_normalizando(self):
+        # La guarda no puede tragarse las URLs con IPv6 de verdad.
+        from memorygraf.cross_link import _normalize
+        self.assertEqual(_normalize("http://[::1]:9020/ASM/OrderTracking"),
+                         "/ASM/OrderTracking")
+        self.assertEqual(_normalize("http://[::1]:9020"), "host:[::1]:9020")
+
+    def test_sync_sobrevive_a_un_comentario_con_plantilla_de_url(self):
+        # El caso real, extremo a extremo: el JSDoc con la plantilla vive en un
+        # archivo junto a un endpoint compartido de verdad, que debe enlazarse.
+        self.write("api.js", (
+            "/**\n"
+            " * Si no, se compone `http://<SERVER>[:<PORT>]/<path de URL>`.\n"
+            " */\n"
+            "fetch('/api/orders');\n"
+        ))
+        otro = os.path.join(self.tmp, "otro")
+        os.makedirs(otro, exist_ok=True)
+        with open(os.path.join(otro, "cli.py"), "w", encoding="utf-8") as f:
+            f.write("requests.get('/api/orders')\n")
+        config = {"projects": [{"name": "proj", "root": self.proj},
+                               {"name": "otro", "root": otro}]}
+        store = Store(self.db)
+        res = cross_link.link(store, config)           # no debe crashear
+        self.assertGreaterEqual(res["cross_edges"], 1)
+        self.assertIn("endpoint:/api/orders", store.all_node_ids())
+        store.close()
+
+
 @unittest.skipUnless(_git_available(), "git no disponible")
 class TestStaleness(_GitRepo, Base):
     """Señal de FRESCURA: el grafo avisa cuándo va por detrás del código (por nodo
