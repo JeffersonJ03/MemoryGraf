@@ -1,0 +1,61 @@
+name: Tests
+
+# Suite en cada PR y en cada push a main, en Linux y en Windows NATIVO.
+# Nace del PR #13: dos bugs de Windows (filtro `.gitignore` no-op, hover de pyright
+# truncado) pasaban en Linux —donde se validaba todo a mano— y nadie los veía.
+#
+# Dos modos, los dos que promete DESIGN §3.2:
+#   portable  núcleo solo-stdlib, sin extras, en el Python MÍNIMO soportado (3.10)
+#   potencia  extras opcionales, en el Python más reciente declarado (3.12)
+#
+# `neural` (model2vec) queda FUERA de potencia a propósito: ningún test afirma nada
+# del embedder neuronal, y con el extra instalado `semantic.build_index` bajaría el
+# modelo por defecto (~480 MB desde HuggingFace) en cada job — lento y frágil ante
+# rate limits, para cubrir cero asserts. Sin él cae a TF-IDF, que es lo que los
+# tests de búsqueda esperan.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · ${{ matrix.mode }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false   # un fallo en Windows no debe cancelar Linux: hay que ver ambos
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        mode: [portable, potencia]
+        include:
+          - mode: portable
+            python: "3.10"
+            extras: ""
+          - mode: potencia
+            python: "3.12"
+            extras: "[parsers,watch,lsp]"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Instalado (editable) y no solo en el cwd: varios tests lanzan
+      # `python -m memorygraf.cli` como subproceso desde un tmpdir.
+      - name: Instalar MemoryGraf (${{ matrix.mode }})
+        run: python -m pip install -e ".${{ matrix.extras }}"
+
+      - name: Tests
+        run: python -m unittest discover -s tests

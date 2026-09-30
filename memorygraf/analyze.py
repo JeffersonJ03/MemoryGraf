@@ -11,6 +11,8 @@ No decide nada: expone señales trazables para que el asistente/humano prioricen
 """
 from __future__ import annotations
 
+import math
+
 # aristas que cuentan como "dependencia estructural" para fan-in/fan-out
 _STRUCTURAL = {"calls", "imports", "depends_on", "references"}
 
@@ -26,13 +28,19 @@ def _degrees(edges: list):
 
 
 def _threshold(values: list) -> float:
-    """Umbral de anomalía: media + 2·desviación (sin numpy)."""
+    """Umbral de anomalía: media + 2·desviación (sin numpy).
+
+    Con `math.fsum` (suma correctamente redondeada) el resultado NO depende del orden
+    de `values`, que es el orden de los nodos en el store. Con `sum` la varianza
+    arrastraba error de redondeo distinto según el orden, y un grado que caía justo
+    en el umbral (media + 2σ == 4.0) quedaba dentro o fuera según la máquina:
+    4.0 en un orden, 4.000000000000001 en otro."""
     if not values:
         return 0.0
     n = len(values)
-    mean = sum(values) / n
-    var = sum((v - mean) ** 2 for v in values) / n
-    return mean + 2 * (var ** 0.5)
+    mean = math.fsum(values) / n
+    var = math.fsum((v - mean) ** 2 for v in values) / n
+    return mean + 2 * math.sqrt(var)
 
 
 def analyze(store, limit: int = 10) -> dict:

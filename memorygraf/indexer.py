@@ -63,7 +63,14 @@ def _gitignored(root: str, paths: list) -> set:
     Delega en `git check-ignore --stdin` → semántica COMPLETA de gitignore (negaciones `!`,
     `**`, anclajes, `.gitignore` anidados) sin reimplementar nada. check-ignore respeta el
     índice por defecto: un archivo YA rastreado NO se reporta como ignorado aunque encaje un
-    patrón — justo lo que queremos (indexar lo versionado, saltar lo generado/local)."""
+    patrón — justo lo que queremos (indexar lo versionado, saltar lo generado/local).
+
+    Se usa `-z` (entrada y salida separadas por NUL). En modo texto git aplica
+    C-quoting a las rutas "raras", y en Windows un abspath siempre lo es: la
+    devuelve entrecomillada, con los separadores duplicados y un CR del CRLF, así
+    que no casaba con lo enviado y el filtro quedaba en un no-op silencioso. Con
+    `-z` la ruta vuelve verbatim y la comparación contra `paths` es exacta en
+    toda plataforma."""
     if not paths:
         return set()
     git = shutil.which("git")
@@ -76,13 +83,13 @@ def _gitignored(root: str, paths: list) -> set:
         if inside.returncode != 0 or inside.stdout.strip() != "true":
             return set()
         proc = subprocess.run(
-            [git, "-C", root, "check-ignore", "--stdin"],
-            input="\n".join(paths), capture_output=True, text=True)
+            [git, "-C", root, "check-ignore", "-z", "--stdin"],
+            input="\0".join(paths), capture_output=True, text=True)
     except OSError:
         return set()
     if proc.returncode not in (0, 1):   # 0=hay ignorados, 1=ninguno; 128/otros=error → nada
         return set()
-    return {ln.strip() for ln in proc.stdout.splitlines() if ln.strip()}
+    return {p for p in proc.stdout.split("\0") if p}
 
 
 def _apply_gitignore(root: str, candidates: list, respect_gitignore: bool,
@@ -109,8 +116,12 @@ def _iter_files(root: str, excludes: set, respect_gitignore: bool = True,
                 unignore: tuple = ()):
     candidates = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in excludes]
-        for fn in filenames:
+        # Orden FIJO: os.walk devuelve el del sistema de archivos (hash en ext4, alfabético
+        # en NTFS/tmpfs) y de él dependen las colisiones de path_index (`x.c`/`x.h` comparten
+        # clave) y el orden de nodos que alimenta los umbrales de analyze. Sin ordenar, el
+        # mismo repo daba grafos distintos según la máquina (CI en ubuntu-latest).
+        dirnames[:] = sorted(d for d in dirnames if d not in excludes)
+        for fn in sorted(filenames):
             ext = os.path.splitext(fn)[1].lower()
             if ext in EXT_LANG:
                 candidates.append(os.path.join(dirpath, fn))
@@ -270,6 +281,7 @@ class Indexer:
         self.pending_calls = []    # (file_id, project, ext, base_dir, calls_out, bindings)
         self.py_module_index = {}  # (project, dotted) -> file_id
         self.path_index = {}       # (project, normalized_relpath_no_ext) -> file_id
+        self.file_index = {}       # (project, normalized_relpath) -> file_id (ruta exacta)
         # alias de tsconfig/jsconfig (compilerOptions.paths) por proyecto
         self.js_aliases = {}       # project -> [(prefijo, con_estrella, [dest,...])]
         # M9: config por-proyecto para resolver imports de Go y PHP
@@ -520,6 +532,7 @@ class Indexer:
                 self.ns_index.setdefault((project, ns), []).append(rel_id)
             self.file_ns_scope[rel_id] = declared | used
         no_ext = relpath.rsplit(".", 1)[0]
+        self.file_index[(project, relpath)] = rel_id
         self.path_index[(project, no_ext)] = rel_id
         # index/ resoluciones tipo carpeta
         if no_ext.endswith("/index"):
@@ -671,8 +684,12 @@ class Indexer:
             return None
         if g in ("c", "cpp", "r"):
             # C/C++: #include relativo; R: source("path") relativo (ambos por ruta)
+            # Primero la ruta EXACTA: `x.h` y `x.c` comparten clave en path_index (sin
+            # extensión) y ahí gana el último indexado, así que `#include "x.h"` acababa
+            # apuntando a `x.c`. Sin extensión o sin match exacto, cae al índice por stem.
             norm = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
-            return self.path_index.get((project, os.path.splitext(norm)[0]))
+            return (self.file_index.get((project, norm))
+                    or self.path_index.get((project, os.path.splitext(norm)[0])))
         if g == "rust":
             for suffix in (raw, raw + "/mod"):
                 cand = os.path.normpath(os.path.join(base_dir, suffix)).replace("\\", "/")
