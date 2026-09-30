@@ -116,8 +116,12 @@ def _iter_files(root: str, excludes: set, respect_gitignore: bool = True,
                 unignore: tuple = ()):
     candidates = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in excludes]
-        for fn in filenames:
+        # Orden FIJO: os.walk devuelve el del sistema de archivos (hash en ext4, alfabético
+        # en NTFS/tmpfs) y de él dependen las colisiones de path_index (`x.c`/`x.h` comparten
+        # clave) y el orden de nodos que alimenta los umbrales de analyze. Sin ordenar, el
+        # mismo repo daba grafos distintos según la máquina (CI en ubuntu-latest).
+        dirnames[:] = sorted(d for d in dirnames if d not in excludes)
+        for fn in sorted(filenames):
             ext = os.path.splitext(fn)[1].lower()
             if ext in EXT_LANG:
                 candidates.append(os.path.join(dirpath, fn))
@@ -277,6 +281,7 @@ class Indexer:
         self.pending_calls = []    # (file_id, project, ext, base_dir, calls_out, bindings)
         self.py_module_index = {}  # (project, dotted) -> file_id
         self.path_index = {}       # (project, normalized_relpath_no_ext) -> file_id
+        self.file_index = {}       # (project, normalized_relpath) -> file_id (ruta exacta)
         # alias de tsconfig/jsconfig (compilerOptions.paths) por proyecto
         self.js_aliases = {}       # project -> [(prefijo, con_estrella, [dest,...])]
         # M9: config por-proyecto para resolver imports de Go y PHP
@@ -527,6 +532,7 @@ class Indexer:
                 self.ns_index.setdefault((project, ns), []).append(rel_id)
             self.file_ns_scope[rel_id] = declared | used
         no_ext = relpath.rsplit(".", 1)[0]
+        self.file_index[(project, relpath)] = rel_id
         self.path_index[(project, no_ext)] = rel_id
         # index/ resoluciones tipo carpeta
         if no_ext.endswith("/index"):
@@ -678,8 +684,12 @@ class Indexer:
             return None
         if g in ("c", "cpp", "r"):
             # C/C++: #include relativo; R: source("path") relativo (ambos por ruta)
+            # Primero la ruta EXACTA: `x.h` y `x.c` comparten clave en path_index (sin
+            # extensión) y ahí gana el último indexado, así que `#include "x.h"` acababa
+            # apuntando a `x.c`. Sin extensión o sin match exacto, cae al índice por stem.
             norm = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
-            return self.path_index.get((project, os.path.splitext(norm)[0]))
+            return (self.file_index.get((project, norm))
+                    or self.path_index.get((project, os.path.splitext(norm)[0])))
         if g == "rust":
             for suffix in (raw, raw + "/mod"):
                 cand = os.path.normpath(os.path.join(base_dir, suffix)).replace("\\", "/")
