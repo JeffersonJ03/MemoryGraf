@@ -303,6 +303,21 @@ class TestCrossFileImportsM9(Base):
         # #include "util/helper.h" -> util/helper.h
         self.assertIn(("c/main.c", "c/util/helper.h"), self._imports_for("c"))
 
+    def test_c_include_resolves_exact_path_despite_stem_collision(self):
+        # `helper.h` y `helper.c` comparten clave en path_index (sin extensión) y ahí
+        # gana el último registrado. En el ext4 de ubuntu-latest os.walk devolvía
+        # ['helper.h', 'helper.c'] y `#include "util/helper.h"` acababa en el .c. Se
+        # registra aquí ese orden a mano (el recorrido ya va ordenado y lo taparía):
+        # el include debe resolverse por su ruta exacta.
+        ix = Indexer(Store(self.db), self.config)
+        ix._register_indexes("proj", "util/helper.h", "proj/util/helper.h", "")
+        ix._register_indexes("proj", "util/helper.c", "proj/util/helper.c", "")
+        self.assertEqual(ix._resolve_generic("proj", ".c", "", "util/helper.h"),
+                         "proj/util/helper.h")
+        self.assertEqual(ix._resolve_generic("proj", ".c", "util", "helper.h"),
+                         "proj/util/helper.h")
+        ix.store.close()
+
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_rust_mod_declaration(self):
         # mod helper; -> helper.rs
@@ -2473,6 +2488,16 @@ class TestAnalyzeReport(Base):
         top = next(g for g in r["god_nodes"] if g["id"] == "proj/mod.py")
         self.assertGreaterEqual(top["fan_in"], 4)
         store.close()
+
+    def test_threshold_is_order_independent(self):
+        # El fixture de arriba cae JUSTO en el umbral (media + 2σ == 4.0 == fan-in). Con
+        # `sum` salía 4.000000000000001 si los nodos venían en otro orden y el god-node
+        # desaparecía (ubuntu-latest · portable). Debe dar lo mismo en cualquier orden.
+        import itertools
+        from memorygraf import analyze as an
+        vals = [4, 4, 0, 0, 0, 0, 0, 0, 0, 0]
+        got = {an._threshold(list(p)) for p in set(itertools.permutations(vals))}
+        self.assertEqual(got, {4.0})
 
     def test_hotspot_requires_real_churn(self):
         # churn=1 sin cobertura NO debe marcarse; churn alto o con fix SÍ
