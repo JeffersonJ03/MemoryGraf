@@ -250,6 +250,108 @@ class Query:
                 lines.append(f"  {nm} -[{e['type']}]->  @{_loc(src) if src else ''}{_conf(e)}")
         return _budget("\n".join(lines), budget_tokens)
 
+    # --- path: ¿cómo se conectan A y B? (M14) ---
+    def path(self, source: str, target: str, max_hops: int = 6, edge_types=None,
+             k: int = 1, budget_tokens: int = 800) -> str:
+        """Caminos MÁS CORTOS entre dos nodos, salto a salto con tipo, procedencia y
+        confianza. El grafo se recorre sin dirección (la pregunta es "¿qué relación
+        hay?"), pero cada salto se imprime con su sentido real. Determinista: vecinos
+        en orden de id, así un empate se resuelve igual en cada corrida.
+
+        Los nodos `external` (os, react, …) solo valen como extremo, nunca como paso
+        intermedio: dos archivos que importan `os` no están "conectados".
+        """
+        missing = [n for n in (source, target) if not self.store.get_node(n)]
+        if missing:
+            return "\n".join(self._not_found(n) for n in missing)
+        a, b = self.store.get_node(source), self.store.get_node(target)
+        head = f"# path: {a['name']} @{_loc(a)}  ⇄  {b['name']} @{_loc(b)}"
+        if source == target:
+            return f"{head}\n(es el mismo nodo)"
+        adj = self._adjacency(edge_types, endpoints={source, target})
+        via = f" vía {','.join(edge_types)}" if edge_types else ""
+        dist_a = _bfs(adj, source, max_hops)
+        if target not in dist_a:
+            return "\n".join([head] + self._no_path_hint(adj, source, target, max_hops,
+                                                         edge_types, via))
+        d = dist_a[target]
+        dist_b = _bfs(adj, target, d)
+        paths = []
+        def _walk(cur, acc):   # DFS solo por nodos en algún camino mínimo, en orden de id
+            if len(paths) >= k:
+                return
+            if cur == target:
+                paths.append(list(acc)); return
+            for nxt in sorted(adj.get(cur, {})):
+                if dist_a.get(nxt) == dist_a[cur] + 1 and dist_a[nxt] + dist_b.get(nxt, d + 1) == d:
+                    acc.append(nxt); _walk(nxt, acc); acc.pop()
+        k = max(1, k)
+        _walk(source, [source])
+        from . import confidence
+        rank = {confidence.EXTRACTED: 0, confidence.INFERRED: 1, confidence.AMBIGUOUS: 2}
+        n = len(paths)
+        cap = f", tope {k}" if k > 1 and n == k else ""
+        lines = [head, f"({d} salto(s){via}; {n} camino(s) mínimo(s){cap})"]
+        for i, p in enumerate(paths, 1):
+            worst = confidence.EXTRACTED
+            hops = []
+            for u, v in zip(p, p[1:]):
+                es = adj[u][v]
+                lbls = [confidence.label(e) for e in es]
+                hop = min(lbls, key=lambda l: rank[l])   # el salto vale su MEJOR arista
+                if rank[hop] > rank[worst]:
+                    worst = hop
+                rels = []
+                for e in es:
+                    arrow = f"-[{e['type']}]->" if e["source"] == u else f"<-[{e['type']}]-"
+                    prov = f" ({e['provenance']})" if e.get("provenance") else ""
+                    rels.append(f"{arrow}{prov}")
+                node = self.store.get_node(v)
+                nm = node["name"] if node else v
+                conf = f" ⟨{hop}⟩" if hop != confidence.EXTRACTED else ""
+                hops.append(f"  {' | '.join(rels)}  {nm}  @{_loc(node) if node else ''}{conf}")
+            tag = f"  ⟨se apoya en aristas {worst}⟩" if worst != confidence.EXTRACTED else ""
+            lines.append(f"## camino {i}{tag}" if k > 1 else f"## camino{tag}")
+            lines.append(f"  {a['name']}  @{_loc(a)}")
+            lines += hops
+        return _budget("\n".join(lines), budget_tokens)
+
+    def _adjacency(self, edge_types=None, endpoints=frozenset()) -> dict:
+        """{nodo: {vecino: [aristas]}} sin dirección. Excluye `external` salvo extremos."""
+        ext = {n["id"] for n in self.store.all_nodes(types=["external"])} - set(endpoints)
+        wanted = set(edge_types) if edge_types else None
+        adj: dict = {}
+        for e in self.store.all_edges():
+            s, t = e["source"], e["target"]
+            if s == t or s in ext or t in ext or (wanted and e["type"] not in wanted):
+                continue
+            adj.setdefault(s, {}).setdefault(t, []).append(e)
+            adj.setdefault(t, {}).setdefault(s, []).append(e)
+        for nbrs in adj.values():   # orden estable de las aristas de cada salto
+            for es in nbrs.values():
+                es.sort(key=lambda e: (e["type"], e["source"], e["target"]))
+        return adj
+
+    def _no_path_hint(self, adj, source, target, max_hops, edge_types, via) -> list:
+        """Sin camino: decir por qué y dar el siguiente paso (no dejar al agente a ciegas)."""
+        full = _bfs(adj, source, None)
+        if target in full:
+            return [f"(sin camino en ≤{max_hops} saltos{via}; el más corto tiene "
+                    f"{full[target]} — sube max_hops)"]
+        out = [f"(sin camino{via}: están en componentes desconectadas del grafo)"]
+        if edge_types:
+            if target in _bfs(self._adjacency(None, {source, target}), source, max_hops):
+                out.append("  ↳ sí hay camino con todos los tipos de arista: quita el filtro --via")
+        out.append("  ↳ prueba `neighbors` de cada extremo para ver cómo se conecta cada uno")
+        return out
+
+    def _not_found(self, node_id: str) -> str:
+        cands = self.store.find_by_name(node_id.rsplit("::", 1)[-1].rsplit("/", 1)[-1])
+        if not cands:
+            return f"(nodo no encontrado: {node_id})"
+        return (f"(nodo no encontrado: {node_id}; ¿quisiste decir: "
+                f"{', '.join(cands)}?)")
+
     # --- decisions: decisiones y convenciones aplicables (con procedencia) ---
     def decisions(self, topic: str | None = None, budget_tokens: int = 1200) -> str:
         if topic:
@@ -503,6 +605,21 @@ class Query:
         st = self.store.stats()
         st["freshness"] = self._fresh().as_dict()
         return st
+
+
+def _bfs(adj: dict, start: str, max_depth: int | None) -> dict:
+    """Distancias en saltos desde `start` (hasta `max_depth`; None = sin tope)."""
+    dist = {start: 0}
+    frontier = [start]
+    while frontier and (max_depth is None or dist[frontier[0]] < max_depth):
+        nxt = []
+        for u in frontier:
+            for v in adj.get(u, ()):
+                if v not in dist:
+                    dist[v] = dist[u] + 1
+                    nxt.append(v)
+        frontier = nxt
+    return dist
 
 
 def _budget(text: str, budget_tokens: int) -> str:

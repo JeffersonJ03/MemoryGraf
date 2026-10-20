@@ -74,6 +74,29 @@ TOOLS = [
         },
     },
     {
+        "name": "path",
+        "description": (
+            "Cómo se conectan DOS nodos: camino(s) más corto(s), salto a salto, con el tipo "
+            "de relación, su procedencia y su confianza (marca los saltos INFERRED/AMBIGUOUS). "
+            "Úsalo cuando sospechas un acoplamiento entre A y B y quieres confirmarlo antes "
+            "de editar. Con edge_types=['calls'] ves solo la cadena de llamadas."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "Id del nodo origen."},
+                "target": {"type": "string", "description": "Id del nodo destino."},
+                "max_hops": {"type": "integer", "default": 6},
+                "edge_types": {"type": "array", "items": {"type": "string"},
+                               "description": "Solo estos tipos de arista (p.ej. calls, imports, co_changes_with)."},
+                "k": {"type": "integer", "default": 1,
+                      "description": "Hasta k caminos de longitud mínima."},
+                "budget_tokens": {"type": "integer", "default": 800},
+            },
+            "required": ["source", "target"],
+        },
+    },
+    {
         "name": "get",
         "description": (
             "Detalle de un nodo: proyecto, ubicación exacta (path:línea), firma, tags y "
@@ -214,6 +237,11 @@ class Server:
         if name == "neighbors":
             return q.neighbors(args["node_id"], edge_types=args.get("edge_types"),
                                budget_tokens=int(args.get("budget_tokens", 800)))
+        if name == "path":
+            return q.path(args["source"], args["target"],
+                          max_hops=int(args.get("max_hops", 6)),
+                          edge_types=args.get("edge_types"), k=int(args.get("k", 1)),
+                          budget_tokens=int(args.get("budget_tokens", 800)))
         if name == "get":
             return q.get(args["node_id"])
         if name == "decisions":

@@ -153,7 +153,7 @@ son caché regenerable. Todo es portable y agnóstico del LLM. Ver [`DESIGN.md`]
 
 ## Herramientas MCP
 
-`overview` · `search` · `neighbors` · `get` · `decisions` · `stats` · `working_set` ·
+`overview` · `search` · `neighbors` · `path` · `get` · `decisions` · `stats` · `working_set` ·
 `impact` · `history` · `digest_log`
 
 `impact` predice el "blast radius" (llamadas ∪ co-cambio). Con `--deep` (CLI) o `deep:true`
@@ -187,7 +187,7 @@ se ajusta con `freshness.ttl_seconds` o `MEMORYGRAF_FRESHNESS_TTL`.
 
 ## CLI (mismas capacidades, también sin IA)
 
-- **Consulta:** `overview` · `search [--rerank | --rerank-llm]` · `neighbors` · `get` ·
+- **Consulta:** `overview` · `search [--rerank | --rerank-llm]` · `neighbors` · `path A B` · `get` ·
   `decisions` · `stats` · `working-set` · `impact [--deep]` · `history` · `graph [--level symbol]`.
 - **Mantenimiento:** `init` · `sync` · `index` · `summarize` · `embed` · `runtime [--lsp]` ·
   `compile [--llm]` · `digest [--llm]` · `analyze` · `report` · `watch` · `export`.
