@@ -211,6 +211,11 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
             raw_imports.append(mod)
             for a in node.names:
                 bindings[a.asname or a.name] = (mod, a.name)
+                # `from . import viz` / `from pkg import sub`: el nombre puede ser un
+                # SUBMÓDULO. Se ofrece `mod.nombre` al resolutor; si no es un módulo, su
+                # coincidencia por prefijo recae en `mod` (misma arista, deduplicada).
+                if a.name != "*":
+                    raw_imports.append(mod + a.name if mod.endswith(".") else f"{mod}.{a.name}")
 
     # --- calls: enclosing symbol -> símbolo llamado (misma unidad de archivo) ---
     spans.sort(key=lambda s: s[1] - s[0])  # el más pequeño (interno) primero

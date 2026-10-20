@@ -564,6 +564,7 @@ class Indexer:
         for file_id_, project, raws in self.pending_imports:
             ext = os.path.splitext(file_id_)[1].lower()
             base_dir = os.path.dirname(file_id_[len(project) + 1:])  # relpath dir
+            done = set()   # un mismo destino por archivo cuenta una vez (raws redundantes)
             for raw in raws:
                 target = None
                 if ext == ".py":
@@ -573,6 +574,9 @@ class Indexer:
                 else:
                     target = self._resolve_generic(project, ext, base_dir, raw)
                 if target:
+                    if target in done:
+                        continue
+                    done.add(target)
                     self.store.upsert_edge(Edge(
                         source=file_id_, target=target, type=EDGE_IMPORTS,
                         confidence=0.9 if ext != ".py" else 1.0,
@@ -584,6 +588,9 @@ class Indexer:
                     if not pkg or raw.startswith("."):
                         continue
                     ext_id = f"external:{pkg}"
+                    if ext_id in done:
+                        continue
+                    done.add(ext_id)
                     if ext_id not in external_seen:
                         self.store.upsert_node(Node(
                             id=ext_id, type=NODE_EXTERNAL, name=pkg,

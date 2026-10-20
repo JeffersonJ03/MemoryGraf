@@ -209,6 +209,27 @@ class TestImportResolutionMatrix(Base):
         self.assertIn(("proj/a.py", "proj/b.py"), imports)
         store.close()
 
+    def test_python_from_package_import_submodule(self):
+        # Bug (lo destapó M14): `from . import viz` resolvía SOLO al __init__.py del
+        # paquete y viz.py quedaba aislado. Igual con `from pkg import sub` absoluto.
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/viz.py", "def draw():\n    return 1\n")
+        self.write("pkg/ollama.py", "def ask():\n    return 1\n")
+        self.write("pkg/util.py", "def helper():\n    return 1\n")
+        self.write("pkg/cli.py",
+                   "from .util import helper\n\ndef main():\n"
+                   "    from . import viz, ollama as ol\n    return viz.draw()\n")
+        self.write("app.py", "from pkg import viz\n")
+        store, counters = self.index()
+        imports = [(e["source"], e["target"]) for e in store.all_edges()
+                   if e["type"] == "imports"]
+        for tgt in ("viz", "ollama", "util"):
+            self.assertIn(("proj/pkg/cli.py", f"proj/pkg/{tgt}.py"), imports)
+        self.assertIn(("proj/app.py", "proj/pkg/viz.py"), imports)
+        # `from .util import helper` no inventa un módulo `util.helper`: recae en util.py
+        self.assertFalse(any("helper" in t for _, t in imports))
+        store.close()
+
 
 def _microservices_config():
     svcs = sorted(d for d in os.listdir(MICROSVC_DIR)

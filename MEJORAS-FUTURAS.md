@@ -12,13 +12,9 @@
 > Complementa `DESIGN.md` (principios §3, vinculantes).
 
 > **▶ Siguiente paso (actualizar al cerrar cada hito).**
-> 1. **Bug del indexador:** `from . import X` (Python) genera la arista `imports` hacia el
->    `__init__.py` del paquete en vez de hacia `X.py`. Los módulos importados así quedan
->    aislados y `neighbors`/`impact`/`path` ven menos de lo que hay. Lo destapó M14: en
->    este repo `viz.py`↔`ollama.py` salen "desconectados" aunque `cli.py` importa ambos.
-> 2. **M15** (más gramáticas) y **M16** (instaladores multi-host): completan el paquete de
+> 1. **M15** (más gramáticas) y **M16** (instaladores multi-host): completan el paquete de
 >    mayor retorno por esfuerzo junto con M14.
-> 3. Luego **M13** (comunidades) y **M17** (always-on). §9 sigue abierto en paralelo.
+> 2. Luego **M13** (comunidades) y **M17** (always-on). §9 sigue abierto en paralelo.
 
 ---
 
@@ -321,6 +317,12 @@ queda `Subsistema N` en vez de inventar un nombre malo.
   sugiere ids con ese nombre (`Store.find_by_name`).
 - Tests: `TestPath` (cadena, desconexión, `--via`, empate, `max_hops`, external, id
   desconocido, registro MCP).
+- **Bug que destapó (corregido):** `from . import X` / `from pkg import sub` solo
+  generaban la arista `imports` hacia el paquete (`__init__.py`), nunca hacia el
+  submódulo. Los módulos importados así quedaban aislados (en este repo `viz.py` y
+  `ollama.py`). Ahora el extractor ofrece `mod.nombre` al resolutor, y este deduplica
+  por archivo. En este repo, `imports` pasa de 76 a 169 aristas sin perder ninguna.
+  Test: `test_python_from_package_import_submodule`.
 
 <details><summary>Propuesta original</summary>
 
