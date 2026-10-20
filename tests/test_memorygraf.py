@@ -3536,5 +3536,31 @@ class TestOllamaDetection(unittest.TestCase):
         self.assertIsInstance(ollama.installed(), bool)
 
 
+class TestDockerfile(unittest.TestCase):
+    """La imagen corre como `appuser` (10001), pero en Linux el bind mount conserva el
+    uid del host: `docker run -v "$PWD:/workspace" memorygraf init` fallaba con
+    "Permission denied" al crear .memorygraf. El uso documentado pasa --user con el uid
+    del host, y para eso HOME debe ser fijo y escribible por cualquier uid."""
+
+    PATH = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
+
+    def setUp(self):
+        if not os.path.exists(self.PATH):
+            self.skipTest("sin Dockerfile (instalación desde sdist/wheel)")
+        with open(self.PATH, encoding="utf-8") as f:
+            self.text = f.read()
+        self.runtime = self.text.split(" AS runtime", 1)[1]
+
+    def test_documented_runs_pass_host_uid(self):
+        runs = [l for l in self.text.splitlines() if l.startswith("#   docker run")]
+        self.assertTrue(runs)
+        for line in runs:
+            self.assertIn('--user "$(id -u):$(id -g)"', line)
+
+    def test_home_fixed_and_writable_for_any_uid(self):
+        self.assertIn("HOME=/home/appuser", self.runtime)
+        self.assertIn("chmod 1777 /home/appuser", self.runtime)
+
+
 if __name__ == "__main__":
     unittest.main()
