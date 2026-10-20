@@ -8,7 +8,7 @@ Despliegue típico:
   memorygraf install claude              # registra el MCP (1 comando)
   memorygraf mcp-config                  # o imprime el JSON para cualquier cliente MCP
 
-Consultas: overview / search / neighbors / get / decisions / stats
+Consultas: overview / search / neighbors / path / get / decisions / stats
 Mantenimiento: index / summarize / embed / sync / watch / export
 Servidor: mcp
 """
@@ -52,6 +52,7 @@ USO DIARIO
   memorygraf overview             # panorama para orientarse
   memorygraf search "login"       # busca en el grafo (semántico + léxico)
   memorygraf impact <node_id>     # qué se rompería al tocar un nodo
+  memorygraf path <A> <B>         # cómo se conectan dos nodos, salto a salto
   memorygraf graph                # genera graph.html (lo que "ve" la IA)
 
 RESÚMENES: RÁPIDO vs PROSA
@@ -216,6 +217,20 @@ def main(argv=None):
     p.add_argument("--rerank-llm", action="store_true", help="Reordena con LLM local (Ollama; latencia acotada + fallback)")
     p = sub.add_parser("neighbors", help="Vecinos de un nodo (relaciones entrantes/salientes)")
     p.add_argument("node_id"); p.add_argument("--types"); p.add_argument("--budget", type=int, default=800)
+    p = sub.add_parser(
+        "path", help="Cómo se conectan dos nodos: camino más corto, salto a salto",
+        description="Camino(s) más corto(s) entre dos nodos, con tipo, procedencia y "
+                    "confianza de cada salto. Recorre el grafo sin dirección.",
+        epilog="Ejemplos:\n"
+               "  memorygraf path proj/app/api.py proj/app/db.py\n"
+               "  memorygraf path proj/a.py::login proj/b.py::save --via calls,imports\n"
+               "  memorygraf path proj/a.py proj/b.py --all 3 --max-hops 8",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("source", help="Id del nodo origen"); p.add_argument("target", help="Id del nodo destino")
+    p.add_argument("--max-hops", type=int, default=6, help="Saltos máximos (def: 6)")
+    p.add_argument("--via", help="Solo estos tipos de arista, separados por coma (p.ej. calls,imports)")
+    p.add_argument("--all", type=int, default=1, metavar="K", help="Hasta K caminos de longitud mínima (def: 1)")
+    p.add_argument("--budget", type=int, default=800)
     p = sub.add_parser("get", help="Muestra un nodo por su id (detalle + procedencia)")
     p.add_argument("node_id")
     p = sub.add_parser("decisions", help="Decisiones y convenciones del proyecto (opcional: por tema)")
@@ -453,6 +468,10 @@ def main(argv=None):
                                rerank=rr, config=_load_cfg(args) if rr == "llm" else None))
             elif args.cmd == "neighbors":
                 print(q.neighbors(args.node_id, edge_types=types, budget_tokens=args.budget))
+            elif args.cmd == "path":
+                print(q.path(args.source, args.target, max_hops=args.max_hops,
+                             edge_types=args.via.split(",") if args.via else None,
+                             k=args.all, budget_tokens=args.budget))
             elif args.cmd == "get":
                 print(q.get(args.node_id))
             elif args.cmd == "decisions":

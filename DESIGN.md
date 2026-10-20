@@ -274,6 +274,7 @@ procedencia y respetan un `budget_tokens`.
 | `overview`  | `scope?` (proyecto o módulo), `budget_tokens` | Mapa de alto nivel: módulos, entidades clave, decisiones principales. | Al inicio de una tarea, para orientarse. **Reemplaza volcar `CLAUDE.md` entero.** |
 | `search`    | `query`, `budget_tokens`, `types?` | Nodos relevantes rankeados con `summary` + `path:línea`. Ranking híbrido (léxico + estructural + semántico). | Para localizar dónde vive algo. |
 | `neighbors` | `node_id`, `edge_types?`, `depth?` | Subgrafo conectado (qué llama/importa/depende, con quién se relaciona). | Para entender impacto y contexto de un nodo. |
+| `path`      | `source`, `target`, `max_hops?`, `edge_types?`, `k?` | Camino(s) más corto(s) entre dos nodos, salto a salto, con tipo, procedencia y confianza (M14). | Para confirmar un acoplamiento sospechado entre A y B antes de editar. |
 | `get`       | `node_id` | Detalle completo del nodo + puntero exacto al span de código. | Para obtener la ubicación precisa antes de leer/editar el archivo real. |
 | `decisions` | `topic?` | Decisiones y convenciones aplicables al tema. | Para respetar reglas del proyecto sin adivinar. |
 
@@ -614,7 +615,7 @@ una futura optimización sería un acumulador incremental por SHA.
 
 ### 18.6 Estado actual
 
-- **Herramientas MCP (10):** `overview`, `search`, `neighbors`, `get`, `decisions`, `stats`,
+- **Herramientas MCP (11):** `overview`, `search`, `neighbors`, `path` (M14), `get`, `decisions`, `stats`,
   `working_set`, `impact` (+ `deep`), `history`, `digest_log`.
 - **CLI adicional:** `runtime [--lsp]`, `analyze`, `report`, `compile [--llm]`,
   `digest [--llm]`, `graph [--level symbol]`, `doctor`, `setup-ollama`.

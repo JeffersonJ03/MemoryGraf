@@ -515,6 +515,11 @@ class Store:
             params += list(edge_types)
         return [dict(r) for r in self.conn.execute(q, params)]
 
+    def find_by_name(self, name: str, limit: int = 5) -> list:
+        """Ids de nodos con ese nombre exacto (para sugerir cuando el id no existe)."""
+        return [r["id"] for r in self.conn.execute(
+            "SELECT id FROM nodes WHERE name=? ORDER BY id LIMIT ?", (name, limit))]
+
     def search_fts(self, query: str, limit: int, types=None) -> list:
         if self.fts:
             try:

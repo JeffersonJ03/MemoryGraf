@@ -209,6 +209,27 @@ class TestImportResolutionMatrix(Base):
         self.assertIn(("proj/a.py", "proj/b.py"), imports)
         store.close()
 
+    def test_python_from_package_import_submodule(self):
+        # Bug (lo destapó M14): `from . import viz` resolvía SOLO al __init__.py del
+        # paquete y viz.py quedaba aislado. Igual con `from pkg import sub` absoluto.
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/viz.py", "def draw():\n    return 1\n")
+        self.write("pkg/ollama.py", "def ask():\n    return 1\n")
+        self.write("pkg/util.py", "def helper():\n    return 1\n")
+        self.write("pkg/cli.py",
+                   "from .util import helper\n\ndef main():\n"
+                   "    from . import viz, ollama as ol\n    return viz.draw()\n")
+        self.write("app.py", "from pkg import viz\n")
+        store, counters = self.index()
+        imports = [(e["source"], e["target"]) for e in store.all_edges()
+                   if e["type"] == "imports"]
+        for tgt in ("viz", "ollama", "util"):
+            self.assertIn(("proj/pkg/cli.py", f"proj/pkg/{tgt}.py"), imports)
+        self.assertIn(("proj/app.py", "proj/pkg/viz.py"), imports)
+        # `from .util import helper` no inventa un módulo `util.helper`: recae en util.py
+        self.assertFalse(any("helper" in t for _, t in imports))
+        store.close()
+
 
 def _microservices_config():
     svcs = sorted(d for d in os.listdir(MICROSVC_DIR)
@@ -2469,6 +2490,84 @@ class TestConfidence(Base):
         self.assertEqual(d[cf.AMBIGUOUS], 1)
 
 
+class TestPath(Base):
+    """M14 · `path A B`: cómo se conectan dos nodos."""
+
+    def _graph(self, edges, extra_nodes=()):
+        from memorygraf.model import Node
+        store = Store(self.db)
+        ids = {i for s, t, *_ in edges for i in (s, t)} | set(extra_nodes)
+        for i in sorted(ids):
+            typ = "external" if i.startswith("external:") else "symbol"
+            store.upsert_node(Node(i, typ, i.rsplit("::", 1)[-1], "p", "m.py", 1))
+        for s, t, typ, *rest in edges:
+            store.upsert_edge(Edge(s, t, typ, *(rest or [1.0, "parser"])))
+        store.commit()
+        self.addCleanup(store.close)
+        return Query(store)
+
+    def test_chain_two_hops_with_types(self):
+        q = self._graph([("p::a", "p::b", "calls"), ("p::b", "p::c", "imports")])
+        out = q.path("p::a", "p::c")
+        self.assertIn("2 salto(s)", out)
+        self.assertIn("-[calls]-> (parser)  b", out)
+        self.assertIn("-[imports]-> (parser)  c", out)
+        # el sentido real se respeta al recorrer al revés
+        self.assertIn("<-[calls]- (parser)  a", q.path("p::c", "p::a"))
+
+    def test_disconnected_is_clean(self):
+        q = self._graph([("p::a", "p::b", "calls")], extra_nodes=["p::x"])
+        out = q.path("p::a", "p::x")
+        self.assertIn("componentes desconectadas", out)
+        self.assertIn("neighbors", out)
+
+    def test_via_excludes_cochange_only_path(self):
+        q = self._graph([("p::a", "p::b", "calls"), ("p::b", "p::c", EDGE_CO_CHANGES, 0.8, "git")])
+        self.assertIn("⟨INFERRED⟩", q.path("p::a", "p::c"))
+        out = q.path("p::a", "p::c", edge_types=["calls"])
+        self.assertIn("sin camino vía calls", out)
+        self.assertIn("quita el filtro --via", out)
+
+    def test_tie_is_deterministic_by_id(self):
+        # a -> {m2, m1} -> z : dos caminos de igual longitud; gana el id menor
+        q = self._graph([("p::a", "p::m2", "calls"), ("p::a", "p::m1", "calls"),
+                         ("p::m2", "p::z", "calls"), ("p::m1", "p::z", "calls")])
+        out = q.path("p::a", "p::z")
+        self.assertIn("m1", out)
+        self.assertNotIn("m2", out)
+        both = q.path("p::a", "p::z", k=5)
+        self.assertIn("2 camino(s)", both)
+        self.assertLess(both.index("m1"), both.index("m2"))
+        self.assertEqual(both, q.path("p::a", "p::z", k=5))
+
+    def test_max_hops_reports_longer_path(self):
+        q = self._graph([("p::a", "p::b", "calls"), ("p::b", "p::c", "calls"),
+                         ("p::c", "p::d", "calls")])
+        out = q.path("p::a", "p::d", max_hops=2)
+        self.assertIn("el más corto tiene 3", out)
+
+    def test_external_is_not_a_bridge(self):
+        # dos archivos que importan `os` no están conectados por eso
+        q = self._graph([("p::a", "external:os", "imports"), ("p::b", "external:os", "imports")])
+        self.assertIn("desconectadas", q.path("p::a", "p::b"))
+        # ...pero un external sí vale como extremo
+        self.assertIn("1 salto(s)", q.path("p::a", "external:os"))
+
+    def test_unknown_node_suggests_ids(self):
+        q = self._graph([("p::a", "p::b", "calls")])
+        out = q.path("a", "p::b")
+        self.assertIn("nodo no encontrado: a", out)
+        self.assertIn("p::a", out)
+
+    def test_mcp_tool_registered(self):
+        from memorygraf import mcp_server
+        self._graph([("p::a", "p::b", "calls")])
+        self.assertIn("path", [t["name"] for t in mcp_server.TOOLS])
+        srv = mcp_server.Server(self.db)
+        self.addCleanup(srv.store.close)
+        self.assertIn("1 salto(s)", srv.call_tool("path", {"source": "p::a", "target": "p::b"}))
+
+
 class TestAnalyzeReport(Base):
     """Fase 9 · analyze() (god-nodes) y GRAPH_REPORT.md."""
 
@@ -3435,6 +3534,32 @@ class TestOllamaDetection(unittest.TestCase):
         # No deben lanzar aunque no haya binario ni servidor.
         self.assertIsInstance(ollama.on_path(), bool)
         self.assertIsInstance(ollama.installed(), bool)
+
+
+class TestDockerfile(unittest.TestCase):
+    """La imagen corre como `appuser` (10001), pero en Linux el bind mount conserva el
+    uid del host: `docker run -v "$PWD:/workspace" memorygraf init` fallaba con
+    "Permission denied" al crear .memorygraf. El uso documentado pasa --user con el uid
+    del host, y para eso HOME debe ser fijo y escribible por cualquier uid."""
+
+    PATH = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
+
+    def setUp(self):
+        if not os.path.exists(self.PATH):
+            self.skipTest("sin Dockerfile (instalación desde sdist/wheel)")
+        with open(self.PATH, encoding="utf-8") as f:
+            self.text = f.read()
+        self.runtime = self.text.split(" AS runtime", 1)[1]
+
+    def test_documented_runs_pass_host_uid(self):
+        runs = [l for l in self.text.splitlines() if l.startswith("#   docker run")]
+        self.assertTrue(runs)
+        for line in runs:
+            self.assertIn('--user "$(id -u):$(id -g)"', line)
+
+    def test_home_fixed_and_writable_for_any_uid(self):
+        self.assertIn("HOME=/home/appuser", self.runtime)
+        self.assertIn("chmod 1777 /home/appuser", self.runtime)
 
 
 if __name__ == "__main__":
