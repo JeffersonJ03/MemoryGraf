@@ -1,17 +1,28 @@
 # MemoryGraf — Deuda consciente y validación pendiente
 
-> **Estado (2026-07-27).** El backlog **M1–M11 está IMPLEMENTADO y probado** (M11 completo: capa
-> LSP para Go/Rust/C/C++, Java, C#, PHP y R — solo VB y asm quedan symbols-only). La fuente de
-> verdad es el **código + los tests (`tests/test_memorygraf.py`) + el historial de commits**;
-> este documento registra: **(a)** lo hecho, **(b)** la **deuda consciente** que conviene
-> recordar (por qué algo va gateado/acotado), **(c)** las propuestas abiertas (el
-> **Anexo M13–M20**, roadmap de paridad con Graphify) y **(d)** lo único pendiente de
-> ejecución sin código nuevo: la **validación de ENTORNO** (§9).
+> **Estado (2026-10-20).** El backlog **M1–M12 está IMPLEMENTADO y probado**, y del anexo
+> M13–M20 ya entró **M14 (`path A B`)**. Desde julio, además: **CI** en cada PR (Linux +
+> Windows nativo, modos portable y potencia; PR #13–#16 corrigieron los bugs que destapó)
+> e **imagen Docker** (`Dockerfile`). La fuente de verdad es el **código + los tests
+> (`tests/test_memorygraf.py`) + el historial de commits**; este documento registra:
+> **(a)** lo hecho, **(b)** la **deuda consciente** que conviene recordar (por qué algo va
+> gateado/acotado), **(c)** las propuestas abiertas (el **Anexo M13–M20**, roadmap de
+> paridad con Graphify) y **(d)** lo pendiente de ejecución sin código nuevo: la
+> **validación de ENTORNO** (§9).
 > Complementa `DESIGN.md` (principios §3, vinculantes).
+
+> **▶ Siguiente paso (actualizar al cerrar cada hito).**
+> 1. **Bug del indexador:** `from . import X` (Python) genera la arista `imports` hacia el
+>    `__init__.py` del paquete en vez de hacia `X.py`. Los módulos importados así quedan
+>    aislados y `neighbors`/`impact`/`path` ven menos de lo que hay. Lo destapó M14: en
+>    este repo `viz.py`↔`ollama.py` salen "desconectados" aunque `cli.py` importa ambos.
+> 2. **M15** (más gramáticas) y **M16** (instaladores multi-host): completan el paquete de
+>    mayor retorno por esfuerzo junto con M14.
+> 3. Luego **M13** (comunidades) y **M17** (always-on). §9 sigue abierto en paralelo.
 
 ---
 
-## 1. Backlog M1–M11 — implementado
+## 1. Backlog M1–M12 (+ M14) — implementado
 
 | # | Mejora | Dónde / nota |
 |---|---|---|
@@ -26,6 +37,8 @@
 | M9 | `calls`/`imports` **cross-file** multi-lenguaje + capa LLM opcional | `ts_generic` + `indexer`. Ver §3. |
 | M10 | **Bootstrap de entidades** de dominio (`bootstrap-entities`): propone desde el código para curar | `entities_bootstrap`. Ver §M10. |
 | M11 | **Capa LSP multi-lenguaje**: +Go/Rust/C/C++ (a), Java (b), C# (c), PHP/R (d) | `runtime/lsp.py` + `doctor`. Ver §M11. |
+| M12 | **Respetar `.gitignore`** en el descubrimiento de archivos | `indexer`. Ver §M12. |
+| M14 | **`path A B`**: camino(s) más corto(s) entre dos nodos, salto a salto (CLI + tool MCP `path`) | `query.Query.path`. Ver §M14. |
 
 Cada mejora entró con **test de regresión** y verificación en vivo (regla DESIGN §11).
 
@@ -236,7 +249,7 @@ CLI o enriqueciendo tools existentes, no como tool nueva. Lo que no cumple está
 | # | Hito | Brecha que cierra | Esfuerzo | Valor |
 |---|---|---|---|:--:|
 | **M13** | Comunidades / subsistemas | La única capacidad **analítica** que Graphify tiene y MemoryGraf no | Medio | **Alto** |
-| **M14** | `path A B` — cómo se conectan dos nodos | Consulta que hoy no existe (hay `neighbors`, no camino) | **Bajo** | **Alto** |
+| **M14** ✅ | `path A B` — cómo se conectan dos nodos | Consulta que hoy no existe (hay `neighbors`, no camino) | **Bajo** | **Alto** |
 | **M15** | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; hoy MemoryGraf no sirve en repos Kotlin/Swift/Ruby | **Bajo** | **Alto** |
 | **M16** | Instaladores multi-host | `install claude` es el único; el resto es copiar JSON a mano | **Bajo** | **Alto** |
 | **M17** | Always-on: hooks de git + instrucciones de agente | El grafo se queda obsoleto y el asistente no lo usa por su cuenta | Bajo-medio | **Alto** |
@@ -291,7 +304,26 @@ queda `Subsistema N` en vez de inventar un nombre malo.
 
 ---
 
-### M14 · `path A B` — cómo se conectan dos nodos  (PROPUESTA)
+### M14 · `path A B` — cómo se conectan dos nodos  (IMPLEMENTADO ✅ 2026-10-20)
+
+**Cómo quedó** (`query.Query.path`, CLI `memorygraf path`, tool MCP `path` → 11 tools):
+- Dos BFS (desde A y desde B) + DFS en orden de id: devuelve los K caminos **mínimos**
+  (`--all K`), deterministas ante empates. El grafo se recorre **sin dirección**, pero
+  cada salto se imprime con su sentido real (`-[calls]->` / `<-[imports]-`), su
+  procedencia y su confianza. Un camino que se apoya en aristas INFERRED/AMBIGUOUS lo dice.
+- **Desvío de la propuesta:** "ofrecer el nodo más cercano a ambos extremos" no aplica.
+  En un recorrido sin dirección, si existe un nodo alcanzable desde ambos, entonces hay
+  camino. En su lugar, sin camino se distingue: (a) existe, pero es más largo que
+  `max_hops` (dice cuántos saltos tiene); (b) solo existe sin el filtro `--via`; (c)
+  componentes desconectadas, y sugiere `neighbors` de cada extremo.
+- **Añadido:** los nodos `external` (os, react…) no sirven de puente, solo de extremo
+  (si no, dos archivos que importan `os` saldrían "conectados"). Un id inexistente
+  sugiere ids con ese nombre (`Store.find_by_name`).
+- Tests: `TestPath` (cadena, desconexión, `--via`, empate, `max_hops`, external, id
+  desconocido, registro MCP).
+
+<details><summary>Propuesta original</summary>
+
 
 **Contexto.** MemoryGraf responde "¿qué hay alrededor de X?" (`neighbors`) y "¿qué rompo si
 toco X?" (`impact`), pero **no** "¿qué relación hay entre X e Y?". Es la consulta que más
@@ -321,6 +353,8 @@ por orden de id, estable entre corridas.
 
 **Riesgo/Esfuerzo.** **Bajo.** Es el mejor valor/esfuerzo de todo el anexo: algoritmo
 trivial, datos ya en memoria, cero dependencias.
+
+</details>
 
 ---
 
