@@ -1138,6 +1138,43 @@ class TestAuditM15(Base):
         langs = {r["lang"] for r in json.loads(err.getvalue())["lsp_langs"]}
         self.assertIn("ruby", langs)
 
+    def test_lsp_pull_diagnostics_total_budget(self):
+        # Diagnósticos por pull en serie: un tope TOTAL (`lsp_pull_budget`) en vez de
+        # lsp_timeout por archivo sin límite.
+        from memorygraf.runtime import lsp
+        self.write("a.ts", "export function f(): number {\n  return 1;\n}\n")
+        self.write("b.ts", "export function g(): number {\n  return 2;\n}\n")
+        store, _ = self.index()
+        asked = []
+
+        class FakeProc:
+            def terminate(self): pass
+            def wait(self, timeout=None): pass
+            def kill(self): pass
+            def poll(self): return None
+
+        class SlowPullClient:
+            def __init__(self, proc): self.diagnostics = {}
+            def _send(self, method, params, notify=False): return 1
+            def wait_response(self, *a, **k):
+                return {"result": {"capabilities": {"diagnosticProvider": {
+                    "interFileDependencies": True, "workspaceDiagnostics": False}}}}
+            def request(self, method, params, timeout=3.0):
+                asked.append(timeout)
+                return None
+
+        logs = []
+        files = store.all_nodes(types=["file"])
+        with unittest.mock.patch.object(lsp.subprocess, "Popen", lambda *a, **k: FakeProc()), \
+             unittest.mock.patch.object(lsp, "_LspClient", SlowPullClient), \
+             unittest.mock.patch.object(lsp.time, "sleep", lambda *_a, **_k: None):
+            lsp._run_language(store, ("tsc", []), files, {"proj": self.proj},
+                              {"hover": False, "lsp_timeout": 0, "lsp_pull_budget": 0},
+                              logs.append)
+        store.close()
+        self.assertEqual(asked, [])
+        self.assertTrue(any("lsp_pull_budget" in m and "2 archivo" in m for m in logs), logs)
+
 
 class TestDebtM15a(Base):
     """Deuda de M15a/M9 saldada: Java en layout Maven/Gradle, mismo paquete y wildcard

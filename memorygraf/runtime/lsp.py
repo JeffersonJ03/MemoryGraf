@@ -578,10 +578,19 @@ def _run_language(store, server, files, roots, rt, log, param_provider=None,
         # anuncia: TypeScript 7 nativo SOLO funciona así (nunca publica por push).
         pulled: dict[str, list] = {}
         if caps.get("diagnosticProvider"):
-            for _fid, uri in opened:
+            # Un archivo tras otro, cada uno con hasta `lsp_timeout`: sin tope TOTAL, un
+            # server lento con N archivos bloqueaba N·8 s. `lsp_pull_budget` lo acota.
+            per_file = float(rt.get("lsp_timeout", 8))
+            deadline = time.time() + float(rt.get("lsp_pull_budget", 120))
+            for done, (_fid, uri) in enumerate(opened):
+                left = deadline - time.time()
+                if left <= 0:
+                    log(f"runtime/lsp: {len(opened) - done} archivo(s) sin diagnósticos: "
+                        f"agotado runtime.lsp_pull_budget")
+                    break
                 resp = client.request("textDocument/diagnostic",
                                       {"textDocument": {"uri": uri}},
-                                      timeout=float(rt.get("lsp_timeout", 8)))
+                                      timeout=min(per_file, left))
                 items = ((resp or {}).get("result") or {}).get("items")
                 if isinstance(items, list):
                     pulled[uri] = items
