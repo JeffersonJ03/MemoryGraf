@@ -69,9 +69,14 @@ def _git(args: list, cwd: str, timeout: float | None = None) -> str | None:
     `timeout` (segundos) acota comandos en rutas calientes (p. ej. la señal de
     frescura por consulta): si git se bloquea —índice retenido, disco lento— se
     degrada a None en vez de colgar. Por defecto None = sin límite (comportamiento
-    previo intacto para el resto de llamadas)."""
+    previo intacto para el resto de llamadas).
+
+    `core.quotePath=false`: sin él git escribe las rutas no ASCII entrecomilladas y en
+    octal (`"b/\\303\\261.py"`) en `log --numstat`, `show`, `status`…, y esos archivos
+    (`ñ.py`, `configuración.ts`) se quedaban sin churn, co-cambio ni rangos."""
     try:
-        p = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+        p = subprocess.run(["git", "-c", "core.quotePath=false", *args], cwd=cwd,
+                           capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
                            timeout=timeout)
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):

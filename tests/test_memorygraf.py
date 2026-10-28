@@ -2272,6 +2272,29 @@ class TestGitLayer(_GitRepo, Base):
         self.assertIn("Tester", g["authors"])
         store.close()
 
+    def test_non_ascii_paths_keep_their_history(self):
+        # Sin `core.quotePath=false` git escribe `"\303\261.py"` y el archivo se quedaba sin
+        # churn, co-cambio ni rangos (también `working_set` lo perdía).
+        self._init_repo()
+        self.write("ñandú.py", "def f():\n    return 1\n")
+        self.write("b.py", "def g():\n    return 1\n")
+        self._commit("c1")
+        self.write("ñandú.py", "def f():\n    return 2\n")
+        self.write("b.py", "def g():\n    return 2\n")
+        self._commit("c2")
+        store, _ = self.index()
+        self._sync_git(store)
+        g = store.git_node_get("proj/ñandú.py")
+        self.assertIsNotNone(g)
+        self.assertEqual(g["churn"], 2)
+        top = git_layer._toplevel(self.proj)
+        sha = (git_layer._git(["rev-parse", "HEAD"], top) or "").strip()
+        self.assertIn("ñandú.py", git_layer._changed_ranges(top, sha))
+        self.assertIn("ñandú.py", git_layer._changed_ranges_many(top, [sha])[sha])
+        self.write("ñandú.py", "def f():\n    return 3\n")
+        self.assertIn("proj/ñandú.py", git_layer.working_set(store)["dirty"])
+        store.close()
+
     def test_root_spelled_differently_than_git_toplevel(self):
         """`--show-toplevel` devuelve la ruta FÍSICA: en Windows expande los nombres cortos
         8.3 (el runner de CI tiene TEMP en `RUNNER~1`) y en POSIX resuelve symlinks. Con
