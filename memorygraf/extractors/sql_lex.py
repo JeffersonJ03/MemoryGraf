@@ -41,8 +41,8 @@ _TOKEN = re.compile(r"""
     (?P<ws>\s+)
   | (?P<lcomment>--[^\n]*)
   | (?P<bcomment>/\*.*?(?:\*/|\Z))
-  | (?P<dollar>\$[A-Za-z_]*\$)
-  | (?P<str>[nNeEbBxX]?'(?:[^']|'')*'?)
+  | (?P<dollar>\$(?:[A-Za-z_]\w*)?\$)
+  | (?P<str>[eE]'(?:[^'\\]|''|\\.)*'?|[nNbBxX]?'(?:[^']|'')*'?)
   | (?P<qid>"(?:[^"]|"")*"|`[^`]*`|\[[^\]\n]*\])
   | (?P<word>[A-Za-z_][\w$#]*)
   | (?P<num>\d+(?:\.\d+)?)
@@ -76,8 +76,9 @@ _NOT_CALL_NAME = {"VALUES", "IN", "EXISTS", "AS", "OVER", "AND", "OR", "NOT", "O
                   "UNIQUE", "CHECK", "INDEX", "TABLE", "IF", "WHILE", "RETURN", "RETURNS",
                   "WHEN", "THEN", "ELSE", "CASE", "SELECT", "WHERE", "USING", "WITH",
                   "FILTER", "WITHIN", "PARTITION", "INTO", "DEFAULT", "PRIMARY", "FOREIGN"}
-# Tras estas palabras empieza una sentencia PL/SQL (para `proc;` sin paréntesis)
-_STMT_START = {";", "BEGIN", "THEN", "ELSE", "LOOP", "DECLARE", "IS", "AS"}
+# Tras estas palabras empieza una sentencia PL/SQL (para `proc;` sin paréntesis). IS/AS
+# no: tras ellos van declaraciones, y `SELECT 1 AS uno;` no es una llamada a `uno`.
+_STMT_START = {";", "BEGIN", "THEN", "ELSE", "LOOP", "DECLARE"}
 # Fin de la lista de tablas de un FROM
 _FROM_END = {"WHERE", "GROUP", "ORDER", "HAVING", "JOIN", "INNER", "LEFT", "RIGHT", "FULL",
              "CROSS", "OUTER", "NATURAL", "UNION", "INTERSECT", "EXCEPT", "MINUS", "LIMIT",
@@ -161,7 +162,7 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     nodes = [Node(id=fid, type=NODE_FILE, name=rel_path.split("/")[-1],
                   project=project, path=rel_path, tags=["sql"])]
     edges: list = []
-    toks = _tokens(source)
+    toks = _tokens(source.lstrip("\ufeff"))   # BOM (SSMS lo pone): no es un token
     spans: list = []                   # (tok_ini, tok_fin, sid)
 
     def add(name, kind, a, b, parent):
@@ -278,6 +279,11 @@ def _stmt_end(toks, j, routine: bool) -> int:
     n = len(toks)
     if not routine:
         while j < n and toks[j].text != ";" and toks[j].kind != "batch":
+            # T-SQL sin `;`: un CREATE/ALTER a principio de línea abre la siguiente
+            # sentencia (una tabla o vista no contiene ninguno).
+            if (toks[j].up in ("CREATE", "ALTER") and toks[j - 1].line < toks[j].line
+                    and j + 1 < n and toks[j + 1].kind == "word"):
+                return j
             j += 1
         return min(j + 1, n)
     k = j
@@ -350,8 +356,8 @@ def _references(toks, spans, fid) -> list:
     def emit(i, name, kind):
         if not name:
             return
-        if kind == "ref" and name.split(".")[-1].upper() in ctes:
-            return
+        if name.split(".")[-1].upper() in ctes and (kind == "ref" or "." not in name):
+            return                                        # CTE: ni tabla ni `cte(a, b)`
         key = (owner(i), name.lower(), kind)
         if key not in seen:
             seen.add(key)
@@ -366,6 +372,9 @@ def _references(toks, spans, fid) -> list:
         if t.kind != "word":
             i += 1
             continue
+        if u == "FROM" and _from_is_operator(toks, i):
+            i += 1                                        # EXTRACT(x FROM col), …
+            continue
         if u in ("FROM", "JOIN") or (u == "USING" and _in_merge(toks, i)):
             i = _table_list(toks, i + 1, emit)
             continue
@@ -374,13 +383,15 @@ def _references(toks, spans, fid) -> list:
             emit(i, name, "ref")
             i = j
             continue
-        if u == "UPDATE" and prev not in ("FOR", "ON", "BEFORE", "AFTER", "OR", "INSTEAD", "OF"):
+        # (`KEY`: el `ON DUPLICATE KEY UPDATE col = …` de MySQL no es una tabla)
+        if u == "UPDATE" and prev not in ("FOR", "ON", "BEFORE", "AFTER", "OR", "INSTEAD", "OF",
+                                          "KEY"):
             name, j = _qualified(toks, i + 1)
             if name and name.upper() not in ("OF", "SET"):
                 emit(i, name, "ref")
             i = max(j, i + 1)
             continue
-        if u == "DELETE" and prev not in ("ON", "BEFORE", "AFTER", "OR", "INSTEAD"):
+        if u == "DELETE" and prev not in ("ON", "BEFORE", "AFTER", "OR", "INSTEAD", "OF"):
             j = i + 1
             if j < n and toks[j].up == "FROM":
                 j += 1
@@ -404,6 +415,8 @@ def _references(toks, spans, fid) -> list:
             j = i + 1
             if j + 2 < n and toks[j].text == "@" and toks[j + 2].text == "=":
                 j += 3
+            if j < n and toks[j].up in ("FUNCTION", "PROCEDURE"):
+                j += 1                                    # PG: EXECUTE FUNCTION f()
             name, k = _qualified(toks, j)
             if name and toks[j].up not in ("IMMEDIATE", "AS", "SP_EXECUTESQL"):
                 emit(i, name, "call")
@@ -425,6 +438,25 @@ def _references(toks, spans, fid) -> list:
             emit(i, name, "call")                         # PL/SQL: `pkg.proc;`
         i = max(j, i + 1)
     return out
+
+
+def _from_is_operator(toks, i) -> bool:
+    """¿Este FROM es parte de una expresión y no abre una lista de tablas?
+    `a IS [NOT] DISTINCT FROM b` y `EXTRACT(… FROM x)`/`TRIM(…)`/`SUBSTRING(…)`/`OVERLAY(…)`."""
+    if i > 1 and toks[i - 1].up == "DISTINCT" and toks[i - 2].up in ("IS", "NOT"):
+        return True
+    depth = 0
+    for k in range(i - 1, max(i - 40, -1), -1):
+        t = toks[k].text
+        if t == ")":
+            depth += 1
+        elif t == "(":
+            if depth == 0:
+                return k > 0 and toks[k - 1].up in ("EXTRACT", "TRIM", "SUBSTRING", "OVERLAY")
+            depth -= 1
+        elif t == ";":
+            break
+    return False
 
 
 def _skip_header(toks, i):
@@ -491,10 +523,13 @@ def _table_list(toks, i, emit) -> int:
 
 
 def _cte_names(toks) -> set:
-    """Nombres de CTE (`WITH x AS (`, `, y AS (`): no son tablas."""
+    """Nombres de CTE (`WITH x AS (`, `, y AS (`, `WITH x(a, b) AS (`): no son tablas."""
     out = set()
     for i in range(len(toks) - 2):
-        if toks[i].kind == "word" and toks[i + 1].up == "AS" and toks[i + 2].text == "(":
+        if toks[i].kind != "word":
+            continue
+        j = _skip_parens(toks, i + 1) if toks[i + 1].text == "(" else i + 1
+        if j + 1 < len(toks) and toks[j].up == "AS" and toks[j + 1].text == "(":
             prev = toks[i - 1].up if i else ""
             if prev in ("WITH", ",", "RECURSIVE"):
                 out.add(toks[i].up)

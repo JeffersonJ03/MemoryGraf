@@ -934,6 +934,94 @@ class TestM15c(Base):
         self.assertEqual(deps, set())
 
 
+class TestAuditM15(Base):
+    """Regresiones de la auditoría de M15 (SQL léxico, Xcode, LSP). Cada test reproduce
+    un fallo concreto: aristas falsas, símbolos perdidos o una excepción que tumbaba el sync."""
+
+    def _sql(self, src):
+        from memorygraf.extractors import sql_lex
+        nodes, _e, _i, calls_out, _b = sql_lex.extract("p/x.sql", "p", src)
+        syms = {n.name: (n.span_start, n.span_end) for n in nodes if n.type == "symbol"}
+        return syms, {(o.split("::")[-1], nm, k) for o, nm, k in calls_out}
+
+    def _sql_edges(self):
+        store, _ = self.index()
+        rows = {(e["source"], e["target"], e["type"]) for e in store.all_edges()
+                if e["type"] in ("calls", "references")}
+        store.close()
+        return rows
+
+    def test_sql_unqualified_call_not_linked_to_other_package_member(self):
+        # `REPLACE(x)` es la función del motor, no `str_util.replace` de otro paquete;
+        # dentro del propio paquete sí resuelve.
+        self.write("util.pkb",
+                   "CREATE OR REPLACE PACKAGE BODY str_util AS\n"
+                   "  FUNCTION replace(s VARCHAR2) RETURN VARCHAR2 IS BEGIN RETURN s; END replace;\n"
+                   "  FUNCTION clean(s VARCHAR2) RETURN VARCHAR2 IS BEGIN RETURN replace(s); END clean;\n"
+                   "END str_util;\n/\n")
+        self.write("v.sql", "CREATE VIEW v AS SELECT REPLACE(name, 'a', 'b') AS n FROM dual;\n")
+        rows = self._sql_edges()
+        self.assertNotIn(("proj/v.sql::v", "proj/util.pkb::str_util.replace", "calls"), rows)
+        self.assertIn(("proj/util.pkb::str_util.clean", "proj/util.pkb::str_util.replace", "calls"),
+                      rows)
+
+    def test_sql_e_string_backslash_escape(self):
+        # E'it\'s' (PostgreSQL) no abre un literal que se trague el resto del archivo
+        syms, _ = self._sql("SELECT E'it\\'s';\nCREATE TABLE a (id int);\n")
+        self.assertIn("a", syms)
+
+    def test_sql_dollar_tag_with_digits(self):
+        syms, out = self._sql("CREATE FUNCTION f() RETURNS int AS $b1$ SELECT 1; $b1$ LANGUAGE sql;\n"
+                              "INSERT INTO u VALUES (1);\n")
+        self.assertEqual(syms["f"], (1, 1))
+        self.assertIn(("p/x.sql", "u", "ref"), out)        # del archivo, no de `f`
+
+    def test_sql_tsql_statements_without_semicolon(self):
+        syms, out = self._sql("CREATE TABLE a (id int)\nCREATE TABLE b (id int REFERENCES c)\n"
+                              "CREATE TABLE c (id int)\n")
+        self.assertEqual(set(syms), {"a", "b", "c"})
+        self.assertEqual(syms["a"], (1, 1))
+        self.assertIn(("b", "c", "ref"), out)
+        self.assertNotIn(("a", "c", "ref"), out)
+
+    def test_sql_bom_does_not_drop_first_create(self):
+        syms, _ = self._sql("﻿CREATE TABLE a (id int);\nCREATE TABLE b (id int);\n")
+        self.assertEqual(set(syms), {"a", "b"})
+
+    def test_sql_select_alias_is_not_a_call(self):
+        _s, out = self._sql("SELECT 1 AS one;\n")
+        self.assertNotIn(("p/x.sql", "one", "call"), out)
+        # la llamada PL/SQL sin paréntesis sigue detectándose
+        _s, out = self._sql("CREATE PROCEDURE p IS\nBEGIN\n  pkg.run;\nEND;\n/\n")
+        self.assertIn(("p", "pkg.run", "call"), out)
+
+    def test_sql_on_duplicate_key_update_is_not_a_table(self):
+        _s, out = self._sql("INSERT INTO t (a) VALUES (1) ON DUPLICATE KEY UPDATE status = 2;\n")
+        self.assertEqual({nm for _o, nm, k in out if k == "ref"}, {"t"})
+
+    def test_sql_from_inside_expression_is_not_a_table(self):
+        _s, out = self._sql("SELECT EXTRACT(YEAR FROM created), TRIM(BOTH ' ' FROM code)\n"
+                            "FROM orders WHERE a IS DISTINCT FROM b;\n")
+        self.assertEqual({nm for _o, nm, k in out if k == "ref"}, {"orders"})
+
+    def test_sql_pg_trigger_execute_function(self):
+        _s, out = self._sql("CREATE TRIGGER trg AFTER INSERT ON t FOR EACH ROW "
+                            "EXECUTE FUNCTION audit_fn();\n")
+        calls = {nm for _o, nm, k in out if k == "call"}
+        self.assertIn("audit_fn", calls)
+        self.assertFalse(calls & {"function", "procedure"})
+
+    def test_sql_cte_with_column_list(self):
+        _s, out = self._sql("WITH totals(id, n) AS (SELECT 1, 2) SELECT * FROM totals;\n")
+        self.assertFalse({nm for _o, nm, _k in out} & {"totals"})
+
+    def test_sql_instead_of_delete_on_view(self):
+        _s, out = self._sql("CREATE TRIGGER trg INSTEAD OF DELETE ON v FOR EACH ROW BEGIN NULL; END;\n/\n")
+        refs = {nm for _o, nm, k in out if k == "ref"}
+        self.assertIn("v", refs)
+        self.assertNotIn("on", refs)
+
+
 class TestDebtM15a(Base):
     """Deuda de M15a/M9 saldada: Java en layout Maven/Gradle, mismo paquete y wildcard
     en Java/Kotlin, Kotlin Multiplatform, Zeitwerk (Rails), targets de Xcode y

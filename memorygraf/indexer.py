@@ -985,6 +985,15 @@ class Indexer:
             if have[-1] == want[-1]
             and (have[-len(want):] == want or want[-len(have):] == have)]
         cands = [c for c in dict.fromkeys(cands) if c[1] != caller]
+        if len(want) == 1 and cands:
+            # Un nombre SIN cualificar nunca resuelve al miembro de OTRO paquete (PL/SQL):
+            # `REPLACE(x)` no es `str_util.replace`; dentro del propio paquete, sí.
+            pkgs = {k.rsplit(".", 1)[-1] for k, objs in index.items()
+                    if any(o[2] == "package" for o in objs)}
+            mine = caller.split("::", 1)[-1].lower().split(".")[:-1]
+            cands = [c for c in cands
+                     if not ((q := c[1].split("::", 1)[-1].lower().split("."))[:-1]
+                             and q[-2] in pkgs and q[-2] not in mine)]
         if len(cands) > 1:
             pkg = caller.split("::", 1)[-1].rsplit(".", 1)[0].lower() if "::" in caller else None
             same_pkg = [c for c in cands if pkg and c[1].split("::", 1)[-1].lower()
