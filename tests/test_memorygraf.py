@@ -1021,6 +1021,17 @@ class TestAuditM15(Base):
         self.assertIn("v", refs)
         self.assertNotIn("on", refs)
 
+    def test_corrupt_pbxproj_does_not_break_index(self):
+        # Un project.pbxproj corrupto lanzaba TypeError/AttributeError desde
+        # Indexer.__init__ y tumbaba el índice de TODO el proyecto.
+        self.write("App.xcodeproj/project.pbxproj",
+                   "{ objects = { P = s; }; rootObject = P; }\n")
+        self.write("Sources/App/main.swift", "func run() {}\n")
+        self.write("a.py", "def f():\n    return 1\n")
+        store, _ = self.index()
+        self.assertIn("proj/a.py::f", store.all_node_ids())
+        store.close()
+
 
 class TestDebtM15a(Base):
     """Deuda de M15a/M9 saldada: Java en layout Maven/Gradle, mismo paquete y wildcard

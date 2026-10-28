@@ -456,8 +456,8 @@ def _load_xcode_targets(root: str, excludes: set) -> list:
                 with open(os.path.join(dirpath, d, "project.pbxproj"), "r",
                           encoding="utf-8", errors="replace") as f:
                     folders, files = _xcode_membership(f.read())
-            except OSError:
-                continue
+            except (OSError, TypeError, AttributeError, ValueError):
+                continue                  # pbxproj corrupto: sin targets, nunca tumba el sync
             if folders or files:
                 rel = os.path.relpath(dirpath, root).replace("\\", "/")
                 out.append(("" if rel == "." else rel, folders, files))
