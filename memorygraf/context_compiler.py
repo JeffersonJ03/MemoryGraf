@@ -50,13 +50,14 @@ def _settings(config: dict | None) -> dict:
 # Cliente LLM local (reusa el ciclo de vida efímero de ollama.py)
 # --------------------------------------------------------------------------- #
 def _api_chat(url: str, key: str, model: str, prompt: str,
-              max_tokens: int = 120, timeout: float = 60) -> str | None:
+              max_tokens: int = 120, timeout: float = 60,
+              temperature: float = 0.1) -> str | None:
     """Generación vía endpoint compatible con OpenAI (/v1/chat/completions). None si falla."""
     import json as _json
     import urllib.request
     payload = _json.dumps({
         "model": model, "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens, "temperature": 0.1}).encode()
+        "max_tokens": max_tokens, "temperature": temperature}).encode()
     req = urllib.request.Request(
         url, data=payload,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
@@ -80,13 +81,16 @@ class _LocalLLM:
         self.name = (f"api:{api[2]}" if api else (f"ollama:{model}" if url else "heuristic"))
 
     def generate(self, prompt: str, num_predict: int = 120,
-                 timeout: float | None = None) -> str | None:
+                 timeout: float | None = None, temperature: float = 0.1) -> str | None:
+        # `temperature`: la desambiguación de calls (0.0) y bootstrap-entities (0.2) la
+        # piden; sin el parámetro, ambas lanzaban TypeError con un LLM real.
         if self.api:
             return _api_chat(*self.api, prompt, max_tokens=num_predict,
-                             timeout=timeout or 60)
+                             timeout=timeout or 60, temperature=temperature)
         if not self.url:
             return None
-        kw = {"num_predict": num_predict, "keep_alive": self.keep_alive}
+        kw = {"num_predict": num_predict, "keep_alive": self.keep_alive,
+              "temperature": temperature}
         if timeout is not None:      # presupuesto de latencia ESTRICTO (rerank en consulta)
             kw["timeout"] = timeout
         return _ollama.generate(self.url, self.model, prompt, **kw)

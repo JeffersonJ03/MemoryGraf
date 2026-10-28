@@ -1490,6 +1490,74 @@ class TestXlinkLlmOptional(Base):
         self.assertIn("::dup", tgt)
 
 
+class TestLocalLlmTemperature(Base):
+    """`_LocalLLM.generate` no aceptaba `temperature`, pero la desambiguación de calls
+    (0.0) y bootstrap-entities (0.2) se la pasan: con un LLM REAL lanzaban TypeError (el
+    primero tumbaba el index con `resolver.llm`; el segundo caía en silencio al
+    heurístico). Los tests de arriba usan un LLM falso con **kw y no lo veían: aquí va el
+    `_LocalLLM` de verdad, con solo la llamada HTTP simulada."""
+
+    def _real_llm(self, response, seen):
+        import contextlib
+        from memorygraf import context_compiler as cc
+        llm = cc._LocalLLM("http://ollama.invalid", "m1")
+
+        def fake_generate(url, model, prompt, **kw):
+            seen.append(kw)
+            return response
+
+        @contextlib.contextmanager
+        def fake_local_llm(config, log=lambda m: None):
+            yield llm
+        return (unittest.mock.patch.object(cc, "local_llm", fake_local_llm),
+                unittest.mock.patch.object(cc._ollama, "generate", fake_generate))
+
+    def test_disambiguate_calls_with_real_local_llm(self):
+        from memorygraf import context_compiler as cc
+        store, _ = self.index()
+        seen = []
+        p1, p2 = self._real_llm("2", seen)
+        with p1, p2:
+            picked = cc.disambiguate_calls(
+                store, self.config, [("proj/a.c::main", "dup", ["proj/x.c::dup", "proj/y.c::dup"])],
+                {"proj": self.proj})
+        store.close()
+        self.assertEqual(picked, [("proj/a.c::main", "proj/y.c::dup")])
+        self.assertEqual(seen[0]["temperature"], 0.0)
+
+    def test_bootstrap_entities_uses_real_local_llm(self):
+        from memorygraf import entities_bootstrap as eb
+        self.write("models.py", "class Customer:\n    pass\n\nclass Invoice:\n    pass\n")
+        store, _ = self.index()
+        seen = []
+        p1, p2 = self._real_llm('{"Cliente": {"description": "un cliente", '
+                                '"aliases": ["customer"]}}', seen)
+        with p1, p2:
+            cands = eb.propose_candidates(store, self.config, log=lambda m: None)
+        store.close()
+        self.assertEqual([c[0] for c in cands], ["Cliente"])      # no el heurístico
+        self.assertEqual(seen[0]["temperature"], 0.2)
+
+    def test_api_backend_forwards_temperature(self):
+        from memorygraf import context_compiler as cc
+        sent = []
+
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def read(self): return json.dumps({"choices": [{"message": {"content": "1"}}]}).encode()
+
+        def urlopen(req, timeout=None):
+            sent.append(json.loads(req.data))
+            return Resp()
+
+        with unittest.mock.patch("urllib.request.urlopen", urlopen):
+            self.assertEqual(cc._LocalLLM(api=("http://u", "k", "m")).generate(
+                "p", temperature=0.0), "1")
+            cc._LocalLLM(api=("http://u", "k", "m")).generate("p")
+        self.assertEqual([s["temperature"] for s in sent], [0.0, 0.1])   # por defecto, igual
+
+
 class TestConfigureWizard(Base):
     """Asistente interactivo `memorygraf configure`: presets + avanzado + validación deps."""
 
