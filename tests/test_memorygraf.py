@@ -1056,6 +1056,55 @@ class TestAuditM15(Base):
         self.assertIsNone(res)
         self.assertTrue(any("no arrancó" in m for m in logs))
 
+    # ---------------- Ronda 2
+    def test_sql_mysql_backslash_escape_by_dialect_hint(self):
+        # mysqldump: un número PAR de `\'` cierra en ambos modos pero el estándar lo lee
+        # mal (se come lo de en medio). Las pistas de MySQL (backticks, ENGINE=) activan
+        # el modo con barra.
+        syms, out = self._sql("INSERT INTO `t` VALUES ('O\\'Brien');\n"
+                              "CREATE TABLE `a` (id int) ENGINE=InnoDB;\n"
+                              "INSERT INTO `u` VALUES ('it\\'s');\nCREATE TABLE b (id int);\n")
+        self.assertEqual(set(syms), {"a", "b"})
+        self.assertEqual({nm for _o, nm, k in out if k == "ref"}, {"t", "u"})
+
+    def test_sql_backslash_escape_recovered_without_hint(self):
+        # Sin pistas: el literal queda abierto hasta el final en modo estándar -> se
+        # recupera con el modo con barra.
+        syms, _ = self._sql("INSERT INTO t VALUES ('O\\'Brien');\nCREATE TABLE a (id int);\n"
+                            "CREATE TABLE b (id int);\n")
+        self.assertEqual(set(syms), {"a", "b"})
+
+    def test_sql_tsql_backslash_is_a_plain_char(self):
+        # T-SQL: `'C:\'` es un literal completo; ni las pistas ni la recuperación lo rompen
+        for src in ("INSERT INTO t VALUES ('C:\\');\nGO\nCREATE TABLE a (id int)\nGO\n",
+                    "INSERT INTO t VALUES ('C:\\'), ('D:\\');\nCREATE TABLE a (id int);\n",
+                    "INSERT INTO `t` VALUES ('C:\\');\nSET NOCOUNT ON;\nCREATE TABLE a (id int);\n"):
+            syms, _ = self._sql(src)
+            self.assertEqual(set(syms), {"a"}, src)
+
+    def test_sql_nested_block_comment(self):
+        # PostgreSQL/T-SQL anidan `/* … */`; si el anidamiento no cierra (Oracle/MySQL no
+        # anidan), vale el cierre plano.
+        syms, _ = self._sql("/* a /* b */ c */ CREATE TABLE x (id int);\n")
+        self.assertEqual(set(syms), {"x"})
+        syms, _ = self._sql("/* a /* b */ CREATE TABLE y (id int);\n")
+        self.assertEqual(set(syms), {"y"})
+
+    def test_sql_table_function_in_from_is_a_call(self):
+        self.write("fn.sql", "CREATE FUNCTION active_users(d date) RETURNS SETOF int AS $$ "
+                             "SELECT 1; $$ LANGUAGE sql;\n")
+        self.write("v.sql", "CREATE VIEW v AS SELECT * FROM active_users(now()) a;\n")
+        self.assertIn(("proj/v.sql::v", "proj/fn.sql::active_users", "calls"), self._sql_edges())
+
+    def test_sql_grant_references_object_not_privileges(self):
+        _s, out = self._sql("GRANT SELECT, UPDATE ON t TO app;\nGRANT DELETE ON TABLE s.u TO app;\n"
+                            "REVOKE SELECT ON v FROM app_user;\nGRANT ALL ON db.* TO x;\n"
+                            "GRANT EXECUTE ON pkg_x TO x;\n")
+        refs = {nm for _o, nm, k in out if k == "ref"}
+        self.assertTrue({"t", "s.u", "v"} <= refs)
+        self.assertFalse(refs & {"on", "app_user", "db"})
+        self.assertFalse({nm for _o, nm, k in out if k == "call"})
+
 
 class TestDebtM15a(Base):
     """Deuda de M15a/M9 saldada: Java en layout Maven/Gradle, mismo paquete y wildcard

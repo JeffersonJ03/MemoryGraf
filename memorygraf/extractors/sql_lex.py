@@ -37,17 +37,35 @@ EXTS = {"sql", "pks", "pkb", "pls", "plb", "prc", "fnc", "trg"}
 REF_KINDS = {"table", "view", "sequence", "synonym"}
 CALL_KINDS = {"function", "procedure"}
 
-_TOKEN = re.compile(r"""
+_TOKEN_TPL = r"""
     (?P<ws>\s+)
   | (?P<lcomment>--[^\n]*)
   | (?P<bcomment>/\*.*?(?:\*/|\Z))
   | (?P<dollar>\$(?:[A-Za-z_]\w*)?\$)
-  | (?P<str>[eE]'(?:[^'\\]|''|\\.)*'?|[nNbBxX]?'(?:[^']|'')*'?)
-  | (?P<qid>"(?:[^"]|"")*"|`[^`]*`|\[[^\]\n]*\])
+  | (?P<str>STR)
+  | (?P<qid>QID|`[^`]*`|\[[^\]\n]*\])
   | (?P<word>[A-Za-z_][\w$#]*)
   | (?P<num>\d+(?:\.\d+)?)
   | (?P<op>\S)
-""", re.X | re.S)
+"""
+# Literales: SQL estándar (`''` escapa la comilla; `\` es un carácter más: `'C:\'` es un
+# literal completo en T-SQL/Oracle/PostgreSQL) salvo `E'…'` de PostgreSQL; y modo
+# "barra invertida" (MySQL/MariaDB, ClickHouse: `'O\'Brien'`). Ver _string_mode.
+_STR = {False: r"[eE]'(?:[^'\\]|''|\\.)*'?|[nNbBxX]?'(?:[^']|'')*'?",
+        True: r"[nNeEbBxX]?'(?:[^'\\]|''|\\.)*'?"}
+_QID = {False: r'"(?:[^"]|"")*"', True: r'"(?:[^"\\]|""|\\.)*"'}
+_TOKEN = {bs: re.compile(_TOKEN_TPL.replace("STR", _STR[bs]).replace("QID", _QID[bs]),
+                         re.X | re.S) for bs in (False, True)}
+# El mismo literal, pero CERRADO (para saber si uno llegó al final del archivo abierto)
+_STR_CLOSED = {False: re.compile(r"[eE]'(?:[^'\\]|''|\\.)*'|[nNbBxX]?'(?:[^']|'')*'", re.S),
+               True: re.compile(r"[nNeEbBxX]?'(?:[^'\\]|''|\\.)*'", re.S)}
+# Pistas de dialecto en el archivo. MySQL: backticks, comentarios `/*!40101 … */` de
+# mysqldump, ENGINE=, AUTO_INCREMENT, DELIMITER, LOCK TABLES, UNSIGNED. T-SQL (vetan las
+# de MySQL: allí `\` no escapa): líneas GO, NVARCHAR, IDENTITY(, SET NOCOUNT, dbo.
+_MYSQL_HINTS = re.compile(r"`|/\*!\d|\bENGINE\s*=|\bAUTO_INCREMENT\b|^[ \t]*DELIMITER[ \t]"
+                          r"|\bLOCK\s+TABLES\b|\bUNSIGNED\b", re.I | re.M)
+_TSQL_HINTS = re.compile(r"^[ \t]*GO[ \t]*\d*[ \t]*$|\bNVARCHAR\b|\bIDENTITY\s*\("
+                         r"|\bSET\s+NOCOUNT\b|\bdbo\.|\[dbo\]", re.I | re.M)
 
 # Líneas que cierran un bloque: `/` de SQL*Plus y `GO` de T-SQL
 _BATCH_LINE = re.compile(r'^[ \t]*(?:/|GO(?:[ \t]+\d+)?)[ \t]*$', re.I | re.M)
@@ -104,19 +122,66 @@ class _Tok:
         self.up = text.upper() if kind == "word" else text
 
 
-def _tokens(source: str) -> list:
+def _string_mode(source: str) -> list:
+    """Tokens de `source` con el modo de literales correcto para su dialecto.
+
+    1. Pistas del archivo: con pistas de MySQL y ninguna de T-SQL, `\'` escapa.
+    2. Recuperación: si con ese modo un literal queda ABIERTO hasta el final del archivo
+       y con el otro no, el bueno es el otro. Así un `'O\'Brien'` sin pistas no se traga
+       el resto del archivo, y un `'C:\'` de T-SQL mal detectado tampoco.
+    (Si los dos modos cierran todo, manda la pista: un número PAR de `\'` en MySQL
+    cierra en ambos pero solo el modo con barra lo lee bien.)"""
+    bs = bool(_MYSQL_HINTS.search(source)) and not _TSQL_HINTS.search(source)
+    toks, unterminated = _tokens(source, bs)
+    if unterminated:
+        alt, alt_unterminated = _tokens(source, not bs)
+        if not alt_unterminated:
+            return alt
+    return toks
+
+
+def _comment_end(source: str, start: int, flat_end: int) -> int:
+    """Fin de un comentario `/* … */` que contiene otro `/*`. PostgreSQL y T-SQL los
+    ANIDAN (`/* a /* b */ c */`); Oracle y MySQL no. Se anida solo si el anidamiento
+    cierra antes del final del archivo; si no, vale el cierre plano."""
+    if source.find("/*", start + 2, flat_end) < 0:
+        return flat_end
+    depth, k = 1, start + 2
+    while depth:
+        o, c = source.find("/*", k), source.find("*/", k)
+        if c < 0:
+            return flat_end                               # no cierra anidado: plano
+        if 0 <= o < c:
+            depth, k = depth + 1, o + 2
+        else:
+            depth, k = depth - 1, c + 2
+    return k
+
+
+def _tokens(source: str, backslash: bool = False) -> tuple:
+    """(tokens, ¿algún literal llegó abierto al final del archivo?)."""
     nl = [i for i, ch in enumerate(source) if ch == "\n"]
     batch_lines = {source.count("\n", 0, m.start()) + 1 for m in _BATCH_LINE.finditer(source)}
+    rx, closed = _TOKEN[backslash], _STR_CLOSED[backslash]
     out = []
-    for m in _TOKEN.finditer(source):
-        kind = m.lastgroup
+    unterminated = False
+    pos, n = 0, len(source)
+    while pos < n:
+        m = rx.match(source, pos)
+        if m is None:                                     # imposible (ws|op cubren todo)
+            break
+        kind, start, pos = m.lastgroup, m.start(), m.end()
+        if kind == "bcomment":
+            pos = _comment_end(source, start, pos)
+        if kind == "str" and pos == n and not closed.fullmatch(m.group()):
+            unterminated = True
         if kind in ("ws", "lcomment", "bcomment", "str"):
             continue
         text = m.group()
-        line = bisect.bisect_right(nl, m.start()) + 1
+        line = bisect.bisect_right(nl, start) + 1
         if kind == "qid":
             kind, text = "word", text[1:-1].replace('""', '"')
-            tok = _Tok("word", text, m.start(), m.end(), line)
+            tok = _Tok("word", text, start, pos, line)
             tok.up = text.upper()
             out.append(tok)
             continue
@@ -124,8 +189,8 @@ def _tokens(source: str) -> list:
             if text != "/" and text.upper() != "GO":
                 continue                                  # el `5` de `GO 5`
             kind, text = "batch", text
-        out.append(_Tok(kind, text, m.start(), m.end(), line))
-    return out
+        out.append(_Tok(kind, text, start, pos, line))
+    return out, unterminated
 
 
 def _qualified(toks, i):
@@ -162,7 +227,7 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     nodes = [Node(id=fid, type=NODE_FILE, name=rel_path.split("/")[-1],
                   project=project, path=rel_path, tags=["sql"])]
     edges: list = []
-    toks = _tokens(source.lstrip("\ufeff"))   # BOM (SSMS lo pone): no es un token
+    toks = _string_mode(source.lstrip("\ufeff"))   # BOM (SSMS lo pone): no es un token
     spans: list = []                   # (tok_ini, tok_fin, sid)
 
     def add(name, kind, a, b, parent):
@@ -372,6 +437,11 @@ def _references(toks, spans, fid) -> list:
         if t.kind != "word":
             i += 1
             continue
+        if u in ("GRANT", "REVOKE") and (i == 0 or toks[i - 1].text == ";"
+                                         or toks[i - 1].kind == "batch"
+                                         or toks[i - 1].line < t.line):
+            i = _grant(toks, i, emit)                     # el objeto de ON; no los privilegios
+            continue
         if u == "FROM" and _from_is_operator(toks, i):
             i += 1                                        # EXTRACT(x FROM col), …
             continue
@@ -438,6 +508,33 @@ def _references(toks, spans, fid) -> list:
             emit(i, name, "call")                         # PL/SQL: `pkg.proc;`
         i = max(j, i + 1)
     return out
+
+
+# Tras `GRANT … ON`, objetos que no son una tabla/vista/secuencia del proyecto
+_GRANT_NOT_TABLE = {"SCHEMA", "DATABASE", "ALL", "FUNCTION", "PROCEDURE", "PACKAGE", "TYPE",
+                    "LANGUAGE", "DOMAIN", "OBJECT", "LOGIN", "USER", "ROLE", "DIRECTORY",
+                    "TABLESPACE", "SERVER", "FOREIGN", "LARGE", "ROUTINE"}
+
+
+def _grant(toks, i, emit) -> int:
+    """`GRANT|REVOKE privilegios ON [TABLE] obj TO|FROM quien`: ref al objeto (si es una
+    tabla/vista/secuencia) y salta la sentencia entera. Los privilegios (`UPDATE`,
+    `DELETE`, `EXECUTE`…) no son tablas ni llamadas, ni el `FROM rol` de REVOKE una tabla."""
+    n = len(toks)
+    j = i + 1
+    while j < n and toks[j].text != ";" and toks[j].kind != "batch" and toks[j].up != "ON":
+        j += 1
+    if j < n and toks[j].up == "ON":
+        k = j + 1
+        if k < n and toks[k].up in ("TABLE", "VIEW", "SEQUENCE"):
+            k += 1
+        if k < n and toks[k].up not in _GRANT_NOT_TABLE:
+            name, k2 = _qualified(toks, k)
+            if name and not (k2 < n and toks[k2].text in (".", ":")):   # MySQL `db.*`
+                emit(k, name, "ref")
+    while j < n and toks[j].text != ";" and toks[j].kind != "batch":
+        j += 1
+    return j + 1
 
 
 def _from_is_operator(toks, i) -> bool:
@@ -507,6 +604,7 @@ def _table_list(toks, i, emit) -> int:
             if not name or toks[i].up in _FROM_END:
                 return i
             if j < n and toks[j].text == "(":             # FROM tabla_funcion(...)
+                emit(i, name, "call")                     # sus argumentos, el bucle general
                 return j
             emit(i, name, "ref")
             i = j

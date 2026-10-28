@@ -535,6 +535,19 @@ tablas**, no escribir un motor:
     al script; `@x`/`\i x`/`START`/`SOURCE` literales, solo si son únicos.
     Las `references` llevan la procedencia `ast-ref`, que `confidence` clasifica como
     **EXTRACTED** (están escritas en el código, no deducidas).
+    **Literales y dialecto (2026-10-27, PR #18 ronda 2).** La barra invertida escapa la
+    comilla en MySQL/MariaDB (`'O\'Brien'`) pero es un carácter más en SQL estándar,
+    T-SQL, Oracle y PostgreSQL (`'C:\'` es un literal completo; en PostgreSQL solo
+    escapa dentro de `E'…'`). Regla, por archivo: (1) con pistas de MySQL (backticks,
+    `/*!40101 … */`, `ENGINE=`, `AUTO_INCREMENT`, `DELIMITER`, `LOCK TABLES`,
+    `UNSIGNED`) y **ninguna** de T-SQL (líneas `GO`, `NVARCHAR`, `IDENTITY(`,
+    `SET NOCOUNT`, `dbo.`), `\'` escapa; (2) recuperación: si con ese modo un literal
+    queda abierto hasta el final del archivo y con el otro no, se usa el otro. Límite
+    consciente: un MySQL **sin** pistas con un número **par** de `\'` cierra en ambos
+    modos y se lee en modo estándar (puede perder lo que hay entre los dos literales,
+    nunca inventa aristas). Comentarios `/* … */` anidados (PostgreSQL/T-SQL) solo si
+    el anidamiento cierra; si no, cierre plano (Oracle/MySQL). `GRANT/REVOKE … ON t`
+    da una `references` a `t` (no a los privilegios), y `FROM f(...)` una `calls` a `f`.
   - **Terraform/HCL:** un módulo es un DIRECTORIO (sus `.tf` comparten nombres y Terraform
     prohíbe los duplicados), así que `var.x`/`local.x`/`aws_x.y`/`data.t.n`/`module.m` se
     resuelven en el directorio del archivo y `module.m.out` va al `output "out"` del
