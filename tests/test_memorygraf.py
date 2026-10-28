@@ -1116,6 +1116,28 @@ class TestAuditM15(Base):
         self.assertFalse([i for i in nodes if i.startswith("proj/a.kt::")])
         store.close()
 
+    def test_doctor_cli_passes_explicit_config(self):
+        # `memorygraf --config X doctor` ignoraba X: el reporte por lenguaje salía vacío
+        import contextlib
+        import io
+        from memorygraf import cli
+        self.write("app.rb", "def f; end\n")
+        cfg = os.path.join(self.tmp, "cfg.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump(self.config, f)
+        err = io.StringIO()
+        cwd = os.getcwd()
+        env = {k: v for k, v in os.environ.items() if k != "MEMORYGRAF_HOME"}
+        try:
+            os.chdir(self.tmp)               # sin un .memorygraf que autodetectar
+            with contextlib.redirect_stderr(err), self.assertRaises(SystemExit), \
+                 unittest.mock.patch.dict(os.environ, env, clear=True):
+                cli.main(["--config", cfg, "doctor", "--json"])
+        finally:
+            os.chdir(cwd)
+        langs = {r["lang"] for r in json.loads(err.getvalue())["lsp_langs"]}
+        self.assertIn("ruby", langs)
+
 
 class TestDebtM15a(Base):
     """Deuda de M15a/M9 saldada: Java en layout Maven/Gradle, mismo paquete y wildcard
