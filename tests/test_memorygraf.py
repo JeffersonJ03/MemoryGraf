@@ -360,6 +360,67 @@ class TestCrossFileImportsM9(Base):
         # source("util/helper.R") -> util/helper.R (por ruta, como #include)
         self.assertIn(("r/main.R", "r/util/helper.R"), self._imports_for("r"))
 
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ruby_require_relative_and_lib(self):
+        # M15a: require_relative -> relativo al archivo; require "x" -> lib/x.rb
+        edges = self._imports_for("ruby")
+        self.assertIn(("ruby/app.rb", "ruby/util/helper.rb"), edges)
+        self.assertIn(("ruby/app.rb", "ruby/lib/billing/invoice.rb"), edges)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_kotlin_package_import_independent_of_path(self):
+        # M15a: layout Maven (src/main/kotlin/...): se resuelve por el header `package`,
+        # no por la ruta. Una función top-level importada (con alias) también resuelve.
+        base = "kotlin/src/main/kotlin/com/x"
+        edges = self._imports_for("kotlin")
+        self.assertIn((f"{base}/App.kt", f"{base}/util/Validator.kt"), edges)
+        self.assertIn((f"{base}/App.kt", f"{base}/util/Strings.kt"), edges)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_swift_module_import(self):
+        # M15a: `import Utils` -> módulo SwiftPM Sources/Utils/ (1 archivo, como Go)
+        edges = self._imports_for("swift")
+        self.assertTrue(any(s == "swift/Sources/App/main.swift"
+                            and t.startswith("swift/Sources/Utils/") for s, t in edges))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_dart_package_and_relative_import(self):
+        # M15a: package:<pubspec name>/x -> lib/x; 'src/x.dart' relativo
+        edges = self._imports_for("dart")
+        self.assertIn(("dart/lib/main.dart", "dart/lib/src/validator.dart"), edges)
+        self.assertIn(("dart/lib/main.dart", "dart/lib/src/util.dart"), edges)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_m15b_imports(self):
+        # Scala (paquetes encadenados, selectores `{A, B => C}`), Lua (`require` -> a/b.lua
+        # o lua/x/init.lua), Elixir (`alias` -> archivo del `defmodule`), Bash (`source`
+        # relativo al script, por variable SCRIPT_DIR o por `$(dirname "$0")`)
+        sc = "scala/src/main/scala/com/x"
+        cases = {
+            "scala": {(f"{sc}/App.scala", f"{sc}/util/Validator.scala"),
+                      (f"{sc}/App.scala", f"{sc}/util/Strings.scala")},
+            "lua": {("lua/main.lua", "lua/app/util.lua"), ("lua/main.lua", "lua/lua/plug/init.lua")},
+            "elixir": {("elixir/lib/my_app/billing.ex", "elixir/lib/my_app/util.ex")},
+            "bash": {("bash/deploy.sh", "bash/lib/log.sh"), ("bash/deploy.sh", "bash/lib/net.sh")},
+        }
+        for lang, expected in cases.items():
+            self.assertEqual(expected - self._imports_for(lang), set(), lang)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_m15a_external_dependencies_named_by_package(self):
+        # Lo que no es interno queda como dependencia externa con nombre de paquete.
+        expected = {"ruby": "external:json", "kotlin": "external:kotlinx",
+                    "swift": "external:Foundation", "dart": "external:http",
+                    "scala": "external:scala", "lua": "external:cjson",
+                    "elixir": "external:Ecto"}
+        for lang, ext_id in expected.items():
+            root = os.path.join(CROSSFILE_DIR, lang)
+            store = Store(os.path.join(self.tmp, f"{lang}.db"))
+            Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+            deps = {e["target"] for e in store.all_edges() if e["type"] == "depends_on"}
+            store.close()
+            self.assertIn(ext_id, deps, lang)
+
 
 class TestCrossFileCallsM9(Base):
     """M9 (1c): calls símbolo->símbolo cross-file para los genéricos con receptor
@@ -442,6 +503,63 @@ class TestCrossFileCallsM9(Base):
                       self._xcalls_for("vb"))
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ruby_constant_and_bare_calls(self):
+        # M15a: `Helper.compute` / `Billing::Invoice.build` / `helper_func` -> el símbolo
+        # único en los archivos que app.rb requiere
+        x = self._xcalls_for("ruby")
+        self.assertIn(("ruby/app.rb::App.run", "ruby/util/helper.rb::Helper.compute"), x)
+        self.assertIn(("ruby/app.rb::App.run", "ruby/util/helper.rb::helper_func"), x)
+        self.assertIn(("ruby/app.rb::App.run", "ruby/lib/billing/invoice.rb::Invoice.build"), x)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_kotlin_object_and_aliased_function_calls(self):
+        base = "kotlin/src/main/kotlin/com/x"
+        x = self._xcalls_for("kotlin")
+        self.assertIn((f"{base}/App.kt::App.run", f"{base}/util/Validator.kt::Validator.isValid"), x)
+        # `import com.x.util.normalize as norm` + `norm(...)` -> normalize
+        self.assertIn((f"{base}/App.kt::App.run", f"{base}/util/Strings.kt::normalize"), x)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_swift_module_scope_calls(self):
+        # Mismo módulo sin import (localHelper), módulo importado (Validator.isValid) y
+        # llamada cualificada por módulo (Utils.format)
+        x = self._xcalls_for("swift")
+        src = "swift/Sources/App/main.swift::run"
+        self.assertIn((src, "swift/Sources/App/Local.swift::localHelper"), x)
+        self.assertIn((src, "swift/Sources/Utils/Validator.swift::Validator.isValid"), x)
+        self.assertIn((src, "swift/Sources/Utils/Format.swift::format"), x)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_dart_static_and_prefixed_calls(self):
+        x = self._xcalls_for("dart")
+        self.assertIn(("dart/lib/main.dart::run",
+                       "dart/lib/src/validator.dart::Validator.isValid"), x)
+        self.assertIn(("dart/lib/main.dart::run", "dart/lib/src/util.dart::helper"), x)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_m15b_calls(self):
+        sc = "scala/src/main/scala/com/x"
+        cases = {
+            "scala": {(f"{sc}/App.scala::App.run", f"{sc}/util/Validator.scala::Validator.isValid"),
+                      # `{Strings => S}` + `S.norm`; `import ...Tools.trim` + `trim(...)`
+                      (f"{sc}/App.scala::App.run", f"{sc}/util/Strings.scala::Strings.norm"),
+                      (f"{sc}/App.scala::App.run", f"{sc}/util/Strings.scala::Tools.trim")},
+            "lua": {("lua/main.lua::run", "lua/app/util.lua::M.check"),
+                    ("lua/main.lua::run", "lua/lua/plug/init.lua::P.setup")},
+            "elixir": {
+                ("elixir/lib/my_app/billing.ex::MyApp.Billing.run",
+                 "elixir/lib/my_app/util.ex::MyApp.Util.Validator.check"),        # por alias
+                ("elixir/lib/my_app/billing.ex::MyApp.Billing.run",
+                 "elixir/lib/my_app/util.ex::MyApp.Util.Validator.strict"),       # nombre completo
+                ("elixir/lib/my_app/billing.ex::MyApp.Billing.run",
+                 "elixir/lib/my_app/util.ex::MyApp.Helpers.helper")},             # por import
+            "bash": {("bash/deploy.sh::deploy", "bash/lib/log.sh::log_info"),
+                     ("bash/deploy.sh::deploy", "bash/lib/net.sh::wait_for_port")},
+        }
+        for lang, expected in cases.items():
+            self.assertEqual(expected - self._xcalls_for(lang), set(), lang)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_precision_csharp_no_edge_when_namespace_not_used(self):
         # Widget está en App.Other, que App.cs NO usa -> no se enlaza (precisión).
         self.write("App.cs",
@@ -475,6 +593,602 @@ class TestCrossFileCallsM9(Base):
         calls = {(e["source"], e["target"]) for e in store.all_edges()
                  if e["type"] == "calls"}
         self.assertEqual(calls, {("proj/boot.s::bar", "proj/boot.s::foo")})
+
+
+class TestPrecisionM15a(Base):
+    """M15a: casos ambiguos o fuera de scope que NO deben generar arista (M9 es
+    precisión-primero: antes sin arista que con una falsa)."""
+
+    def _xcalls(self):
+        store, _ = self.index()
+        edges = {(e["source"], e["target"], e["type"]) for e in store.all_edges()}
+        store.close()
+        return ({(s, t) for s, t, ty in edges if ty == "calls" and "::" in s
+                 and s.split("::")[0] != t.split("::")[0]},
+                {(s, t) for s, t, ty in edges if ty in ("imports", "depends_on")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ruby_no_edge_to_file_not_required(self):
+        # ghost.rb define Ghost.go y ghost_func, pero app.rb no lo requiere
+        self.write("app.rb", "class App\n  def run\n    Ghost.go\n    ghost_func(1)\n  end\nend\n")
+        self.write("ghost.rb", "class Ghost\n  def self.go; end\nend\ndef ghost_func(x); x; end\n")
+        xcalls, _ = self._xcalls()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ruby_interpolated_require_is_ignored(self):
+        self.write("app.rb", 'require "#{__dir__}/x"\n')
+        self.write("lib/x.rb", "def x; end\n")
+        _, deps = self._xcalls()
+        self.assertEqual(deps, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_kotlin_ambiguous_top_level_import_no_edge_no_fake_external(self):
+        # `dup` es top-level en DOS archivos del paquete com.p (ilegal en Kotlin, pero
+        # posible a mitad de un refactor) -> ni import, ni call, ni `external:com`.
+        self.write("A.kt", "package com.a\nimport com.p.dup\nfun run() { dup() }\n")
+        self.write("p/One.kt", "package com.p\nfun dup() = 1\n")
+        self.write("p/Two.kt", "package com.p\nfun dup() = 2\n")
+        xcalls, deps = self._xcalls()
+        self.assertEqual(xcalls, set())
+        self.assertEqual(deps, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_swift_no_edge_to_module_not_imported(self):
+        self.write("Sources/App/main.swift", "func run() { hidden() }\n")
+        self.write("Sources/Other/Hidden.swift", "public func hidden() {}\n")
+        xcalls, _ = self._xcalls()
+        self.assertEqual(xcalls, set())
+
+    def test_swift_module_from_swiftpm_layout(self):
+        from memorygraf.indexer import _swift_module
+        self.assertEqual(_swift_module("Sources/App/main.swift"), "App")
+        self.assertEqual(_swift_module("pkg/Tests/AppTests/a/X.swift"), "AppTests")
+        self.assertEqual(_swift_module("Sources/main.swift"), "")   # no es un módulo
+        self.assertEqual(_swift_module("MyApp/View.swift"), "")     # Xcode: un solo módulo
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_swift_ambiguous_name_in_module_no_edge(self):
+        self.write("Sources/App/main.swift", "func run() { twice() }\n")
+        self.write("Sources/App/A.swift", "func twice() {}\n")
+        self.write("Sources/App/B.swift", "func twice(_ x: Int) {}\n")
+        xcalls, _ = self._xcalls()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_dart_prefixed_import_not_visible_unqualified(self):
+        # util.dart se importa `as u`: `helper()` sin prefijo no lo ve
+        self.write("lib/main.dart", "import 'util.dart' as u;\nvoid run() { helper(); }\n")
+        self.write("lib/util.dart", "bool helper() => true;\n")
+        xcalls, deps = self._xcalls()
+        self.assertEqual(xcalls, set())
+        self.assertEqual(deps, {("proj/lib/main.dart", "proj/lib/util.dart")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_dart_unresolved_relative_import_is_not_external(self):
+        self.write("lib/main.dart", "import 'missing.dart';\nvoid run() {}\n")
+        _, deps = self._xcalls()
+        self.assertEqual(deps, set())
+
+
+class TestPrecisionM15b(Base):
+    """M15b: lo que NO debe enlazar en Scala, Lua, Elixir y Bash."""
+
+    def _edges(self):
+        store, _ = self.index()
+        rows = [(e["source"], e["target"], e["type"], e["provenance"]) for e in store.all_edges()]
+        store.close()
+        return ({(s, t) for s, t, ty, pv in rows if ty == "calls" and pv == "xfile"},
+                {(s, t) for s, t, ty, _pv in rows if ty in ("imports", "depends_on")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_lua_ambiguous_require_and_globals(self):
+        # `require("x")` existe como x.lua Y como lua/x.lua -> ambiguo: ni arista ni call.
+        # `helper()` global (sin require) no se adivina.
+        self.write("main.lua", 'local x = require("x")\nlocal function run() x.f(); helper() end\n')
+        self.write("x.lua", "local M = {}\nfunction M.f() end\nreturn M\n")
+        self.write("lua/x.lua", "local M = {}\nfunction M.f() end\nreturn M\n")
+        self.write("g.lua", "function helper() end\n")
+        xcalls, deps = self._edges()
+        self.assertEqual(xcalls, set())
+        self.assertEqual({t for _s, t in deps}, {"external:x"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_elixir_no_import_no_edge_and_no_fake_external(self):
+        self.write("lib/a.ex", "defmodule MyApp.A do\n  alias MyApp.Missing\n"
+                   "  def run, do: helper() && Missing.x()\nend\n")
+        self.write("lib/h.ex", "defmodule MyApp.H do\n  def helper, do: 1\nend\n")
+        xcalls, deps = self._edges()
+        self.assertEqual(xcalls, set())     # `helper` sin `import MyApp.H`: no se ve
+        self.assertEqual(deps, set())       # `MyApp.Missing` es interno: no `external:MyApp`
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_elixir_module_defined_twice_no_edge(self):
+        self.write("lib/a.ex", "defmodule MyApp.A do\n  alias MyApp.Dup\n  def run, do: Dup.f()\nend\n")
+        self.write("lib/d1.ex", "defmodule MyApp.Dup do\n  def f, do: 1\nend\n")
+        self.write("lib/d2.ex", "defmodule MyApp.Dup do\n  def f, do: 2\nend\n")
+        xcalls, deps = self._edges()
+        self.assertEqual(xcalls, set())
+        self.assertEqual(deps, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_bash_unknown_variable_and_ambiguous_cwd(self):
+        # `$OTHER/x.sh` no es relativo al script; `source lib.sh` (literal, depende del
+        # directorio de trabajo) existe junto al script Y en la raíz -> ambiguo.
+        self.write("bin/run.sh", 'source "$OTHER/x.sh"\nsource lib.sh\nmain() { f; g; }\n')
+        self.write("bin/lib.sh", "f() { :; }\n")
+        self.write("lib.sh", "f() { :; }\n")
+        self.write("x.sh", "g() { :; }\n")
+        xcalls, deps = self._edges()
+        self.assertEqual(xcalls, set())
+        self.assertEqual(deps, set())        # Bash nunca produce `external:`
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_bash_unique_cwd_literal_links(self):
+        self.write("bin/run.sh", "source bin/lib.sh\nmain() { f; }\n")
+        self.write("bin/lib.sh", "f() { :; }\n")
+        xcalls, deps = self._edges()
+        self.assertEqual(deps, {("proj/bin/run.sh", "proj/bin/lib.sh")})
+        self.assertEqual(xcalls, {("proj/bin/run.sh::main", "proj/bin/lib.sh::f")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_scala_same_package_and_java_interop(self):
+        self.write("a/App.scala", "package p\n\nobject App {\n  def run(): Unit = { Helper.go(); Legacy.old() }\n}\n")
+        self.write("b/Helper.scala", "package p\n\nobject Helper {\n  def go(): Unit = ()\n}\n")
+        self.write("c/Legacy.java", "package p;\npublic class Legacy { static void old() {} }\n")
+        self.write("d/Other.scala", "package q\n\nobject Helper {\n  def go(): Unit = ()\n}\n")
+        xcalls, _ = self._edges()
+        self.assertEqual(xcalls, {("proj/a/App.scala::App.run", "proj/b/Helper.scala::Helper.go"),
+                                  ("proj/a/App.scala::App.run", "proj/c/Legacy.java::Legacy.old")})
+
+
+class TestM15c(Base):
+    """M15c: SQL (extractor léxico, todos los dialectos incluido PL/SQL), Terraform/HCL
+    y PowerShell. Fixtures en tests/fixtures/crossfile/{sql,terraform,powershell}/."""
+
+    def _graph(self, lang=None):
+        if lang:
+            root = os.path.join(CROSSFILE_DIR, lang)
+            store = Store(os.path.join(self.tmp, f"{lang}.db"))
+            Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        else:
+            store, _ = self.index()
+        rows = [(e["source"], e["target"], e["type"], e["provenance"]) for e in store.all_edges()]
+        syms = {n["name"] for n in store.all_nodes(types=["symbol"])}
+        store.close()
+        by = lambda *types: {(s, t) for s, t, ty, _p in rows if ty in types}
+        return syms, by("references"), by("calls"), by("imports", "depends_on")
+
+    # ---------------- SQL
+    def test_sql_fixture(self):
+        syms, refs, calls, deps = self._graph("sql")
+        self.assertTrue({"clientes", "ordenes", "eventos", "seq_ordenes", "v_ordenes_abiertas",
+                         "pkg_util", "pkg_util.log_evento", "pkg_util.siguiente_id",
+                         "finalizar_orden"} <= syms)
+        t, p = "sql/schema/tables.sql", "sql/plsql"
+        self.assertTrue({
+            (f"{t}::ordenes", f"{t}::clientes"),                               # FK
+            ("sql/schema/views.sql::v_ordenes_abiertas", f"{t}::ordenes"),      # vista
+            ("sql/schema/views.sql::v_ordenes_abiertas", f"{t}::clientes"),
+            (f"{p}/finalizar.sql::finalizar_orden", f"{t}::ordenes"),          # PL/SQL
+            (f"{p}/pkg_util.pkb::pkg_util.log_evento", f"{t}::eventos"),       # INSERT INTO
+            (f"{p}/pkg_util.pkb::pkg_util.siguiente_id", f"{t}::seq_ordenes"),  # NEXTVAL
+        } <= refs)
+        self.assertIn((f"{p}/finalizar.sql::finalizar_orden", f"{p}/pkg_util.pkb::pkg_util.log_evento"),
+                      calls)
+        self.assertTrue({("sql/deploy.sql", f"{t}"), ("sql/deploy.sql", "sql/schema/views.sql"),
+                         ("sql/deploy.sql", f"{p}/pkg_util.pkb")} <= deps)       # @@x.sql
+
+    def test_sql_works_without_tree_sitter(self):
+        # El extractor de SQL es léxico (stdlib): no depende del extra `parsers`
+        from memorygraf.extractors import ts_generic, ts_treesitter
+        with unittest.mock.patch.object(ts_generic, "available", return_value=False), \
+             unittest.mock.patch.object(ts_treesitter, "available", return_value=False):
+            syms, refs, _c, _d = self._graph("sql")
+        self.assertIn("pkg_util.log_evento", syms)
+        self.assertIn(("sql/schema/views.sql::v_ordenes_abiertas",
+                       "sql/schema/tables.sql::ordenes"), refs)
+
+    def test_sql_postgres_dollar_body_and_cte(self):
+        self.write("schema.sql", "CREATE TABLE orders (id int);\nCREATE TABLE audit (v int);\n")
+        self.write("fn.sql",
+                   "CREATE FUNCTION recent() RETURNS int AS $$\n"
+                   "  WITH orders AS (SELECT 1 AS id)\n"          # CTE que tapa la tabla
+                   "  SELECT count(*) FROM orders;\n"
+                   "$$ LANGUAGE sql;\n"
+                   "CREATE FUNCTION log_it(x int) RETURNS void AS $f$\n"
+                   "BEGIN INSERT INTO audit (v) VALUES (x); PERFORM recent(); END; $f$ LANGUAGE plpgsql;\n")
+        _s, refs, calls, _d = self._graph()
+        self.assertEqual(refs, {("proj/fn.sql::log_it", "proj/schema.sql::audit")})
+        self.assertEqual(calls, {("proj/fn.sql::log_it", "proj/fn.sql::recent")})
+
+    def test_sql_precision(self):
+        # `SELECT … INTO v_var` no es una tabla; `INSERT INTO audit (…)` no es una llamada
+        # a la FUNCIÓN audit; `log_evento` sin cualificar existe en dos paquetes: desde
+        # fuera de ellos es ambiguo, desde dentro de uno resuelve al suyo.
+        self.write("t.sql", "CREATE TABLE audit (v NUMBER);\nCREATE TABLE v_var (x NUMBER);\n")
+        self.write("f.sql", "CREATE FUNCTION audit(x NUMBER) RETURN NUMBER IS BEGIN RETURN x; END;\n/\n")
+        self.write("a.pkb", "CREATE OR REPLACE PACKAGE BODY pkg_a AS\n"
+                   "  PROCEDURE log_evento IS BEGIN NULL; END log_evento;\n"
+                   "  PROCEDURE run IS BEGIN log_evento; END run;\nEND pkg_a;\n/\n")
+        self.write("b.pkb", "CREATE OR REPLACE PACKAGE BODY pkg_b AS\n"
+                   "  PROCEDURE log_evento IS BEGIN NULL; END log_evento;\nEND pkg_b;\n/\n")
+        self.write("p.sql", "CREATE OR REPLACE PROCEDURE p AS\n  n NUMBER;\nBEGIN\n"
+                   "  SELECT 1 INTO v_var FROM dual;\n  INSERT INTO audit (v) VALUES (1);\n"
+                   "  log_evento;\nEND p;\n/\n")
+        # dos paquetes en UN archivo: el mismo archivo no basta, decide el paquete
+        self.write("both.pkb", "CREATE OR REPLACE PACKAGE BODY pkg_c AS\n"
+                   "  PROCEDURE log_evento IS BEGIN NULL; END log_evento;\n"
+                   "  PROCEDURE go IS BEGIN log_evento; END go;\nEND pkg_c;\n/\n"
+                   "CREATE OR REPLACE PACKAGE BODY pkg_d AS\n"
+                   "  PROCEDURE log_evento IS BEGIN NULL; END log_evento;\nEND pkg_d;\n/\n")
+        _s, refs, calls, _d = self._graph()
+        self.assertEqual(refs, {("proj/p.sql::p", "proj/t.sql::audit")})
+        self.assertEqual(calls, {("proj/a.pkb::pkg_a.run", "proj/a.pkb::pkg_a.log_evento"),
+                                 ("proj/both.pkb::pkg_c.go", "proj/both.pkb::pkg_c.log_evento")})
+
+    def test_sql_tsql_go_batches(self):
+        self.write("Id.sql", "-- si `@Id INT` se leyera como `@script`, apuntaría aquí\n")
+        self.write("x.sql", "CREATE TABLE dbo.Items (Id INT)\nGO\n"
+                   "CREATE PROCEDURE dbo.AddItem\n    @Id INT\nAS\nBEGIN\n"
+                   "  INSERT INTO dbo.Items (Id) VALUES (@Id)\nEND\nGO\n"
+                   "CREATE VIEW dbo.AllItems AS SELECT Id FROM Items\nGO\n")
+        syms, refs, _c, deps = self._graph()
+        self.assertTrue({"dbo.Items", "dbo.AddItem", "dbo.AllItems"} <= syms)
+        self.assertEqual(refs, {("proj/x.sql::dbo.AddItem", "proj/x.sql::dbo.Items"),
+                                ("proj/x.sql::dbo.AllItems", "proj/x.sql::dbo.Items")})
+        self.assertEqual(deps, set())        # `@Id INT` no es un `@script` de SQL*Plus
+
+    def test_sql_tsql_stub_then_alter(self):
+        # Patrón idempotente de T-SQL: stub por SQL dinámico + `ALTER PROCEDURE … AS` con
+        # el cuerpo real; el cuerpo crea `#tmp` al inicio de línea (no corta la rutina) y
+        # llama con `EXECUTE @r = dbo.Helper`. El `ALTER … COMPILE` de Oracle no define nada.
+        self.write("p.sql", "IF OBJECT_ID('dbo.Run') IS NULL\n"
+                   "EXEC sp_executesql N'CREATE PROCEDURE dbo.Run AS'\nGO\n"
+                   "ALTER PROCEDURE dbo.Run\n  @A INT\nAS\nBEGIN\n"
+                   "  CREATE TABLE #tmp (x INT)\n"
+                   "  INSERT INTO dbo.Log (v) VALUES (1)\n"
+                   "  EXECUTE @r = dbo.Helper @x = 1\nEND\nGO\n")
+        self.write("t.sql", "CREATE TABLE dbo.Log (v INT)\nGO\n"
+                   "CREATE PROCEDURE dbo.Helper @x INT AS SELECT 1\nGO\n")
+        self.write("o.sql", "ALTER PROCEDURE legacy_proc COMPILE;\n")
+        syms, refs, calls, _d = self._graph()
+        self.assertNotIn("legacy_proc", syms)
+        self.assertIn(("proj/p.sql::dbo.Run", "proj/t.sql::dbo.Log"), refs)
+        self.assertEqual(calls, {("proj/p.sql::dbo.Run", "proj/t.sql::dbo.Helper")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_powershell_module_scope(self):
+        # Un .psm1 dot-sourcea sus .ps1 en el ámbito del módulo: se ven ENTRE SÍ sin
+        # importarse. `function Global:X` define X. `> $null` no rompe la ruta.
+        self.write("Mod.psm1", ". $PSScriptRoot\\A.ps1 > $null\n. $PSScriptRoot\\B.ps1\n")
+        self.write("A.ps1", "function Get-A { Get-B }\n")
+        self.write("B.ps1", "function Global:Get-B { }\n")
+        syms, _r, calls, deps = self._graph()
+        self.assertIn("Get-B", syms)
+        self.assertEqual(deps, {("proj/Mod.psm1", "proj/A.ps1"), ("proj/Mod.psm1", "proj/B.ps1")})
+        self.assertEqual(calls, {("proj/A.ps1::Get-A", "proj/B.ps1::Get-B")})
+
+    def test_references_ast_ref_are_extracted(self):
+        from memorygraf import confidence
+        self.assertEqual(confidence.classify("references", "ast-ref", 0.85), confidence.EXTRACTED)
+        self.assertEqual(confidence.classify("references", "", 0.85), confidence.INFERRED)
+
+    # ---------------- Terraform
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_terraform_fixture(self):
+        syms, refs, _c, deps = self._graph("terraform")
+        self.assertTrue({"var.region", "local.name", "module.vpc", "aws_security_group.sg",
+                         "aws_instance.web", "output.ip", "aws_vpc.this", "output.vpc_id"} <= syms)
+        m, v = "terraform/main.tf", "terraform/modules/vpc"
+        self.assertTrue({
+            (f"{m}::local.name", "terraform/variables.tf::var.region"),     # mismo dir, otro .tf
+            (f"{m}::aws_security_group.sg", f"{m}::local.name"),
+            (f"{m}::aws_security_group.sg", f"{v}/outputs.tf::output.vpc_id"),  # module.m.out
+            (f"{m}::aws_instance.web", f"{m}::aws_security_group.sg"),       # depends_on
+            ("terraform/outputs.tf::output.ip", f"{m}::aws_instance.web"),
+            (f"{v}/outputs.tf::output.vpc_id", f"{v}/main.tf::aws_vpc.this"),
+        } <= refs)
+        self.assertIn((m, f"{v}/main.tf"), deps)
+        self.assertIn((m, "external:terraform-aws-modules/eks"), deps)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_terraform_precision(self):
+        # Otro directorio es OTRO módulo: su `var.region` no se ve; el output de un módulo
+        # remoto no está en el grafo (el bloque `module.net` sí: es de este directorio);
+        # el iterador de un `for` y el de un `dynamic` no son recursos.
+        self.write("app/main.tf", 'module "net" {\n  source = "hashicorp/net/aws"\n}\n'
+                   'resource "aws_x" "a" {\n  r = var.region\n  n = module.net.id\n'
+                   '  l = [for s in var.subnets : s.id]\n'
+                   '  dynamic "ingress" {\n    content { port = ingress.value }\n  }\n}\n')
+        self.write("other/vars.tf", 'variable "region" {}\n')
+        self.write("app/s.tf", 'resource "s" "id" {}\nresource "ingress" "value" {}\n')
+        _s, refs, _c, _d = self._graph()
+        self.assertEqual(refs, {("proj/app/main.tf::aws_x.a", "proj/app/main.tf::module.net")})
+
+    # ---------------- PowerShell
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_powershell_fixture(self):
+        syms, _r, calls, deps = self._graph("powershell")
+        self.assertTrue({"Invoke-Deploy", "Write-Log", "Retry", "Retry.Run", "Test-Port"} <= syms)
+        d = "powershell/deploy.ps1::Invoke-Deploy"
+        self.assertTrue({(d, "powershell/lib/common.ps1::Write-Log"),     # `write-log`: sin mayúsculas
+                         (d, "powershell/Mods/Net.psm1::Test-Port"),
+                         (d, "powershell/lib/common.ps1::Retry.Run")} <= calls)
+        self.assertTrue({("powershell/deploy.ps1", "powershell/lib/common.ps1"),
+                         ("powershell/deploy.ps1", "powershell/Mods/Net.psm1"),
+                         ("powershell/deploy.ps1", "external:Az.Accounts")} <= deps)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_powershell_precision(self):
+        # `& x.ps1` ejecuta (no carga), `$env:X` no se adivina, y una ruta literal que
+        # existe junto al script Y en la raíz es ambigua.
+        self.write("bin/run.ps1", "& ./tool.ps1\n. \"$env:LIB\\x.ps1\"\n. .\\lib.ps1\n"
+                   "function Main { Get-Tool; Get-X; Get-Lib }\n")
+        self.write("bin/tool.ps1", "function Get-Tool { }\n")
+        self.write("x.ps1", "function Get-X { }\n")
+        self.write("bin/lib.ps1", "function Get-Lib { }\n")
+        self.write("lib.ps1", "function Get-Lib { }\n")
+        _s, _r, calls, deps = self._graph()
+        self.assertEqual({(s, t) for s, t in calls if s.split("::")[0] != t.split("::")[0]}, set())
+        self.assertEqual(deps, set())
+
+
+class TestDebtM15a(Base):
+    """Deuda de M15a/M9 saldada: Java en layout Maven/Gradle, mismo paquete y wildcard
+    en Java/Kotlin, Kotlin Multiplatform, Zeitwerk (Rails), targets de Xcode y
+    `export`/`part` de Dart. Cada caso con su contraparte de precisión."""
+
+    def _edges(self):
+        store, _ = self.index()
+        rows = [(e["source"], e["target"], e["type"], e["provenance"]) for e in store.all_edges()]
+        store.close()
+        xcalls = {(s, t) for s, t, ty, pv in rows if ty == "calls" and pv == "xfile"}
+        deps = {(s, t) for s, t, ty, _pv in rows if ty in ("imports", "depends_on")}
+        return xcalls, deps
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_java_maven_layout_resolves_by_package_not_path(self):
+        base = "src/main/java/com/x"
+        self.write(f"{base}/App.java", "package com.x;\nimport com.x.util.Validator;\n"
+                   "class App { void run() { Validator.check(); } }\n")
+        self.write(f"{base}/util/Validator.java",
+                   "package com.x.util;\npublic class Validator { static void check() {} }\n")
+        xcalls, deps = self._edges()
+        self.assertEqual(deps, {(f"proj/{base}/App.java", f"proj/{base}/util/Validator.java")})
+        self.assertIn((f"proj/{base}/App.java::App.run",
+                       f"proj/{base}/util/Validator.java::Validator.check"), xcalls)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_java_same_package_without_import(self):
+        self.write("a/App.java", "package p;\nclass App { void run() { Helper.go(); } }\n")
+        self.write("b/Helper.java", "package p;\nclass Helper { static void go() {} }\n")
+        self.write("c/Other.java", "package q;\nclass Other { static void go() {} }\n")
+        xcalls, _ = self._edges()
+        self.assertEqual(xcalls, {("proj/a/App.java::App.run", "proj/b/Helper.java::Helper.go")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_kotlin_same_package_and_wildcard_import(self):
+        self.write("App.kt", "package app\nimport lib.*\n"
+                   "fun run() { local(); Tools.go(); }\n")
+        self.write("Local.kt", "package app\nfun local() = 1\n")
+        self.write("lib/Tools.kt", "package lib\nobject Tools {\n    fun go() = 1\n}\n")
+        self.write("other/Hidden.kt", "package other\nfun local() = 2\n")   # otro paquete
+        xcalls, deps = self._edges()
+        self.assertEqual(xcalls, {("proj/App.kt::run", "proj/Local.kt::local"),
+                                  ("proj/App.kt::run", "proj/lib/Tools.kt::Tools.go")})
+        self.assertEqual(deps, set())          # `lib.*` es interno: ni arista ni externo
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_kotlin_imports_java_class(self):
+        self.write("App.kt", "package app\nimport legacy.Util\nfun run() { Util.go() }\n")
+        self.write("legacy/Util.java", "package legacy;\npublic class Util { static void go() {} }\n")
+        xcalls, deps = self._edges()
+        self.assertIn(("proj/App.kt", "proj/legacy/Util.java"), deps)
+        self.assertIn(("proj/App.kt::run", "proj/legacy/Util.java::Util.go"), xcalls)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_kotlin_multiplatform_expect_actual(self):
+        common = "lib/src/commonMain/kotlin/log"
+        android = "lib/src/androidMain/kotlin/log"
+        self.write(f"{common}/Log.kt", "package log\nexpect class Log {\n    fun d(m: String)\n}\n")
+        self.write(f"{android}/Log.kt",
+                   "package log\nactual class Log {\n    actual fun d(m: String) {}\n}\n")
+        self.write("lib/src/commonMain/kotlin/app/Use.kt",
+                   "package app\nimport log.Log\nfun use(l: Log) { Log.d(\"x\") }\n")
+        self.write(f"{android}/Plat.kt", "package log\nfun plat() { Log.d(\"y\") }\n")
+        xcalls, deps = self._edges()
+        # código común -> la declaración `expect`; código android -> su `actual`
+        self.assertIn(("proj/lib/src/commonMain/kotlin/app/Use.kt", f"proj/{common}/Log.kt"), deps)
+        self.assertIn(("proj/lib/src/commonMain/kotlin/app/Use.kt::use",
+                       f"proj/{common}/Log.kt::Log.d"), xcalls)
+        self.assertIn((f"proj/{android}/Plat.kt::plat", f"proj/{android}/Log.kt::Log.d"), xcalls)
+
+    def _rails_app(self, rails=True):
+        if rails:
+            self.write("config/application.rb", "module Shop\n  class Application; end\nend\n")
+        self.write("app/models/billing/invoice.rb",
+                   "module Billing\n  class Invoice\n    def self.build; end\n  end\nend\n")
+        self.write("app/models/billing/report.rb",
+                   "module Billing\n  class Report\n    def run\n      Invoice.build\n    end\n  end\nend\n")
+        self.write("app/services/checkout.rb",
+                   "class Checkout\n  def call\n    Billing::Invoice.build\n  end\nend\n")
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ruby_zeitwerk_autoload_by_convention(self):
+        self._rails_app()
+        xcalls, _ = self._edges()
+        inv = "proj/app/models/billing/invoice.rb::Invoice.build"
+        self.assertIn(("proj/app/services/checkout.rb::Checkout.call", inv), xcalls)
+        # `Invoice` dentro de `module Billing`: anidamiento léxico -> billing/invoice.rb
+        self.assertIn(("proj/app/models/billing/report.rb::Report.run", inv), xcalls)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ruby_without_zeitwerk_no_autoload_edges(self):
+        self._rails_app(rails=False)
+        xcalls, _ = self._edges()
+        self.assertEqual(xcalls, set())
+
+    def test_zeitwerk_underscore(self):
+        from memorygraf.indexer import _underscore
+        self.assertEqual(_underscore("HTTPClient"), "http_client")
+        self.assertEqual(_underscore("Invoice"), "invoice")
+        self.assertEqual(_underscore("OAuth2Token"), "o_auth2_token")
+
+    # project.pbxproj realista (plist ASCII): grupos con rutas, file references, fases
+    # "Compile Sources" y un grupo sincronizado (Xcode 16). Odd/Extra.swift está asignado
+    # A MANO al target MyApp aunque vive fuera de su carpeta (y Odd/WidgetExtra.swift, al
+    # target Widget); Shared/Both.swift está en MyApp y en Widget (compartido).
+    _PBX = """// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objects = {
+		F001 /* Helper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helper.swift; sourceTree = "<group>"; };
+		F002 /* Main.swift */ = {isa = PBXFileReference; path = Main.swift; sourceTree = "<group>"; };
+		F003 /* Util.swift */ = {isa = PBXFileReference; path = Util.swift; sourceTree = "<group>"; };
+		F004 /* W.swift */ = {isa = PBXFileReference; path = W.swift; sourceTree = "<group>"; };
+		F005 /* Extra.swift */ = {isa = PBXFileReference; path = Extra.swift; sourceTree = "<group>"; };
+		F006 /* Both.swift */ = {isa = PBXFileReference; path = Both.swift; sourceTree = "<group>"; };
+		F008 /* WidgetExtra.swift */ = {isa = PBXFileReference; path = WidgetExtra.swift; sourceTree = "<group>"; };
+		F007 /* UIKit.framework */ = {isa = PBXFileReference; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		B001 /* Helper.swift in Sources */ = {isa = PBXBuildFile; fileRef = F001 /* Helper.swift */; };
+		B002 /* Main.swift in Sources */ = {isa = PBXBuildFile; fileRef = F002 /* Main.swift */; };
+		B004 /* W.swift in Sources */ = {isa = PBXBuildFile; fileRef = F004 /* W.swift */; };
+		B005 /* Extra.swift in Sources */ = {isa = PBXBuildFile; fileRef = F005 /* Extra.swift */; };
+		B006 /* Both.swift in Sources */ = {isa = PBXBuildFile; fileRef = F006 /* Both.swift */; };
+		B106 /* Both.swift in Sources */ = {isa = PBXBuildFile; fileRef = F006 /* Both.swift */; };
+		B008 /* WidgetExtra.swift in Sources */ = {isa = PBXBuildFile; fileRef = F008 /* WidgetExtra.swift */; };
+		G000 = {
+			isa = PBXGroup;
+			children = (
+				G001 /* MyApp */,
+				G002 /* Shared */,
+				G003 /* Widget */,
+				G004 /* Odd */,
+				S001 /* AppTests */,
+				F007 /* UIKit.framework */,
+			);
+			sourceTree = "<group>";
+		};
+		G001 /* MyApp */ = {isa = PBXGroup; children = (F001 /* Helper.swift */, F002 /* Main.swift */, ); path = MyApp; sourceTree = "<group>"; };
+		G002 /* Shared */ = {isa = PBXGroup; children = (F003 /* Util.swift */, F006 /* Both.swift */, ); path = Shared; sourceTree = "<group>"; };
+		G003 /* Widget */ = {isa = PBXGroup; children = (F004 /* W.swift */, ); path = Widget; sourceTree = "<group>"; };
+		G004 /* Odd */ = {isa = PBXGroup; children = (F005 /* Extra.swift */, F008 /* WidgetExtra.swift */, ); path = Odd; sourceTree = "<group>"; };
+		S001 /* AppTests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = AppTests; sourceTree = "<group>"; };
+		P001 /* Sources */ = {isa = PBXSourcesBuildPhase; files = (B001 /* Helper.swift in Sources */, B002 /* Main.swift in Sources */, B005 /* Extra.swift in Sources */, B006 /* Both.swift in Sources */, ); };
+		P003 /* Sources */ = {isa = PBXSourcesBuildPhase; files = (B004 /* W.swift in Sources */, B106 /* Both.swift in Sources */, B008 /* WidgetExtra.swift in Sources */, ); };
+		T001 /* MyApp */ = {isa = PBXNativeTarget; buildPhases = (P001 /* Sources */, ); name = MyApp; productName = MyApp; };
+		T002 /* MyAppTests */ = {isa = PBXNativeTarget; buildPhases = ( ); fileSystemSynchronizedGroups = (S001 /* AppTests */, ); name = MyAppTests; };
+		T003 /* Widget */ = {isa = PBXNativeTarget; buildPhases = (P003 /* Sources */, ); name = "Widget"; };
+		R001 /* Project object */ = {isa = PBXProject; mainGroup = G000; targets = (T001 /* MyApp */, T002 /* MyAppTests */, T003 /* Widget */, ); };
+	};
+	rootObject = R001 /* Project object */;
+}
+"""
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_swift_xcode_targets_are_modules(self):
+        self.write("MyApp.xcodeproj/project.pbxproj", self._PBX)
+        self.write("MyApp/Helper.swift", "func help() {}\n")
+        self.write("MyApp/Main.swift",
+                   "func main() { help(); widgetOnly(); extra(); widgetExtra() }\n")
+        self.write("Odd/Extra.swift", "func extra() {}\n")
+        self.write("Odd/WidgetExtra.swift", "func widgetExtra() {}\n")
+        self.write("Shared/Util.swift", "func shared() {}\n")
+        self.write("AppTests/T.swift", "@testable import MyApp\nfunc testIt() { help(); shared() }\n")
+        self.write("Widget/W.swift", "func widgetOnly() {}\n")
+        xcalls, _ = self._edges()
+        self.assertIn(("proj/MyApp/Main.swift::main", "proj/MyApp/Helper.swift::help"), xcalls)
+        # asignado a mano a MyApp aunque viva en Odd/: mismo módulo
+        self.assertIn(("proj/MyApp/Main.swift::main", "proj/Odd/Extra.swift::extra"), xcalls)
+        self.assertIn(("proj/AppTests/T.swift::testIt", "proj/MyApp/Helper.swift::help"), xcalls)
+        self.assertIn(("proj/AppTests/T.swift::testIt", "proj/Shared/Util.swift::shared"), xcalls)
+        # Widget es otro target que MyApp no importa
+        self.assertNotIn(("proj/MyApp/Main.swift::main", "proj/Widget/W.swift::widgetOnly"), xcalls)
+        # ...ni lo que se asignó a Widget aunque viva fuera de su carpeta
+        self.assertNotIn(("proj/MyApp/Main.swift::main", "proj/Odd/WidgetExtra.swift::widgetExtra"),
+                         xcalls)
+
+    def test_swift_module_with_xcode_targets(self):
+        from memorygraf.indexer import _swift_module, _load_xcode_targets
+        self.write("ios/MyApp.xcodeproj/project.pbxproj", self._PBX)
+        xcode = _load_xcode_targets(self.proj, set())
+        self.assertEqual(len(xcode), 1)
+        prefix, folders, files = xcode[0]
+        self.assertEqual(prefix, "ios")
+        self.assertEqual(folders, {"MyApp": "MyApp", "MyAppTests": "MyAppTests",
+                                   "AppTests": "MyAppTests", "Widget": "Widget"})
+        self.assertEqual(files, {"MyApp/Helper.swift": "MyApp", "MyApp/Main.swift": "MyApp",
+                                 "Odd/Extra.swift": "MyApp", "Widget/W.swift": "Widget",
+                                 "Odd/WidgetExtra.swift": "Widget",
+                                 "Shared/Both.swift": ""})     # el framework del SDK no cuenta
+        self.assertEqual(_swift_module("ios/Odd/Extra.swift", xcode), "MyApp")
+        self.assertEqual(_swift_module("ios/Shared/Both.swift", xcode), "")
+        self.assertEqual(_swift_module("ios/AppTests/T.swift", xcode), "MyAppTests")
+        self.assertEqual(_swift_module("ios/Shared/U.swift", xcode), "")
+        self.assertEqual(_swift_module("Sources/Core/a.swift", xcode), "Core")   # SwiftPM manda
+
+    def test_rails_custom_autoload_paths(self):
+        from memorygraf.indexer import _load_zeitwerk_roots
+        for d in ("app/models/concerns", "lib/core", "extras", "engines/billing/lib", "config/initializers"):
+            os.makedirs(os.path.join(self.proj, d), exist_ok=True)
+        self.write("config/application.rb",
+                   "module Shop\n  class Application < Rails::Application\n"
+                   "    config.autoload_lib(ignore: %w(assets tasks))\n"
+                   '    config.autoload_paths << Rails.root.join("extras")\n'
+                   "    config.eager_load_paths += %W(\n      #{config.root}/engines/billing/lib\n"
+                   "      #{config.root}/does_not_exist\n    )\n"
+                   '    # config.autoload_paths << "app"\n  end\nend\n')
+        self.write("config/initializers/zeitwerk.rb",
+                   'Rails.autoloaders.main.push_dir("#{Rails.root}/lib/core")\n')
+        self.assertEqual(_load_zeitwerk_roots(self.proj),
+                         ["app/models", "app/models/concerns", "lib", "extras",
+                          "engines/billing/lib", "lib/core"])
+
+    def test_rails_lib_not_autoloaded_unless_configured(self):
+        # Antes de Rails 7.1 `lib/` no se autocarga si no se configura
+        from memorygraf.indexer import _load_zeitwerk_roots
+        os.makedirs(os.path.join(self.proj, "app/models"), exist_ok=True)
+        os.makedirs(os.path.join(self.proj, "lib"), exist_ok=True)
+        self.write("config/application.rb", "module Shop\n  class Application; end\nend\n")
+        self.assertEqual(_load_zeitwerk_roots(self.proj), ["app/models"])
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ruby_zeitwerk_resolves_into_custom_path(self):
+        self.write("config/application.rb",
+                   "module Shop\n  class Application\n"
+                   '    config.autoload_paths << Rails.root.join("extras")\n  end\nend\n')
+        self.write("extras/pricing/rule.rb",
+                   "module Pricing\n  class Rule\n    def self.apply; end\n  end\nend\n")
+        self.write("app/services/checkout.rb",
+                   "class Checkout\n  def call\n    Pricing::Rule.apply\n  end\nend\n")
+        xcalls, _ = self._edges()
+        self.assertIn(("proj/app/services/checkout.rb::Checkout.call",
+                       "proj/extras/pricing/rule.rb::Rule.apply"), xcalls)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_dart_follows_exports(self):
+        with open(os.path.join(self.proj, "pubspec.yaml"), "w") as f:
+            f.write("name: mylib\n")
+        self.write("lib/mylib.dart", "export 'src/a.dart';\n")
+        self.write("lib/src/a.dart", "export 'b.dart';\nint aFunc() => 1;\n")
+        self.write("lib/src/b.dart", "int bFunc() => 2;\n")
+        self.write("lib/src/hidden.dart", "int hidden() => 3;\n")
+        self.write("bin/main.dart", "import 'package:mylib/mylib.dart';\n"
+                   "void run() { aFunc(); bFunc(); hidden(); }\n")
+        xcalls, _ = self._edges()
+        self.assertEqual(xcalls, {("proj/bin/main.dart::run", "proj/lib/src/a.dart::aFunc"),
+                                  ("proj/bin/main.dart::run", "proj/lib/src/b.dart::bFunc")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_dart_part_inherits_library_scope(self):
+        self.write("lib/lib.dart", "import 'util.dart';\npart 'p.dart';\nvoid top() { inPart(); }\n")
+        self.write("lib/p.dart", "part of 'lib.dart';\nvoid inPart() { helper(); top(); }\n")
+        self.write("lib/util.dart", "void helper() {}\n")
+        xcalls, _ = self._edges()
+        self.assertEqual(xcalls, {("proj/lib/p.dart::inPart", "proj/lib/util.dart::helper"),
+                                  ("proj/lib/p.dart::inPart", "proj/lib/lib.dart::top"),
+                                  ("proj/lib/lib.dart::top", "proj/lib/p.dart::inPart")})
 
 
 class TestXlinkLlmOptional(Base):
@@ -1256,6 +1970,69 @@ class TestFullHistorySymbolCochange(_GitRepo, Base):
         full = {(e["source"], e["target"]) for e in store.all_edges()
                 if e["provenance"] == "git-cochange-sym-full"}
         self.assertIn(("proj/a.py::foo", "proj/a.py::bar"), full)
+
+
+@unittest.skipUnless(_git_available(), "git no disponible")
+class TestFullHistoryIncremental(_GitRepo, Base):
+    """Deuda §2 saldada: el full-repo persiste lo que tocó cada commit (inmutable) y los
+    sync siguientes solo procesan commits nuevos; diffs y blobs se leen en lote."""
+
+    def _history(self):
+        self._init_repo()
+        self.write("a.py", "def foo():\n    return 1\ndef bar():\n    return 2\n")
+        self._commit("c1")
+        self.write("a.py", "def foo():\n    return 11\ndef bar():\n    return 22\n")
+        self._commit("c2 co-edita")
+        self.write("b.py", "def baz():\n    return 3\n")
+        self._commit("c3")
+        return {**self.config, "git": {"symbol_cochange_full": True, "cochange_full_depth": 50}}
+
+    def _full_edges(self, store):
+        return {(e["source"], e["target"]) for e in store.all_edges()
+                if e["provenance"] == "git-cochange-sym-full"}
+
+    def test_second_sync_only_processes_new_commits(self):
+        cfg = self._history()
+        store, _ = self.index()
+        git_layer.sync(store, cfg)
+        first = self._full_edges(store)
+        self.assertIn(("proj/a.py::foo", "proj/a.py::bar"), first)
+        seen = []
+        real = git_layer._touch_by_sha
+        with unittest.mock.patch.object(git_layer, "_touch_by_sha",
+                                        lambda top, shas, *a: seen.append(list(shas)) or real(top, shas, *a)):
+            git_layer.sync(store, cfg)                  # nada nuevo: no re-extrae nada
+            self.assertEqual(seen, [])
+            self.assertEqual(self._full_edges(store), first)
+            self.write("b.py", "def baz():\n    return 33\n")
+            self._commit("c4")
+            git_layer.sync(store, cfg)                  # solo el commit nuevo
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(len(seen[0]), 1)
+        store.close()
+
+    def test_batched_ranges_match_per_commit(self):
+        self._history()
+        top = git_layer._toplevel(self.proj)
+        shas = (git_layer._git(["log", "--format=%H"], top) or "").split()
+        many = git_layer._changed_ranges_many(top, shas)
+        self.assertEqual(many, {sha: git_layer._changed_ranges(top, sha) for sha in shas})
+        blobs = git_layer._cat_file_many(top, [f"{shas[0]}:b.py", f"{shas[0]}:nope.py"])
+        self.assertEqual(blobs, {f"{shas[0]}:b.py": "def baz():\n    return 3\n"})
+
+    def test_version_change_recomputes_and_clear_drops(self):
+        cfg = self._history()
+        store, _ = self.index()
+        git_layer.sync(store, cfg)
+        n = store.conn.execute("SELECT COUNT(*) FROM git_sha_touch").fetchone()[0]
+        self.assertEqual(n, 3)
+        with unittest.mock.patch.object(git_layer, "_FULL_SYM_VERSION", "otra"):
+            git_layer.sync(store, cfg)                  # extractores distintos -> recalcula
+        versions = {r[0] for r in store.conn.execute("SELECT version FROM git_sha_touch")}
+        self.assertTrue(all(v.startswith("otra|") for v in versions))
+        store.clear_git_layer()
+        self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM git_sha_touch").fetchone()[0], 0)
+        store.close()
 
 
 @unittest.skipUnless(_git_available(), "git no disponible")
@@ -2242,6 +3019,7 @@ class TestRuntimeLsp(Base):
             def terminate(self): pass
             def wait(self, timeout=None): pass
             def kill(self): pass
+            def poll(self): return None
 
         class FakeClient:
             def __init__(self, proc): self.diagnostics = {}
@@ -2249,6 +3027,7 @@ class TestRuntimeLsp(Base):
                 captured.setdefault(method, params)
                 return 1
             def request(self, *a, **k): return None
+            def wait_response(self, *a, **k): return None
 
         def fake_popen(argv, **kw):
             seen["argv"] = argv
@@ -2280,6 +3059,7 @@ class TestRuntimeLsp(Base):
             def terminate(self): pass
             def wait(self, timeout=None): pass
             def kill(self): pass
+            def poll(self): return None
 
         class FakeClient:
             def __init__(self, proc): self.diagnostics = {}
@@ -2287,6 +3067,7 @@ class TestRuntimeLsp(Base):
                 captured.setdefault(method, params)
                 return 1
             def request(self, *a, **k): return None
+            def wait_response(self, *a, **k): return None
 
         def fake_popen(argv, **kw):
             seen["argv"] = argv
@@ -2300,6 +3081,100 @@ class TestRuntimeLsp(Base):
 
         self.assertNotIn("-data", seen["argv"])
         self.assertNotIn("initializationOptions", captured.get("initialize", {}))
+
+    def _fake_lsp_run(self, init_response, diag_items=None):
+        """_run_language con un cliente falso: `initialize` responde `init_response` y
+        `textDocument/diagnostic` (pull) devuelve `diag_items`. -> (resultado, log)."""
+        from memorygraf.runtime import lsp
+        self.write("a.ts", "export function f(): number {\n  return 1;\n}\n")
+        store, _ = self.index()
+
+        class FakeProc:
+            def terminate(self): pass
+            def wait(self, timeout=None): pass
+            def kill(self): pass
+            def poll(self): return None
+
+        class FakeClient:
+            def __init__(self, proc): self.diagnostics = {}
+            def _send(self, method, params, notify=False): return 1
+            def wait_response(self, *a, **k): return init_response
+            def request(self, method, params, timeout=3.0):
+                if method == "textDocument/diagnostic":
+                    return {"result": {"kind": "full", "items": diag_items or []}}
+                return None
+
+        logs = []
+        files = store.all_nodes(types=["file"])
+        with unittest.mock.patch.object(lsp.subprocess, "Popen", lambda *a, **k: FakeProc()), \
+             unittest.mock.patch.object(lsp, "_LspClient", FakeClient), \
+             unittest.mock.patch.object(lsp.time, "sleep", lambda *_a, **_k: None):
+            res = lsp._run_language(store, ("tls", []), files, {"proj": self.proj},
+                                    {"hover": False, "lsp_timeout": 0}, logs.append)
+        return store, res, logs
+
+    def test_init_error_is_reported_not_silent(self):
+        # typescript-language-server junto a TypeScript 7 responde error al `initialize`.
+        # Antes pasaba en silencio como "0 tipos"; ahora devuelve None (sync prueba el
+        # siguiente servidor) y lo dice en el log.
+        store, res, logs = self._fake_lsp_run(
+            {"error": {"code": -32603, "message": "Could not find a valid TypeScript installation"}})
+        self.assertIsNone(res)
+        self.assertTrue(any("no arrancó" in m and "TypeScript installation" in m for m in logs))
+        store.close()
+
+    def test_pull_diagnostics_when_server_advertises_them(self):
+        # TS 7 nativo nunca publica por push: solo responde `textDocument/diagnostic`
+        store, res, _logs = self._fake_lsp_run(
+            {"result": {"capabilities": {"diagnosticProvider": {"interFileDependencies": True}}}},
+            [{"range": {"start": {"line": 1, "character": 2}}, "severity": 1,
+              "message": "Type 'number' is not assignable to type 'string'."}])
+        self.assertEqual(res[:2], (1, 1))
+        diags = json.loads(store.runtime_node_get("proj/a.ts")["diagnostics"])
+        self.assertEqual(diags[0]["line"], 2)
+        self.assertEqual(diags[0]["severity"], "error")
+        store.close()
+
+    def test_sync_falls_back_to_next_server(self):
+        from memorygraf.runtime import lsp
+        self.write("a.ts", "export const x = 1;\n")
+        store, _ = self.index()
+        tried = []
+
+        def fake_run(store_, srv, *a, **k):
+            tried.append(srv[0])
+            return None if srv[0] == "broken" else (1, 0, 3)
+
+        with unittest.mock.patch.object(lsp, "_find_lang_servers",
+                                        lambda spec: [("broken", []), ("good", [])]), \
+             unittest.mock.patch.object(lsp, "_run_language", fake_run):
+            r = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
+        self.assertEqual(tried, ["broken", "good"])
+        self.assertEqual((r["files"], r["types"]), (1, 3))
+        store.close()
+
+    def test_tsc_native_lsp_requires_typescript_7(self):
+        from memorygraf.runtime import lsp
+        for out, expected in (("Version 7.0.2\n", True), ("Version 5.9.3\n", False), ("", False)):
+            lsp._TSC_LSP_CACHE.clear()
+            done = subprocess.CompletedProcess([], 0, stdout=out)
+            with unittest.mock.patch.object(lsp.subprocess, "run", lambda *a, **k: done):
+                self.assertIs(lsp._tsc_native_lsp("/x/tsc"), expected, out)
+        lsp._TSC_LSP_CACHE.clear()
+
+    def test_doctor_ts_lsp_needs_a_usable_typescript(self):
+        # Solo el binario de typescript-language-server (sin tsserver.js alcanzable y con
+        # un tsc anterior a 7) NO cuenta como LSP de TS disponible.
+        from memorygraf import doctor
+        from memorygraf.runtime import lsp
+        bins = {"typescript-language-server": "/nope/bin/typescript-language-server",
+                "tsc": "/nope/bin/tsc"}
+        with unittest.mock.patch.object(doctor.shutil, "which", bins.get), \
+             unittest.mock.patch.object(lsp, "_tsc_native_lsp", lambda b: False):
+            self.assertFalse(doctor._has_ts_lsp())
+        with unittest.mock.patch.object(doctor.shutil, "which", bins.get), \
+             unittest.mock.patch.object(lsp, "_tsc_native_lsp", lambda b: True):
+            self.assertTrue(doctor._has_ts_lsp())
 
     def test_parse_hover_handles_typescript_fence(self):
         # M4: la firma se extrae descartando el fence de CUALQUIER lenguaje (no solo py)
@@ -2877,6 +3752,17 @@ class TestLspTypeScript(Base):
         self.assertIn("number", rt["resolved_type"])
         store.close()
 
+    def test_typescript_diagnostics(self):
+        # Por push (typescript-language-server) o por pull (TS 7 nativo): mismo resultado
+        from memorygraf.runtime import lsp
+        self.write("bad.ts", "export function f(): string {\n  return 5;\n}\n")
+        store, _ = self.index()
+        r = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
+        self.assertGreaterEqual(r["diagnostics"], 1)
+        diags = json.loads(store.runtime_node_get("proj/bad.ts::f")["diagnostics"])
+        self.assertTrue(any(d["severity"] == "error" and d["line"] == 2 for d in diags))
+        store.close()
+
     def test_typescript_param_types(self):
         # M4b (TS/JS): tipos por parámetro vía hover en el offset (tree-sitter + tsserver)
         import json
@@ -2899,7 +3785,8 @@ def _generic_ts_available() -> bool:
 
 @unittest.skipUnless(_generic_ts_available(), "sin tree-sitter (parsers)")
 class TestMultiLanguage(Base):
-    """Extracción de símbolos + `defines` multi-lenguaje (C/C++/Java/C#/Go/Rust/PHP/R/VB/asm)."""
+    """Extracción de símbolos + `defines` multi-lenguaje (C/C++/Java/C#/Go/Rust/PHP/R/VB/asm,
+    M15a Ruby/Kotlin/Swift/Dart y M15b Scala/Lua/Elixir/Bash)."""
 
     _CASES = {
         "add.c": ('int add(int a){return a+1;}\nstruct Point{int x;};\n',
@@ -2923,6 +3810,45 @@ class TestMultiLanguage(Base):
                    {"Calc", "Calc.Add"}),
         "boot.s": ('.global _start\n_start:\n  ret\ncleanup:\n  ret\n',
                    {"_start", "cleanup"}),
+        # M15a
+        "billing.rb": ('module Billing\n  class Invoice\n    def total; end\n'
+                       '    def self.build; end\n  end\nend\nclass A::B\nend\n',
+                       {"Billing", "Invoice", "Invoice.total", "Invoice.build", "B"}),
+        "App.kt": ('package x\nclass App {\n    fun run() = 1\n'
+                   '    companion object {\n        fun make() = App()\n    }\n}\n'
+                   'object Registry {\n    fun get() = 1\n}\n'
+                   'fun String.shout() = this\ntypealias Id = String\n',
+                   {"App", "App.run", "App.make", "Registry", "Registry.get", "shout", "Id"}),
+        "App.swift": ('protocol Runner {\n    func go()\n}\n'
+                      'struct Point {\n    init(x: Int) {}\n    func len() -> Int { 0 }\n}\n'
+                      'extension Point {\n    func twice() -> Int { 2 }\n}\n'
+                      'func top() {}\n',
+                      {"Runner", "Runner.go", "Point", "Point.init", "Point.len",
+                       "Point.twice", "top"}),
+        "app.dart": ('class App {\n  App(this.n);\n  factory App.make() => App(1);\n'
+                     '  final int n;\n  int get v => n;\n  bool run() => true;\n}\n'
+                     'mixin Fly {\n  void fly() {}\n}\nenum Color { red }\n'
+                     'int top() => 1;\ntypedef Id = String;\n',
+                     {"App", "App.App", "App.make", "App.v", "App.run", "Fly", "Fly.fly",
+                      "Color", "top", "Id"}),
+        # M15b
+        "App.scala": ('package x\nclass App {\n  def run(): Int = 1\n}\n'
+                      'object App {\n  def make(): App = new App\n}\n'
+                      'trait Runner {\n  def go(): Unit\n}\ntype Id = String\n',
+                      {"App", "App.run", "App.make", "Runner", "Runner.go", "Id"}),
+        "mod.lua": ('local M = {}\nfunction M.run() end\nfunction M:meth() end\n'
+                    'local function helper() end\nM.assigned = function() end\nreturn M\n',
+                    {"M.run", "M.meth", "helper", "M.assigned"}),
+        "billing.ex": ('defmodule MyApp.Billing do\n  def run(x), do: x\n'
+                       '  defp priv(x) when x > 0, do: x\n  def bare, do: 1\n'
+                       '  defmodule Inner do\n    def h, do: 1\n  end\nend\n'
+                       'defimpl String.Chars, for: MyApp.Billing do\n'
+                       '  def to_string(_), do: "b"\nend\n',
+                       {"MyApp.Billing", "MyApp.Billing.run", "MyApp.Billing.priv",
+                        "MyApp.Billing.bare", "MyApp.Billing.Inner", "MyApp.Billing.Inner.h",
+                        "String.Chars.MyApp.Billing", "String.Chars.MyApp.Billing.to_string"}),
+        "tool.sh": ('#!/bin/bash\nsetup() {\n  :\n}\nfunction helper {\n  :\n}\n',
+                    {"setup", "helper"}),
     }
 
     def test_symbols_per_language(self):
@@ -2944,7 +3870,10 @@ class TestMultiLanguage(Base):
 
     def test_extensions_are_indexed(self):
         from memorygraf.indexer import EXT_LANG
-        for ext in (".go", ".rs", ".c", ".cpp", ".java", ".cs", ".php", ".r", ".vb", ".s"):
+        for ext in (".go", ".rs", ".c", ".cpp", ".java", ".cs", ".php", ".r", ".vb", ".s",
+                    ".rb", ".kt", ".kts", ".swift", ".dart",
+                    ".scala", ".sc", ".lua", ".ex", ".exs", ".sh", ".bash",
+                    ".sql", ".pkb", ".pks", ".tf", ".hcl", ".ps1", ".psm1"):
             self.assertIn(ext, EXT_LANG)
 
     def test_intra_file_calls(self):
@@ -2956,6 +3885,20 @@ class TestMultiLanguage(Base):
             "l.rs": ('fn g()->i32{1}\nfn f()->i32{ g() }\n', ("l.rs::f", "l.rs::g")),
             "J.java": ('class C{ int g(){return 1;} int f(){ return g(); } }\n',
                        ("J.java::C.f", "J.java::C.g")),
+            "r.rb": ('def g; 1; end\ndef f; g(); end\n', ("r.rb::f", "r.rb::g")),
+            "k.kt": ('fun g() = 1\nfun f() = g()\n', ("k.kt::f", "k.kt::g")),
+            "s.swift": ('func g() -> Int { 1 }\nfunc f() -> Int { g() }\n',
+                        ("s.swift::f", "s.swift::g")),
+            # Dart: el cuerpo es HERMANO de la firma; sin extender el span, f no tendría llamante
+            "d.dart": ('int g() => 1;\nint f() {\n  return g();\n}\n', ("d.dart::f", "d.dart::g")),
+            # M15b
+            "sc.scala": ('object O {\n  def g(): Int = 1\n  def f(): Int = g()\n}\n',
+                         ("sc.scala::O.f", "sc.scala::O.g")),
+            "l.lua": ('local function g() return 1 end\nlocal function f() return g() end\n',
+                      ("l.lua::f", "l.lua::g")),
+            "e.ex": ('defmodule E do\n  def g, do: 1\n  def f, do: g()\nend\n',
+                     ("e.ex::E.f", "e.ex::E.g")),
+            "b.sh": ('g() {\n  :\n}\nf() {\n  g\n}\n', ("b.sh::f", "b.sh::g")),
         }
         for fn, (code, _e) in cases.items():
             self.write(fn, code)

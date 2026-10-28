@@ -546,11 +546,14 @@ archivo). Así el sistema es agnóstico del LLM también en la generación, no s
 ### 18.7 Indexado multi-lenguaje (`extractors/ts_generic.py`)
 
 La extracción estructural dejó de ser solo Python + JS/TS. Un extractor GENÉRICO dirigido por
-config sobre tree-sitter cubre **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic y Assembly**:
+config sobre tree-sitter cubre **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic, Assembly**,
+(M15a) **Ruby, Kotlin, Swift, Dart**, (M15b) **Scala, Lua, Elixir, Bash** y (M15c)
+**Terraform/HCL y PowerShell** (SQL va aparte: extractor léxico propio, ver abajo):
 emite `symbol` (funciones, clases/tipos, métodos `Clase.m`) + aristas `defines` + `calls`
 INTRA-archivo (callee resuelto por nombre local), con extracción de nombre por-gramática
 (campo `name`; casos especiales: declarator en C/C++, `type_spec` en Go, `impl` en Rust,
-asignación en R, bloque en VB, `label` en asm). El indexador rutea por extensión:
+asignación en R, bloque en VB, `label` en asm, `extension` de Swift como prefijo sin símbolo
+propio, firma + cuerpo hermanos en Dart). El indexador rutea por extensión:
 Python→`python_ast` (exacto, con calls), JS/TS→`ts_treesitter` (exacto, con calls/imports
 cross-file), el resto→`ts_generic`. Degrada a nodo `file` sin tree-sitter.
 
@@ -561,11 +564,27 @@ la Capa 1).
 **Cross-file (M9, implementado).** Además de Python y JS/TS, la resolución `calls`/`imports`
 **cross-file** cubre ahora los lenguajes genéricos, **determinista y precisión-primero** (solo
 enlaza si el destino es INEQUÍVOCO → sin aristas falsas). `ts_generic` extrae imports y llamadas
-con receptor; el indexador resuelve por lenguaje según su mecanismo real: **paquete→ruta**
-(Java), **`#include`/`source` relativo** (C/C++, R), **`mod`** (Rust), **`go.mod`→paquete** (Go),
+con receptor; el indexador resuelve por lenguaje según su mecanismo real: **header
+`package`** (Java/Kotlin, compartido: interop entre ambos, layout Maven/Gradle, mismo paquete
+sin import e `import a.b.*`), **`#include`/`source` relativo** (C/C++, R), **`mod`** (Rust), **`go.mod`→paquete** (Go),
 **PSR-4** (PHP), e **índice de namespaces** (`namespace`/`using`, `Namespace`/`Imports`) para
 **C#/VB**. Las llamadas libres (C/C++/R) se resuelven por el *stem* del include/source + nombre
-único; asm mapea `call`/saltos a etiquetas (whitelist de mnemónicos). Encima, una **capa LLM
+único; asm mapea `call`/saltos a etiquetas (whitelist de mnemónicos). **M15a:** Kotlin por el
+mismo índice de paquetes que Java (con desempate de Kotlin Multiplatform: mismo source set, si
+no la declaración `expect`); Ruby, Swift y Dart por el **scope visible** del archivo
+(`require`/`require_relative` → `lib/` + autoload de **Zeitwerk** en apps Rails y gemas;
+módulo SwiftPM o **target de Xcode** propio + importados; `import` relativo o
+`package:<pubspec>/`, siguiendo `export` y heredando el scope en los `part`), enlazando
+`Tipo.m` o la llamada libre solo si el nombre es único en ese scope. **M15b:** Scala entra
+en el índice JVM (con imports relativos y `import Obj._`); Lua por `local m = require(...)`
+con destino único; Elixir por un índice global de `defmodule` + `alias`/`import`; Bash por
+`source` relativo al script. **M15c:** SQL por `extractors/sql_lex.py`, un tokenizador
+stdlib válido para todos los dialectos (la gramática de tree-sitter no entiende PL/SQL), con
+`references` a tablas/vistas (procedencia `ast-ref` = EXTRACTED) y `calls` a rutinas sobre
+el espacio de nombres global del proyecto; Terraform por directorio (= módulo) y
+`module.m.out` → `output`; PowerShell por dot-sourcing relativo al script y ámbito de
+módulo. Regla transversal: una llamada con receptor no resoluble
+(`a.b().m()`) nunca se trata como llamada libre. Encima, una **capa LLM
 opcional y opt-in** (`resolver.llm` / `MEMORYGRAF_XLINK_LLM`) desempata los casos ambiguos que el
 resolutor estático deja sin enlazar (confidence baja + provenance `llm`, fallback determinista).
 Ver `MEJORAS-FUTURAS.md` §M9 para la matriz por lenguaje.
@@ -610,8 +629,10 @@ pesado fuera del hot path; pagar solo por lo que se consulta):
 
 El **full-repo** está integrado como **OPT-IN** (`git.symbol_cochange_full`, acotado por
 `cochange_full_depth`): `git_layer._full_symbol_cochange` emite aristas `git-cochange-sym-full`
-(aditivas, recomputadas contra los símbolos vigentes). Se deja apagado por el coste medido;
-una futura optimización sería un acumulador incremental por SHA.
+(aditivas, recomputadas contra los símbolos vigentes). Se deja apagado por el coste de la
+PRIMERA pasada; desde 2026-10-26 es **incremental**: lo que tocó cada commit se persiste en
+`git_sha_touch` (un commit es inmutable) y los sync siguientes solo procesan los nuevos, con
+diffs y blobs leídos en lote (`git show` multi-commit + `git cat-file --batch`).
 
 ### 18.6 Estado actual
 
@@ -623,6 +644,8 @@ una futura optimización sería un acumulador incremental por SHA.
   neural, watch, lsp, **pyright**) según el entorno (pipx/venv, plataforma/WSL/distro), con
   degradación; espejo "en vivo" del instalador.
 - **Indexado multi-lenguaje (§18.7):** Python + JS/TS y C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly
-  (símbolos + `defines` + `calls` intra); `calls`/`imports` **cross-file** en los 10 lenguajes
-  genéricos donde aplica (M9), + capa LLM opcional de desambiguación.
+  + (M15a) Ruby/Kotlin/Swift/Dart + (M15b) Scala/Lua/Elixir/Bash + (M15c) SQL/Terraform/
+  PowerShell (símbolos + `defines` + `calls` intra); `calls`/`imports`/`references`
+  **cross-file** en los 21 lenguajes genéricos donde aplica (M9/M15), + capa LLM opcional
+  de desambiguación.
 - **Suite:** 155 tests (`python -m unittest discover -s tests`), sin dependencias.

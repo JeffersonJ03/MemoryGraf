@@ -146,13 +146,39 @@ def _pyright_install_command() -> list[str]:
 
 
 def _has_ts_lsp() -> bool:
-    """Servidor LSP de TypeScript/JavaScript (no es un paquete pip: es de npm)."""
-    return shutil.which("typescript-language-server") is not None
+    """LSP de TypeScript/JavaScript USABLE (no es un paquete pip: es de npm).
+
+    Vale TypeScript ≥7 (`tsc --lsp`, nativo) o typescript-language-server con un
+    TypeScript ≤6 a su alcance (su `tsserver.js`). El binario de typescript-language-
+    server solo NO basta: junto a un TypeScript 7 global falla al iniciar."""
+    from .runtime import lsp
+    tsc = shutil.which("tsc")
+    if tsc and lsp._tsc_native_lsp(tsc):
+        return True
+    tls = shutil.which("typescript-language-server")
+    return bool(tls) and _tls_finds_tsserver(tls)
+
+
+def _tls_finds_tsserver(tls: str) -> bool:
+    """¿Hay un `typescript/lib/tsserver.js` en el node_modules global junto al de
+    typescript-language-server? (POSIX: <prefix>/lib/node_modules vía symlink;
+    Windows: %APPDATA%/npm/node_modules junto al .cmd)."""
+    real = os.path.realpath(tls)
+    cands = [os.path.join(os.path.dirname(tls), "node_modules")]
+    d = os.path.dirname(real)
+    while d and os.path.dirname(d) != d:
+        if os.path.basename(d) == "node_modules":
+            cands.append(d)
+            break
+        d = os.path.dirname(d)
+    return any(os.path.isfile(os.path.join(c, "typescript", "lib", "tsserver.js"))
+               for c in cands)
 
 
 def _ts_lsp_install_command() -> list[str]:
-    """typescript-language-server se instala global con npm (requiere Node.js/npm)."""
-    return ["npm", "install", "-g", "typescript-language-server", "typescript"]
+    """TypeScript ≥7 trae su LSP nativo (`tsc --lsp`): basta con instalarlo global con
+    npm (requiere Node.js/npm). typescript-language-server ya no hace falta."""
+    return ["npm", "install", "-g", "typescript"]
 
 
 # M11a · Grupo A — language-servers de Go/Rust/C/C++. Se DETECTAN (shutil.which) igual
@@ -298,7 +324,7 @@ _CAP_BY_KEY = {c["key"]: c for c in _CAPS}
 _TS_LSP_CAP = {
     "key": "ts-lsp", "pkgs": [],
     "detect": _has_ts_lsp, "install_cmd": _ts_lsp_install_command,
-    "on": "`runtime --lsp`: diagnósticos + tipos TS/JS (typescript-language-server)",
+    "on": "`runtime --lsp`: diagnósticos + tipos TS/JS (TypeScript ≥7 o typescript-language-server)",
     "off": "LSP de TS/JS omitido (sin diagnósticos/tipos)",
     "after": "memorygraf runtime --lsp   # (o `memorygraf sync` si 'runtime.lsp' está on)",
 }
@@ -343,7 +369,9 @@ def detect_languages(config: dict | None) -> dict:
     `other` = lenguajes que MemoryGraf INDEXA (tree-sitter) pero para los que NO tiene
     capa LSP → símbolos sí, diagnósticos/tipos no (los marcamos como 'sin LSP')."""
     from .extractors import ts_generic
-    other_by_ext = {"." + e: lang for e, lang in ts_generic._GRAMMAR_BY_EXT.items()}
+    from .extractors import sql_lex
+    other_by_ext = ({"." + e: lang for e, lang in ts_generic._GRAMMAR_BY_EXT.items()}
+                    | {"." + e: "sql" for e in sql_lex.EXTS})
     res = {"python": False, "typescript": False, "other": set()}
     scanned = 0
     for p in (config or {}).get("projects", []):

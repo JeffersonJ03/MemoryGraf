@@ -86,10 +86,11 @@ hay **degradación elegante** al modo portable.
 | Capacidad | Portable (sin extra) | Potencia (con extra) | Extra |
 |---|---|---|---|
 | Símbolos JS/TS (`calls`/`implements`) | regex (aprox.) | **tree-sitter** (exacto) | `parsers` |
-| Símbolos C/C++/Java/C#/Go/Rust/PHP/R/VB/asm | — (se omite) | **tree-sitter** (símbolos + `defines` + `calls` intra-archivo) | `parsers` |
+| Símbolos C/C++/Java/C#/Go/Rust/PHP/R/VB/asm/Ruby/Kotlin/Swift/Dart/Scala/Lua/Elixir/Bash/Terraform/PowerShell | — (se omite) | **tree-sitter** (símbolos + `defines` + `calls` intra-archivo) | `parsers` |
+| SQL (tablas, vistas, rutinas, paquetes PL/SQL; `references`/`calls`) | **léxico propio** (stdlib, todos los dialectos) | — (no usa tree-sitter) | — |
 | Búsqueda semántica | TF-IDF | **model2vec** neural (cross-idioma) | `neural` |
 | `watch` | polling | **watchdog** (eventos nativos) | `watch` |
-| Diagnósticos + tipos por símbolo (`runtime --lsp`) | — (se omite) | **python-lsp-server** (o **pyright**, mejor calidad — `memorygraf doctor` lo instala); **TS/JS** con `typescript-language-server`; **Go/Rust/C/C++** con `gopls`/`rust-analyzer`/`clangd` (M11a); **Java** con `jdtls` (M11b, JDK 17+); **C#** con `csharp-ls` (M11c, .NET SDK); **PHP/R** con `intelephense`/`languageserver` (M11d) — `doctor` los detecta y te dice cómo instalarlos | `lsp` |
+| Diagnósticos + tipos por símbolo (`runtime --lsp`) | — (se omite) | **python-lsp-server** (o **pyright**, mejor calidad — `memorygraf doctor` lo instala); **TS/JS** con el LSP nativo de **TypeScript ≥7** (`tsc --lsp`) o `typescript-language-server` (TS ≤6); **Go/Rust/C/C++** con `gopls`/`rust-analyzer`/`clangd` (M11a); **Java** con `jdtls` (M11b, JDK 17+); **C#** con `csharp-ls` (M11c, .NET SDK); **PHP/R** con `intelephense`/`languageserver` (M11d) — `doctor` los detecta y te dice cómo instalarlos | `lsp` |
 | Python (`ast`), grafo, MCP, decisiones, entidades | exacto siempre | igual | — |
 
 Instala todo con `pip install ".[full]"`, o solo lo que quieras: `pip install ".[neural]"`,
@@ -130,10 +131,15 @@ dependencia, y todas dejan **procedencia** (`archivo:línea`) y respetan un pres
 1. **Grafo base.** Nodos `file`/`symbol`/`entity`/`decision`/`convention` y aristas
    `defines`/`imports`/`calls` (intra y cross-archivo)/`implements`/`references`/`models`.
    **Multi-lenguaje** vía tree-sitter: **Python** (`ast`), **JS/TS/TSX** y ahora también
-   **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic y Assembly** con símbolos + `defines` +
-   `calls` intra-archivo **y `calls`/`imports` cross-file** (M9, determinista y precisión-primero:
-   paquete/ruta/`#include`/`source`/`mod`/`go.mod`/PSR-4/namespaces según el lenguaje; capa LLM
-   opcional para desempatar ambiguos). Incremental por hash, con reconciliación de símbolos
+   **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic, Assembly, Ruby, Kotlin, Swift, Dart,
+   Scala, Lua, Elixir, Bash, SQL (todos los dialectos, incluido PL/SQL), Terraform y
+   PowerShell** con símbolos + `defines` + `calls` intra-archivo **y `calls`/`imports`/
+   `references` cross-file** (M9/M15,
+   determinista y precisión-primero: paquete/ruta/`#include`/`source`/`mod`/`go.mod`/PSR-4/
+   namespaces/`require`+Zeitwerk/módulo SwiftPM o target de Xcode/`pubspec.yaml`/
+   `require` de Lua/`defmodule`+`alias`/`source` relativo al script/nombres SQL globales/
+   módulo Terraform por directorio según el
+   lenguaje; capa LLM opcional para desempatar ambiguos). Incremental por hash, con reconciliación de símbolos
    movidos y enlace cross-project por endpoints HTTP.
 2. **Conocimiento de dominio.** Decisiones y convenciones desde markdown (`governs`);
    entidades desde un glosario del proyecto (`models`); resúmenes (heurístico/Ollama/API) y
@@ -203,7 +209,8 @@ M1, **tipos LSP en el `sync`** y variables locales M4b) mediante **paquetes por 
 rendimiento** (señal de frescura on/off + TTL, hilos de `git blame` en repos grandes),
 **validando las dependencias** y orientando a `doctor`/`setup-ollama` si falta alguna. La
 validación de LSP es **por lenguaje del proyecto**: en un proyecto TS/JS te pide el
-`typescript-language-server` (vía `memorygraf doctor --install ts-lsp`), no el de Python.
+LSP de TypeScript (vía `memorygraf doctor --install ts-lsp`: TypeScript ≥7 ya lo trae nativo;
+con TS ≤6 se usa `typescript-language-server`), no el de Python.
 `doctor` reporta el LSP por lenguaje y marca los que MemoryGraf indexa pero no cubre con LSP
 (Go, Rust, C…: símbolos sí, diagnósticos/tipos no). Escribe la config sola.
 
