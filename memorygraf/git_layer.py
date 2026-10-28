@@ -624,19 +624,22 @@ def _changed_ranges_many(top: str, shas: list) -> dict:
             for sha in chunk:
                 out[sha] = _changed_ranges(top, sha)
             continue
-        cur_sha, cur = None, None
+        cur_sha, cur, in_hdr = None, None, False
         for ln in text.splitlines():
             if ln.startswith("\x00"):
-                cur_sha, cur = ln[1:].strip(), None
+                cur_sha, cur, in_hdr = ln[1:].strip(), None, False
                 out[cur_sha] = {}
             elif cur_sha is None:
                 continue
-            elif ln.startswith("+++ b/"):
-                cur = ln[6:].strip()
+            elif ln.startswith("diff --git "):
+                cur, in_hdr = None, True
+            elif in_hdr and ln.startswith("+++ "):
+                # Solo en la cabecera: con --unified=0 una línea AÑADIDA `++ x` también
+                # empieza por `+++ ` y no debe cortar los hunks del archivo.
+                cur = ln[6:].strip() if ln.startswith("+++ b/") else None
                 cur = None if cur == "/dev/null" else cur
-            elif ln.startswith("+++ "):
-                cur = None
             elif cur and ln.startswith("@@"):
+                in_hdr = False
                 m = _HUNK.match(ln)
                 if m:
                     start, cnt = int(m.group(1)), int(m.group(2) or "1")
@@ -662,9 +665,13 @@ def _cat_file_many(top: str, specs: list) -> dict:
         nl = data.find(b"\n", pos)
         if nl < 0:
             break
-        header = data[pos:nl].split()
+        line = data[pos:nl]
         pos = nl + 1
-        if len(header) != 3 or header[1] == b"missing":
+        # `<nombre> missing` repite el nombre pedido, que puede llevar espacios
+        if line.endswith((b" missing", b" ambiguous")):
+            continue
+        header = line.rsplit(b" ", 2)
+        if len(header) != 3 or not header[2].isdigit():
             continue
         size = int(header[2])
         if header[1] == b"blob":
@@ -733,7 +740,7 @@ def _full_symbol_cochange(store, config, repos, st, log) -> int:
     símbolos actuales cada sync (sin ids obsoletos). Emite provenance 'git-cochange-sym-full'
     (upsert: para pares que el blame ya halló, prevalece esta versión; los que solo halla el
     blame se conservan). Intra-proyecto (el cross-project lo maneja M8 por blame)."""
-    from .extractors import ts_generic, sql_lex
+    from .extractors import ts_generic, ts_treesitter, sql_lex
     sym_ids = {n["id"] for n in store.all_nodes(types=["symbol"])}
     if not sym_ids:
         return 0
@@ -751,7 +758,10 @@ def _full_symbol_cochange(store, config, repos, st, log) -> int:
         # (diffs y blobs en lote) y se persiste qué símbolos históricos tocó; los sync
         # siguientes solo pagan los commits nuevos. La intersección con los símbolos
         # VIGENTES se hace aquí, en cada sync, así que no quedan ids obsoletos.
-        version = f"{_FULL_SYM_VERSION}|{prefix}|{','.join(sorted(ext_ok))}"
+        # La versión incluye si hay tree-sitter: sin él, lo que toca un commit en Go/TS/…
+        # sale vacío, y no debe quedar cacheado así cuando se instale.
+        parsers = f"ts{int(ts_treesitter.available())}"
+        version = f"{_FULL_SYM_VERSION}|{parsers}|{prefix}|{','.join(sorted(ext_ok))}"
         known = store.sha_touch_get(name, version)
         todo = [sha for sha in shas if sha not in known]
         for i in range(0, len(todo), 100):

@@ -2157,6 +2157,51 @@ class TestFullHistoryIncremental(_GitRepo, Base):
         self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM git_sha_touch").fetchone()[0], 0)
         store.close()
 
+    def test_batched_ranges_keep_hunks_after_added_plus_plus_line(self):
+        # Con --unified=0 una línea AÑADIDA `++ x;` sale como `+++ x;`: no es cabecera y no
+        # debe cortar los hunks siguientes del mismo archivo (el lote debe igualar al
+        # cálculo commit a commit).
+        self._init_repo()
+        self.write("m.c", "".join(f"int v{i};\n" for i in range(30)))
+        self._commit("c1")
+        lines = [f"int v{i};\n" for i in range(30)]
+        lines[3], lines[26] = "++ x;\n", "int w26;\n"
+        self.write("m.c", "".join(lines))
+        self._commit("c2")
+        top = git_layer._toplevel(self.proj)
+        sha = git_layer._git(["rev-parse", "HEAD"], top).strip()
+        single = git_layer._changed_ranges(top, sha)
+        self.assertEqual(single, {"m.c": [(4, 4), (27, 27)]})
+        self.assertEqual(git_layer._changed_ranges_many(top, [sha]), {sha: single})
+
+    def test_cat_file_missing_path_with_space(self):
+        # git repite el nombre pedido en `<nombre> missing`: con un espacio en la ruta la
+        # cabecera tiene 3 campos y antes acababa en int(b"missing") -> ValueError.
+        self._init_repo()
+        self.write("a b.c", "int x;\n")
+        self._commit("c1")
+        top = git_layer._toplevel(self.proj)
+        blobs = git_layer._cat_file_many(top, ["HEAD:no pe.c", "HEAD:a b.c"])
+        self.assertEqual(blobs, {"HEAD:a b.c": "int x;\n"})
+
+    def test_cache_version_tracks_parser_availability(self):
+        # Sin tree-sitter lo que toca un commit en Go/TS/... sale vacío. Ese vacío no debe
+        # quedar cacheado para siempre: al instalar los parsers se recalcula. (Historia solo
+        # .py: forzar `available` no cambia la extracción, solo la clave; vale en portable.)
+        from memorygraf.extractors import ts_treesitter
+        cfg = self._history()
+        store, _ = self.index()
+        with unittest.mock.patch.object(ts_treesitter, "available", return_value=False):
+            git_layer.sync(store, cfg)
+        without = {r[0] for r in store.conn.execute("SELECT version FROM git_sha_touch")}
+        with unittest.mock.patch.object(ts_treesitter, "available", return_value=True):
+            git_layer.sync(store, cfg)
+        with_ = {r[0] for r in store.conn.execute("SELECT version FROM git_sha_touch")}
+        self.assertEqual(len(without), 1)
+        self.assertEqual(len(with_), 1)
+        self.assertNotEqual(without, with_)
+        store.close()
+
 
 @unittest.skipUnless(_git_available(), "git no disponible")
 class TestGitLayer(_GitRepo, Base):
