@@ -90,7 +90,10 @@ def parse_cobertura(path: str):
         lines = out.setdefault(fn, {})
         for ln in cls.iter("line"):
             try:
-                n = int(ln.get("number"))
+                num = ln.get("number")
+                if num is None:
+                    continue
+                n = int(num)
                 h = int(ln.get("hits", "0"))
             except (TypeError, ValueError):
                 continue

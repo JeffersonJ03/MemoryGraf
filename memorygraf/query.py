@@ -155,7 +155,7 @@ class Query:
 
     # --- search: nodos relevantes con resumen + ubicacion (híbrido) ---
     def search(self, query: str, budget_tokens: int = 800, types=None, limit: int = 15,
-               rerank=False, config: dict | None = None) -> str:
+               rerank: bool | str = False, config: dict | None = None) -> str:
         results, mode = self._hybrid_search(query, types, limit)
         if not results:
             return f"(sin resultados para: {query})"
@@ -261,10 +261,10 @@ class Query:
         Los nodos `external` (os, react, …) solo valen como extremo, nunca como paso
         intermedio: dos archivos que importan `os` no están "conectados".
         """
-        missing = [n for n in (source, target) if not self.store.get_node(n)]
-        if missing:
-            return "\n".join(self._not_found(n) for n in missing)
         a, b = self.store.get_node(source), self.store.get_node(target)
+        if a is None or b is None:
+            return "\n".join(self._not_found(n) for n, node in ((source, a), (target, b))
+                             if node is None)
         head = f"# path: {a['name']} @{_loc(a)}  ⇄  {b['name']} @{_loc(b)}"
         if source == target:
             return f"{head}\n(es el mismo nodo)"
@@ -316,7 +316,7 @@ class Query:
             lines += hops
         return _budget("\n".join(lines), budget_tokens)
 
-    def _adjacency(self, edge_types=None, endpoints=frozenset()) -> dict:
+    def _adjacency(self, edge_types=None, endpoints: set | frozenset = frozenset()) -> dict:
         """{nodo: {vecino: [aristas]}} sin dirección. Excluye `external` salvo extremos."""
         ext = {n["id"] for n in self.store.all_nodes(types=["external"])} - set(endpoints)
         wanted = set(edge_types) if edge_types else None

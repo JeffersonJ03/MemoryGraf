@@ -437,7 +437,7 @@ def main(argv=None):
             from . import report
             md = report.build_markdown(store, _load_cfg(args))
             out = args.out or os.path.join(
-                workspace.project_base(workspace.resolve_config_path(getattr(args, "config", None))),
+                workspace.project_base(_cfg_path(args)),    # ya resuelta por _load_cfg
                 "GRAPH_REPORT.md")
             with open(out, "w", encoding="utf-8") as f:
                 f.write(md)

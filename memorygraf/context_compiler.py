@@ -74,7 +74,7 @@ class _LocalLLM:
     Ollama local (`url`+`model`) o una API compatible con OpenAI (`api`=(url,key,model))."""
 
     def __init__(self, url: str | None = None, model: str | None = None,
-                 keep_alive=None, api: tuple | None = None):
+                 keep_alive=None, api: tuple[str, str, str] | None = None):
         self.url, self.model, self.keep_alive = url, model, keep_alive
         self.api = api                       # (url, key, model) OpenAI-compatible, o None
         self.available = bool(url or api)
@@ -87,7 +87,7 @@ class _LocalLLM:
         if self.api:
             return _api_chat(*self.api, prompt, max_tokens=num_predict,
                              timeout=timeout or 60, temperature=temperature)
-        if not self.url:
+        if not self.url or not self.model:        # sin modelo Ollama respondería error
             return None
         kw = {"num_predict": num_predict, "keep_alive": self.keep_alive,
               "temperature": temperature}
@@ -96,7 +96,7 @@ class _LocalLLM:
         return _ollama.generate(self.url, self.model, prompt, **kw)
 
 
-def _api_settings(config: dict | None) -> tuple | None:
+def _api_settings(config: dict | None) -> tuple[str, str, str] | None:
     """(url, key, model) del LLM por API para el compilador, o None si falta URL/KEY.
     La KEY vive SOLO en env (secreto); url/model pueden venir de la config o de env."""
     api = (config or {}).get("compiler", {}).get("api") or {}
@@ -392,7 +392,7 @@ def _heuristic_cochange_note(subjects: list, cnt: int) -> str:
             for w in re.findall(r"[a-záéíóúñ]{3,}", s.lower()):
                 if w not in _STOP:
                     words[w] = words.get(w, 0) + 1
-        kw = max(words, key=words.get) if words else None
+        kw = max(words, key=lambda w: words[w]) if words else None
         base = f'co-cambian por "{subjects[0]}"'
         return (f"{base} (tema: {kw})" if kw else base)
     return f"acoplamiento histórico ({cnt} co-cambios)"
@@ -494,7 +494,7 @@ def rerank(store, query: str, node_ids: list, boost_recency: bool = True) -> lis
     return [nid for nid, _ in scored]
 
 
-def _parse_rank_order(text: str, n: int) -> list:
+def _parse_rank_order(text: str | None, n: int) -> list:
     """Permutación 0-indexed a partir de los números (1-indexed) que devuelve el LLM.
     Ignora fuera de rango y repetidos; [] si no hay nada usable (-> fallback)."""
     seen, order = set(), []

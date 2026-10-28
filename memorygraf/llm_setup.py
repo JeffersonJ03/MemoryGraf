@@ -28,7 +28,7 @@ _ENGINES = ("ollama", "api", "heuristic")
 # --------------------------------------------------------------------------- #
 # Escritura de config (pura y testeable)
 # --------------------------------------------------------------------------- #
-def configure(config_path: str, engine: str, model: str | None = None,
+def configure(config_path: str | None, engine: str, model: str | None = None,
               url: str | None = None, log=print) -> int:
     """Escribe el motor+modelo elegido en la config del proyecto (bloques summary/compiler)."""
     if engine not in _ENGINES:

@@ -96,7 +96,7 @@ def _extract_json(text: str):
         return None
 
 
-def _llm_candidates(llm, store, log) -> list:
+def _llm_candidates(llm, store, log) -> list | None:
     """Pide al LLM local entidades de negocio desde una muestra de clases/tipos. None si
     no devuelve JSON válido (el llamador cae al heurístico)."""
     names = sorted({(n["name"]).split(".")[-1]

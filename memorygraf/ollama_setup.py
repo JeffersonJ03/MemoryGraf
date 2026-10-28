@@ -50,12 +50,12 @@ def _decompress_zst(src: str, dst: str, log=print) -> bool:
     if shutil.which("zstd"):
         return subprocess.call(["zstd", "-d", "-f", src, "-o", dst]) == 0
     try:
-        import zstandard  # noqa: F401
+        import zstandard  # noqa: F401  # pyright: ignore[reportMissingImports] (opcional)
     except ImportError:
         log("==> Instalando soporte de descompresión (zstandard) en este intérprete…")
         subprocess.call([sys.executable, "-m", "pip", "install", "-q", "zstandard"])
     try:
-        import zstandard
+        import zstandard  # pyright: ignore[reportMissingImports] (opcional)
     except ImportError:
         log("!! No hay 'zstd' ni el paquete Python 'zstandard'. Instala uno y reintenta:")
         log("     pip install zstandard    (o)    apt/brew install zstd")

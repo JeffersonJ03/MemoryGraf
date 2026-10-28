@@ -15,6 +15,7 @@ from memorygraf.indexer import Indexer
 from memorygraf.query import Query
 from memorygraf.model import Edge, EDGE_CALLS, EDGE_CO_CHANGES
 from memorygraf import semantic, docs, entities, summarizer, workspace, git_layer, cross_link
+from memorygraf import context_compiler as _cc
 from memorygraf.extractors import ts_treesitter as _ts
 
 MICROSVC_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "microservices")
@@ -2201,15 +2202,18 @@ def _ts_lsp_available() -> bool:
     return lsp._find_lang_server(lsp._LANGUAGES[1]) is not None
 
 
-class _FakeLLM:
-    """LLM local falso (offline): cuenta llamadas y devuelve una respuesta fija."""
+class _FakeLLM(_cc._LocalLLM):
+    """LLM local falso (offline): cuenta llamadas y devuelve una respuesta fija. Hereda
+    de `_LocalLLM` y repite su firma de `generate`: un fake con otra firma ocultó que
+    la real no aceptaba `temperature` (ver TestLocalLlmTemperature)."""
     def __init__(self, response, name="ollama:fake"):
+        super().__init__()
         self.available = True
         self.name = name
         self.calls = 0
         self._response = response
 
-    def generate(self, prompt, num_predict=120, timeout=None):
+    def generate(self, prompt, num_predict=120, timeout=None, temperature=0.1):
         self.calls += 1
         return self._response
 
@@ -2409,6 +2413,7 @@ class TestGitLayer(_GitRepo, Base):
         r = self._sync_git(store)
         self.assertTrue(r["enabled"])
         g = store.git_node_get("proj/a.py")
+        assert g is not None
         self.assertEqual(g["churn"], 2)
         self.assertEqual(g["fix_touches"], 1)      # "fix bug" cuenta
         self.assertIn("Alice", g["authors"])
@@ -2429,6 +2434,7 @@ class TestGitLayer(_GitRepo, Base):
         self._sync_git(store)
         g = store.git_node_get("proj/ñandú.py")
         self.assertIsNotNone(g)
+        assert g is not None
         self.assertEqual(g["churn"], 2)
         top = git_layer._toplevel(self.proj)
         assert top is not None
@@ -2458,6 +2464,7 @@ class TestGitLayer(_GitRepo, Base):
         self.assertTrue(self._sync_git(store)["enabled"])
         g = store.git_node_get("proj/a.py")
         self.assertIsNotNone(g)                    # antes: None -> capa vacía
+        assert g is not None
         self.assertEqual(g["churn"], 1)
         store.close()
 
@@ -2475,6 +2482,7 @@ class TestGitLayer(_GitRepo, Base):
         g = store.git_node_get("proj/new.py")
         self.assertIsNotNone(g)
         # churn abarca crear+editar (bajo old) + el rename = 3 (sin el fix sería 1)
+        assert g is not None
         self.assertEqual(g["churn"], 3)
         self.assertIsNone(store.get_node("proj/old.py"))   # old ya no es nodo
         # el "por qué" incluye commits previos al rename
@@ -2552,6 +2560,7 @@ class TestGitLayer(_GitRepo, Base):
         # nivel símbolo: main solo existe desde el 2º commit
         gm = store.git_node_get("proj/a.py::main")
         self.assertIsNotNone(gm)
+        assert gm is not None
         self.assertGreaterEqual(gm["churn"], 1)
         out = Query(store).history("proj/a.py")
         self.assertIn("churn", out)
@@ -2577,14 +2586,14 @@ class TestGitLayer(_GitRepo, Base):
         self._commit("c1")
         store, _ = self.index()
         self._sync_git(store)
-        self.assertEqual(store.git_node_get("proj/a.py")["churn"], 1)
+        self.assertEqual((store.git_node_get("proj/a.py") or {})["churn"], 1)
         # nuevo commit + re-sync incremental
         self.write("a.py", "def a():\n    return 2\n")
         self._commit("c2")
         store2, _ = self.index()
         r = git_layer.sync(store2, self.config)
         self.assertFalse(r["full_rebuild"])          # incremental, no recompute
-        self.assertEqual(store2.git_node_get("proj/a.py")["churn"], 2)
+        self.assertEqual((store2.git_node_get("proj/a.py") or {})["churn"], 2)
         store2.close()
         store.close()
 
@@ -3089,6 +3098,7 @@ class TestCompilerCochange(_GitRepo, Base):
         fa, fb = "proj/a.py::fa", "proj/b.py::fb"
         note = cc.cochange_note(store, fa, fb)       # orden canónico interno
         self.assertIsNotNone(note)                   # el par SÍMBOLO quedó narrado
+        assert note is not None
         self.assertIn("co-cambian por", note)
 
         q = Query(store)
@@ -3175,6 +3185,7 @@ class TestRuntimeTests(Base):
         rt.sync(store, self.config)
         f = store.runtime_node_get("proj/a.py::f")
         g = store.runtime_node_get("proj/a.py::g")
+        assert f is not None and g is not None
         self.assertEqual(f["covered"], 1)
         self.assertEqual(f["coverage_ratio"], 1.0)
         self.assertEqual(g["covered"], 0)       # g (líneas 4-5) sin hits
@@ -3191,6 +3202,7 @@ class TestRuntimeTests(Base):
         rt.sync(store, self.config)
         ok = store.runtime_node_get("proj/t_a.py::TestX.test_ok")
         bad = store.runtime_node_get("proj/t_a.py::TestX.test_bad")
+        assert ok is not None and bad is not None
         self.assertEqual(ok["last_test_status"], "passed")
         self.assertEqual(bad["last_test_status"], "failed")
         store.close()
@@ -3292,6 +3304,7 @@ class TestRuntimeTests(Base):
         rt.sync(store, self.config)
         f = store.runtime_node_get("proj/pkg/a.py::f")
         self.assertIsNotNone(f)
+        assert f is not None
         self.assertEqual(f["covered"], 1)        # resuelto vía <source>
         store.close()
 
@@ -3302,12 +3315,12 @@ class TestRuntimeTests(Base):
         store, _ = self.index()
         self.config["runtime"] = {"coverage": cov}
         rt.sync(store, self.config)
-        self.assertEqual(store.runtime_node_get("proj/a.py::f")["covered"], 1)
+        self.assertEqual((store.runtime_node_get("proj/a.py::f") or {})["covered"], 1)
         # se retira el artefacto (borrado real, no solo config) -> re-sync debe limpiar
         self.rm("coverage.xml")
         self.config["runtime"] = {}
         rt.sync(store, self.config)
-        self.assertIsNone(store.runtime_node_get("proj/a.py::f")["covered"])
+        self.assertIsNone((store.runtime_node_get("proj/a.py::f") or {})["covered"])
         store.close()
 
     def test_is_test_file_by_segment_not_substring(self):
@@ -3342,6 +3355,7 @@ class TestRuntimeLsp(Base):
         lsp.assign_to_symbols(store, "proj/a.py", diags)
         sym = store.runtime_node_get("proj/a.py::f")
         self.assertIsNotNone(sym)
+        assert sym is not None
         self.assertIn("undefined", sym["diagnostics"])
         store.close()
 
@@ -3420,10 +3434,12 @@ class TestRuntimeLsp(Base):
         with unittest.mock.patch.object(lsp.subprocess, "Popen", fake_popen), \
              unittest.mock.patch.object(lsp, "_LspClient", FakeClient), \
              unittest.mock.patch.object(lsp.time, "sleep", lambda *_a, **_k: None):
-            f, d, t = lsp._run_language(
+            res = lsp._run_language(
                 None, ("jdtls", []), [], {"p": "."},
                 {"hover": False, "lsp_timeout": 0}, lambda m: None,
                 workspace=True, init_options={"settings": {"java": {}}})
+            assert res is not None
+            f, d, t = res
 
         argv = seen["argv"]
         self.assertIn("-data", argv)
@@ -3513,8 +3529,9 @@ class TestRuntimeLsp(Base):
             {"result": {"capabilities": {"diagnosticProvider": {"interFileDependencies": True}}}},
             [{"range": {"start": {"line": 1, "character": 2}}, "severity": 1,
               "message": "Type 'number' is not assignable to type 'string'."}])
+        assert res is not None
         self.assertEqual(res[:2], (1, 1))
-        diags = json.loads(store.runtime_node_get("proj/a.ts")["diagnostics"])
+        diags = json.loads((store.runtime_node_get("proj/a.ts") or {})["diagnostics"])
         self.assertEqual(diags[0]["line"], 2)
         self.assertEqual(diags[0]["severity"], "error")
         store.close()
@@ -3907,7 +3924,7 @@ class TestWorkspace(Base):
         # descubrimiento vía MEMORYGRAF_HOME
         os.environ["MEMORYGRAF_HOME"] = self.proj
         try:
-            self.assertEqual(os.path.abspath(workspace.resolve_config_path()),
+            self.assertEqual(os.path.abspath(workspace.resolve_config_path() or ""),
                              os.path.abspath(cfg_path))
         finally:
             del os.environ["MEMORYGRAF_HOME"]
@@ -3935,6 +3952,7 @@ class TestRuntimeJUnit(Base):
         self.assertEqual(applied, 1)
         rt_row = store.runtime_node_get("proj/tests/test_mod.py::test_ok")
         self.assertIsNotNone(rt_row)
+        assert rt_row is not None
         self.assertEqual(rt_row["last_test_status"], "passed")
         store.close()
 
@@ -4091,6 +4109,7 @@ class TestLspResolvedType(Base):
         self.assertGreaterEqual(r["types"], 1)
         rt = store.runtime_node_get("proj/typed.py::suma")
         self.assertIsNotNone(rt)
+        assert rt is not None
         self.assertIsNotNone(rt.get("resolved_type"))
         self.assertIn("int", rt["resolved_type"])          # la firma trae el tipo
         # anti-staleness: re-correr limpia y repuebla, no acumula basura
@@ -4120,7 +4139,9 @@ class TestLspResolvedType(Base):
             "def f() -> int")
         self.assertIsNone(lsp._parse_hover(None))
         # apunta DENTRO del identificador (no en la frontera previa)
-        line, char = lsp._hover_position(["def suma(a):"], 1, "suma")
+        pos = lsp._hover_position(["def suma(a):"], 1, "suma")
+        assert pos is not None
+        line, char = pos
         self.assertEqual(line, 0)
         self.assertGreater(char, 4)          # > inicio de 'suma' (col 4)
 
@@ -4140,6 +4161,7 @@ class TestLspTypeScript(Base):
         self.assertIn("typescript", r["languages"])
         rt = store.runtime_node_get("proj/calc.ts::suma")
         self.assertIsNotNone(rt)
+        assert rt is not None
         self.assertIsNotNone(rt.get("resolved_type"))
         self.assertIn("number", rt["resolved_type"])
         store.close()
@@ -4154,7 +4176,7 @@ class TestLspTypeScript(Base):
         store, _ = self.index()
         r = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
         self.assertGreaterEqual(r["diagnostics"], 1)
-        diags = json.loads(store.runtime_node_get("proj/bad.ts::f")["diagnostics"])
+        diags = json.loads((store.runtime_node_get("proj/bad.ts::f") or {})["diagnostics"])
         self.assertTrue(any(d["severity"] == "error" and d["line"] == 2 for d in diags))
         store.close()
 
