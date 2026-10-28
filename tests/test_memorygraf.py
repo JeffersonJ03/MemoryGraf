@@ -3920,8 +3920,11 @@ class TestLspTypeScript(Base):
         self.assertIn("number", rt["resolved_type"])
         store.close()
 
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_typescript_diagnostics(self):
-        # Por push (typescript-language-server) o por pull (TS 7 nativo): mismo resultado
+        # Por push (typescript-language-server) o por pull (TS 7 nativo): mismo resultado.
+        # Requiere tree-sitter: el extractor regex no da span_end y el diagnóstico de la
+        # línea 2 no caería dentro de `f`.
         from memorygraf.runtime import lsp
         self.write("bad.ts", "export function f(): string {\n  return 5;\n}\n")
         store, _ = self.index()
