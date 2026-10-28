@@ -351,8 +351,11 @@ def main(argv=None):
 
     if args.cmd == "doctor":
         from . import doctor
+        # `--config` explícito: el reporte LSP por lenguaje es el de ESE proyecto (sin él,
+        # doctor lo resuelve best-effort desde el workspace).
+        cfg = workspace.load_config(os.path.abspath(args.config)) if args.config else None
         sys.exit(doctor.run(as_json=args.json, install=args.install,
-                            log=lambda m: print(m, file=sys.stderr)))
+                            log=lambda m: print(m, file=sys.stderr), config=cfg))
 
     if args.cmd == "mcp":
         os.environ["MEMORYGRAF_DB"] = _db_path(args)

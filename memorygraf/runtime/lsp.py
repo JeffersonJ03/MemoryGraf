@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -29,7 +30,10 @@ import time
 from ..extractors import python_ast, ts_treesitter
 
 # Registro POR LENGUAJE (M4). Cada lenguaje declara:
-#   - servers : candidatos (binario, [args stdio]); se usa el primero disponible
+#   - servers : candidatos (binario, [args stdio][, chequeo]); se usa el primero disponible
+#               y, si falla al iniciar (`initialize` con error o el proceso muere), el
+#               siguiente. `chequeo(binario_abs) -> bool` descarta un binario que existe
+#               pero no sirve como LSP (p. ej. `tsc` anterior a TypeScript 7).
 #   - ext_lang: extensión -> languageId LSP (tsserver distingue ts/tsx/js/jsx)
 # Añadir un lenguaje = añadir una entrada aquí (el resto es genérico).
 _LANGUAGES = [
@@ -43,7 +47,11 @@ _LANGUAGES = [
     },
     {
         "name": "typescript",
-        "servers": [("typescript-language-server", ["--stdio"])],
+        # typescript-language-server envuelve el `tsserver.js` de TypeScript ≤6 (el del
+        # proyecto si lo hay). TypeScript 7 (nativo, en Go) ya no trae tsserver.js pero sí
+        # su propio LSP (`tsc --lsp --stdio`, diagnósticos por pull): es el fallback.
+        "servers": [("typescript-language-server", ["--stdio"]),
+                    ("tsc", ["--lsp", "--stdio"], lambda b: _tsc_native_lsp(b))],
         "ext_lang": {".ts": "typescript", ".tsx": "typescriptreact",
                      ".js": "javascript", ".jsx": "javascriptreact",
                      ".mjs": "javascript", ".cjs": "javascript"},
@@ -113,7 +121,7 @@ _LANGUAGES = [
 # que el usuario sepa QUÉ instalar en vez de solo ver que se saltó).
 _INSTALL_HINT = {
     "python": "pip install python-lsp-server   (o pyright:  npm i -g pyright)",
-    "typescript": "npm i -g typescript-language-server typescript",
+    "typescript": "npm i -g typescript   (TS ≥7 trae LSP nativo; con TS ≤6: + typescript-language-server)",
     # M11a · Grupo A (el comando exacto por OS lo da `memorygraf doctor`):
     "go": "go install golang.org/x/tools/gopls@latest   (requiere Go)",
     "rust": "rustup component add rust-analyzer   (requiere rustup)",
@@ -135,13 +143,39 @@ _FENCE_TAGS = {"python", "typescript", "javascript", "typescriptreact",
                "php", "r"}
 
 
+def _find_lang_servers(spec: dict) -> list:
+    """[(binario_abs, args), ...] de TODOS los servidores disponibles, en orden de
+    preferencia (los siguientes al primero son el fallback si éste no arranca)."""
+    out = []
+    for name, args, *check in spec["servers"]:
+        found = shutil.which(name)
+        if found and (not check or check[0](found)):
+            out.append((found, args))
+    return out
+
+
 def _find_lang_server(spec: dict) -> tuple | None:
     """(binario_abs, args) del primer servidor disponible para un lenguaje."""
-    for name, args in spec["servers"]:
-        found = shutil.which(name)
-        if found:
-            return found, args
-    return None
+    found = _find_lang_servers(spec)
+    return found[0] if found else None
+
+
+_TSC_LSP_CACHE: dict = {}
+
+
+def _tsc_native_lsp(binary: str) -> bool:
+    """¿Este `tsc` es TypeScript ≥7 (trae `--lsp`)? El `tsc` de TS ≤6 no lo entiende."""
+    if binary not in _TSC_LSP_CACHE:
+        ok = False
+        try:
+            out = subprocess.run(_win_exec([binary, "--version"]), capture_output=True,
+                                 text=True, timeout=10).stdout
+            m = re.search(r"Version\s+(\d+)", out or "")
+            ok = bool(m and int(m.group(1)) >= 7)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            ok = False
+        _TSC_LSP_CACHE[binary] = ok
+    return _TSC_LSP_CACHE[binary]
 
 
 def _win_exec(argv: list) -> list:
@@ -303,12 +337,12 @@ def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None,
         params_by_qual = {}
         locals_by_qual = {}
         ext = fid.rsplit(".", 1)[-1].lower() if "." in fid else ""
-        if want_params:
+        if want_params and param_provider:
             try:
                 params_by_qual = param_provider("\n".join(lines), ext) or {}
             except Exception:
                 params_by_qual = {}
-        if want_locals:
+        if want_locals and local_provider:
             try:
                 locals_by_qual = local_provider("\n".join(lines), ext) or {}
             except Exception:
@@ -447,12 +481,17 @@ class _LspClient:
 
     def request(self, method, params, timeout: float = 3.0):
         """Envía una petición y espera su respuesta (correlada por id). None si expira."""
-        rid = self._send(method, params)
+        return self.wait_response(self._send(method, params), timeout)
+
+    def wait_response(self, rid, timeout: float = 3.0):
+        """Respuesta a la petición `rid`; None si expira o si el servidor murió."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             resp = self.responses.pop(rid, None)
             if resp is not None:
                 return resp
+            if self.proc.poll() is not None and not self._reader.is_alive():
+                return None                  # el server terminó: no esperar en vano
             time.sleep(0.02)
         return None
 
@@ -462,10 +501,12 @@ def _uri(path: str) -> str:
 
 
 def _run_language(store, server, files, roots, rt, log, param_provider=None,
-                  local_provider=None, workspace=False, init_options=None) -> tuple:
+                  local_provider=None, workspace=False, init_options=None) -> tuple | None:
     """Ciclo LSP efímero para UN lenguaje: abre sus archivos, mapea diagnósticos y
-    puebla tipos. Devuelve (archivos_abiertos, diagnósticos, tipos). Solo AÑADE al
-    store (los `runtime_clear` los hace `sync` una vez, antes de todos los lenguajes).
+    puebla tipos. Devuelve (archivos_abiertos, diagnósticos, tipos), o None si el
+    servidor NO arrancó (`initialize` con error o el proceso murió): `sync` prueba
+    entonces el siguiente candidato. Solo AÑADE al store (los `runtime_clear` los hace
+    `sync` una vez, antes de todos los lenguajes).
 
     M11b (Grupo B): algunos servers exigen init a medida:
       - `workspace=True`: el server necesita un directorio de datos propio (p.ej. jdtls
@@ -499,8 +540,20 @@ def _run_language(store, server, files, roots, rt, log, param_provider=None,
                 "hover": {"contentFormat": ["markdown", "plaintext"]}}}}
         if init_options:
             init_params["initializationOptions"] = init_options
-        client._send("initialize", init_params)
-        time.sleep(0.3)
+        # Se ESPERA la respuesta: un server roto (p. ej. typescript-language-server sin un
+        # tsserver.js válido) responde con error y antes pasaba en silencio como "0 tipos".
+        # Si solo tarda (jdtls indexando), se sigue igual que antes.
+        try:
+            rid = client._send("initialize", init_params)
+        except OSError:                    # murió antes de leer (BrokenPipe): no arrancó
+            log(f"runtime/lsp: {os.path.basename(binary)} no arrancó: terminó al iniciar")
+            return None
+        init = client.wait_response(rid, float(rt.get("lsp_init_timeout", 20)))
+        if (init or {}).get("error") or (init is None and proc.poll() is not None):
+            why = ((init or {}).get("error") or {}).get("message") or "terminó al iniciar"
+            log(f"runtime/lsp: {os.path.basename(binary)} no arrancó: {why.splitlines()[0][:160]}")
+            return None
+        caps = ((init or {}).get("result") or {}).get("capabilities") or {}
         client._send("initialized", {}, notify=True)
         opened = []
         file_lines: dict[str, list] = {}
@@ -521,13 +574,36 @@ def _run_language(store, server, files, roots, rt, log, param_provider=None,
                 "version": 1, "text": text}}, notify=True)
             opened.append((n["id"], uri))
             file_lines[n["id"]] = text.splitlines()
-        # esperar a que lleguen los diagnósticos (best-effort, con tope)
+        # Diagnósticos por PULL (LSP 3.17, `textDocument/diagnostic`) si el server lo
+        # anuncia: TypeScript 7 nativo SOLO funciona así (nunca publica por push).
+        pulled: dict[str, list] = {}
+        if caps.get("diagnosticProvider"):
+            # Un archivo tras otro, cada uno con hasta `lsp_timeout`: sin tope TOTAL, un
+            # server lento con N archivos bloqueaba N·8 s. `lsp_pull_budget` lo acota.
+            per_file = float(rt.get("lsp_timeout", 8))
+            deadline = time.time() + float(rt.get("lsp_pull_budget", 120))
+            for done, (_fid, uri) in enumerate(opened):
+                left = deadline - time.time()
+                if left <= 0:
+                    log(f"runtime/lsp: {len(opened) - done} archivo(s) sin diagnósticos: "
+                        f"agotado runtime.lsp_pull_budget")
+                    break
+                resp = client.request("textDocument/diagnostic",
+                                      {"textDocument": {"uri": uri}},
+                                      timeout=min(per_file, left))
+                items = ((resp or {}).get("result") or {}).get("items")
+                if isinstance(items, list):
+                    pulled[uri] = items
+        # el resto: esperar a que lleguen por push (best-effort, con tope)
+        waiting = [uri for _fid, uri in opened if uri not in pulled]
         deadline = time.time() + float(rt.get("lsp_timeout", 8))
-        while time.time() < deadline and len(client.diagnostics) < len(opened):
+        while (time.time() < deadline
+               and any(uri not in client.diagnostics for uri in waiting)):
             time.sleep(0.3)
         total = 0
         for fid, uri in opened:
-            diags = format_diagnostics(client.diagnostics.get(uri, []))
+            raw = pulled[uri] if uri in pulled else client.diagnostics.get(uri, [])
+            diags = format_diagnostics(raw)
             assign_to_symbols(store, fid, diags)
             total += len(diags)
         # resolved_type via hover (best-effort; PLAN §5.2). Nunca rompe el sync.
@@ -573,15 +649,15 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
     if not by_lang:
         return {"enabled": False, "reason": "sin archivos soportados"}
 
-    # resuelve el servidor de cada lenguaje presente (los que falten se omiten)
+    # resuelve los servidores de cada lenguaje presente (los que falten se omiten)
     runnable, missing = [], []
     for spec in _LANGUAGES:
         files = by_lang.get(spec["name"])
         if not files:
             continue
-        srv = _find_lang_server(spec)
-        if srv:
-            runnable.append((spec, srv, files))
+        srvs = _find_lang_servers(spec)
+        if srvs:
+            runnable.append((spec, srvs, files))
         else:
             missing.append(spec["name"])
     if not runnable:
@@ -603,12 +679,22 @@ def sync(store, config: dict, log=lambda m: None) -> dict:
     store.runtime_clear("local_types")
     tot_files = tot_diags = tot_types = 0
     langs = []
-    for spec, srv, files in runnable:
-        f, d, t = _run_language(store, srv, files, roots, rt, log,
+    for spec, srvs, files in runnable:
+        res = None
+        for srv in srvs:                      # el siguiente candidato si éste no arranca
+            res = _run_language(store, srv, files, roots, rt, log,
                                 param_provider=spec.get("params"),
                                 local_provider=spec.get("locals"),
                                 workspace=spec.get("workspace", False),
                                 init_options=spec.get("init_options"))
+            if res is not None:
+                break
+        if res is None:
+            hint = _INSTALL_HINT.get(spec["name"])
+            log(f"runtime/lsp: ningún servidor de {spec['name']} arrancó -> omitido"
+                + (f"\n           instala:  {hint}" if hint else ""))
+            continue
+        f, d, t = res
         tot_files += f
         tot_diags += d
         tot_types += t

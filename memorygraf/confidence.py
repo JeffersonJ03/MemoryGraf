@@ -34,8 +34,10 @@ _WEAK = 0.4   # por debajo: una arista INFERRED pasa a AMBIGUOUS ("revisar")
 _HEURISTIC_PROV = ("heuristic", "guess", "ambiguous", "fuzzy")
 # provenances que declaran OBSERVACIÓN directa (no deducción) -> EXTRACTED, aunque el
 # tipo sea normalmente INFERRED. P.ej. `tested_by` por CONTEXTO de cobertura: se observó
-# que el test ejecutó ese símbolo (vs. la heurística por imports, que sigue INFERRED).
-_OBSERVED_PROV = ("coverage",)
+# que el test ejecutó ese símbolo (vs. la heurística por imports, que sigue INFERRED); y
+# `references` "ast-ref" (M15c): la tabla de un FROM o el `var.x` de Terraform están
+# escritos en el código, no deducidos.
+_OBSERVED_PROV = ("coverage", "ast-ref")
 
 
 def classify(edge_type: str, provenance: str = "", confidence=1.0) -> str:

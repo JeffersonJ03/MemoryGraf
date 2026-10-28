@@ -102,6 +102,13 @@ CREATE TABLE IF NOT EXISTS git_symbol_commit (  -- commits (blame) que tocan las
     sha TEXT NOT NULL,                           -- por símbolo (recompute, regenerable)
     PRIMARY KEY (sym_id, sha)
 );
+CREATE TABLE IF NOT EXISTS git_sha_touch (  -- M1 full: símbolos HISTÓRICOS que tocó cada
+    project TEXT NOT NULL,                     -- commit. Un commit es inmutable: se calcula
+    sha TEXT NOT NULL,                         -- una vez y los sync siguientes solo procesan
+    version TEXT NOT NULL,                     -- los nuevos. `version` = extractores/prefijo
+    sids TEXT NOT NULL,                        -- (si cambian, se recalcula). JSON [sym_id]
+    PRIMARY KEY (project, sha)
+);
 CREATE INDEX IF NOT EXISTS idx_git_cochange_b ON git_cochange(b);
 CREATE INDEX IF NOT EXISTS idx_git_symcommit_sha ON git_symbol_commit(sha);
 -- CAPA 3 · Compilador de contexto local (PLAN §6). Salida del LLM local (o del
@@ -450,7 +457,7 @@ class Store:
     def clear_git_layer(self):
         """Borra TODA la caché Git (para reconstruir tras historia reescrita)."""
         for t in ("git_node", "git_commits", "git_cochange", "git_blame",
-                  "git_symbol_commit"):
+                  "git_symbol_commit", "git_sha_touch"):
             self.conn.execute(f"DELETE FROM {t}")
         self.conn.execute("DELETE FROM meta WHERE key LIKE 'git_head_sha%'")
 
@@ -467,6 +474,25 @@ class Store:
             "DELETE FROM git_blame WHERE path NOT IN (SELECT id FROM nodes)")
         self.conn.execute(
             "DELETE FROM git_symbol_commit WHERE sym_id NOT IN (SELECT id FROM nodes)")
+
+    def sha_touch_get(self, project: str, version: str) -> dict:
+        """{sha: [sym_id histórico,...]} ya calculados para `project` con esta `version`."""
+        return {r["sha"]: json.loads(r["sids"]) for r in self.conn.execute(
+            "SELECT sha, sids FROM git_sha_touch WHERE project=? AND version=?",
+            (project, version))}
+
+    def sha_touch_set(self, project: str, version: str, rows: dict):
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO git_sha_touch (project, sha, version, sids) VALUES (?,?,?,?)",
+            [(project, sha, version, json.dumps(sorted(sids))) for sha, sids in rows.items()])
+
+    def sha_touch_keep(self, project: str, shas):
+        """Poda los commits que salieron de la ventana (`cochange_full_depth`)."""
+        keep = set(shas)
+        drop = [r["sha"] for r in self.conn.execute(
+            "SELECT sha FROM git_sha_touch WHERE project=?", (project,)) if r["sha"] not in keep]
+        self.conn.executemany("DELETE FROM git_sha_touch WHERE project=? AND sha=?",
+                              [(project, sha) for sha in drop])
 
     # --- Cache de resúmenes ---
     def get_summary(self, content_hash: str, summarizer: str) -> Optional[str]:

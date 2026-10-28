@@ -69,9 +69,14 @@ def _git(args: list, cwd: str, timeout: float | None = None) -> str | None:
     `timeout` (segundos) acota comandos en rutas calientes (p. ej. la señal de
     frescura por consulta): si git se bloquea —índice retenido, disco lento— se
     degrada a None en vez de colgar. Por defecto None = sin límite (comportamiento
-    previo intacto para el resto de llamadas)."""
+    previo intacto para el resto de llamadas).
+
+    `core.quotePath=false`: sin él git escribe las rutas no ASCII entrecomilladas y en
+    octal (`"b/\\303\\261.py"`) en `log --numstat`, `show`, `status`…, y esos archivos
+    (`ñ.py`, `configuración.ts`) se quedaban sin churn, co-cambio ni rangos."""
     try:
-        p = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+        p = subprocess.run(["git", "-c", "core.quotePath=false", *args], cwd=cwd,
+                           capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
                            timeout=timeout)
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
@@ -613,13 +618,82 @@ def _changed_ranges(top: str, sha: str) -> dict:
     return ranges
 
 
+def _changed_ranges_many(top: str, shas: list) -> dict:
+    """{sha: {repo_rel: [(inicio, fin), ...]}} de VARIOS commits con un solo `git show`
+    (lotes de 200 SHAs). Misma semántica que _changed_ranges, sin un proceso por commit."""
+    out: dict = {}
+    for i in range(0, len(shas), 200):
+        chunk = shas[i:i + 200]
+        text = _git(["show", "--unified=0", "--format=%x00%H", "--no-color", *chunk], top)
+        if text is None:                            # git falló: commit a commit (lento)
+            for sha in chunk:
+                out[sha] = _changed_ranges(top, sha)
+            continue
+        cur_sha, cur, in_hdr = None, None, False
+        for ln in text.splitlines():
+            if ln.startswith("\x00"):
+                cur_sha, cur, in_hdr = ln[1:].strip(), None, False
+                out[cur_sha] = {}
+            elif cur_sha is None:
+                continue
+            elif ln.startswith("diff --git "):
+                cur, in_hdr = None, True
+            elif in_hdr and ln.startswith("+++ "):
+                # Solo en la cabecera: con --unified=0 una línea AÑADIDA `++ x` también
+                # empieza por `+++ ` y no debe cortar los hunks del archivo.
+                cur = ln[6:].strip() if ln.startswith("+++ b/") else None
+                cur = None if cur == "/dev/null" else cur
+            elif cur and ln.startswith("@@"):
+                in_hdr = False
+                m = _HUNK.match(ln)
+                if m:
+                    start, cnt = int(m.group(1)), int(m.group(2) or "1")
+                    if cnt > 0:
+                        out[cur_sha].setdefault(cur, []).append((start, start + cnt - 1))
+    return out
+
+
+def _cat_file_many(top: str, specs: list) -> dict:
+    """{`sha:ruta`: texto} con UN `git cat-file --batch` (en vez de un `git show` por
+    archivo y commit). Las que no existan no aparecen."""
+    if not specs:
+        return {}
+    try:
+        p = subprocess.run(["git", "cat-file", "--batch"], cwd=top, capture_output=True,
+                           input="".join(f"{sp}\n" for sp in specs).encode("utf-8"))
+    except (FileNotFoundError, OSError):
+        return {}
+    if p.returncode != 0:
+        return {}
+    data, pos, out = p.stdout, 0, {}
+    for spec in specs:
+        nl = data.find(b"\n", pos)
+        if nl < 0:
+            break
+        line = data[pos:nl]
+        pos = nl + 1
+        # `<nombre> missing` repite el nombre pedido, que puede llevar espacios
+        if line.endswith((b" missing", b" ambiguous")):
+            continue
+        header = line.rsplit(b" ", 2)
+        if len(header) != 3 or not header[2].isdigit():
+            continue
+        size = int(header[2])
+        if header[1] == b"blob":
+            out[spec] = data[pos:pos + size].decode("utf-8", "replace")
+        pos += size + 1                            # contenido + \n final
+    return out
+
+
 def _extract_syms_at(rel_id: str, project: str, source: str, ext: str) -> list:
     """[(sym_id, span_start, span_end)] de una versión histórica del archivo (re-extracción
     por lenguaje). Los ids son {project}/{path}::{qualname}: casan con el grafo actual."""
-    from .extractors import python_ast, ts_treesitter, ts_generic
+    from .extractors import python_ast, ts_treesitter, ts_generic, sql_lex
     from .model import NODE_SYMBOL
     try:
-        if ext == ".py":
+        if ext.lstrip(".") in sql_lex.EXTS:
+            nodes = sql_lex.extract(rel_id, project, source)[0]
+        elif ext == ".py":
             nodes = python_ast.extract(rel_id, project, source)[0]
         elif ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs") and ts_treesitter.available():
             nodes = ts_treesitter.extract(rel_id, project, source)[0]
@@ -633,6 +707,35 @@ def _extract_syms_at(rel_id: str, project: str, source: str, ext: str) -> list:
             for n in nodes if n.type == NODE_SYMBOL and n.span_start]
 
 
+# Sube si cambia CÓMO se calcula lo que toca un commit (invalida git_sha_touch).
+_FULL_SYM_VERSION = "1"
+
+
+def _touch_by_sha(top, shas, name, prefix, ext_ok, store, version) -> dict:
+    """{sha: [sym_id histórico tocado]} para un lote de commits, y lo persiste."""
+    ranges_by_sha = _changed_ranges_many(top, shas)
+    wanted = {}                                   # (sha, repo_rel) -> rangos
+    for sha in shas:
+        for repo_rel, ranges in (ranges_by_sha.get(sha) or {}).items():
+            if prefix and not repo_rel.startswith(prefix):
+                continue
+            if os.path.splitext(repo_rel)[1].lower() in ext_ok:
+                wanted[(sha, repo_rel)] = ranges
+    blobs = _cat_file_many(top, [f"{sha}:{rel}" for sha, rel in wanted])
+    rows = {sha: set() for sha in shas}
+    for (sha, repo_rel), ranges in wanted.items():
+        src = blobs.get(f"{sha}:{repo_rel}")
+        if not src:
+            continue
+        ext = os.path.splitext(repo_rel)[1].lower()
+        proj_rel = repo_rel[len(prefix):]
+        for sid, a, b in _extract_syms_at(f"{name}/{proj_rel}", name, src, ext):
+            if any(a <= e and b >= s for s, e in ranges):
+                rows[sha].add(sid)
+    store.sha_touch_set(name, version, rows)
+    return {sha: sorted(sids) for sha, sids in rows.items()}
+
+
 def _full_symbol_cochange(store, config, repos, st, log) -> int:
     """M1 (OPT-IN): co-cambio símbolo↔símbolo por HISTORIA COMPLETA. Aditivo.
 
@@ -642,38 +745,35 @@ def _full_symbol_cochange(store, config, repos, st, log) -> int:
     símbolos actuales cada sync (sin ids obsoletos). Emite provenance 'git-cochange-sym-full'
     (upsert: para pares que el blame ya halló, prevalece esta versión; los que solo halla el
     blame se conservan). Intra-proyecto (el cross-project lo maneja M8 por blame)."""
-    from .extractors import ts_generic
+    from .extractors import ts_generic, ts_treesitter, sql_lex
     sym_ids = {n["id"] for n in store.all_nodes(types=["symbol"])}
     if not sym_ids:
         return 0
     ext_ok = ({".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
-              | {"." + e for e in ts_generic._GRAMMAR_BY_EXT})
+              | {"." + e for e in ts_generic._GRAMMAR_BY_EXT}
+              | {"." + e for e in sql_lex.EXTS})
     depth = st.get("cochange_full_depth", 400)
     max_syms = st.get("cochange_max_symbols", 20)
     pair_cnt: dict = {}
-    cache: dict = {}
     for name, (root, top, _head) in repos.items():
         prefix = os.path.relpath(root, top).replace("\\", "/")
         prefix = "" if prefix == "." else prefix + "/"
         shas = (_git(["log", "--no-merges", f"-n{depth}", "--format=%H"], top) or "").split()
+        # Acumulador INCREMENTAL por SHA (deuda §2 saldada): cada commit se procesa UNA vez
+        # (diffs y blobs en lote) y se persiste qué símbolos históricos tocó; los sync
+        # siguientes solo pagan los commits nuevos. La intersección con los símbolos
+        # VIGENTES se hace aquí, en cada sync, así que no quedan ids obsoletos.
+        # La versión incluye si hay tree-sitter: sin él, lo que toca un commit en Go/TS/…
+        # sale vacío, y no debe quedar cacheado así cuando se instale.
+        parsers = f"ts{int(ts_treesitter.available())}"
+        version = f"{_FULL_SYM_VERSION}|{parsers}|{prefix}|{','.join(sorted(ext_ok))}"
+        known = store.sha_touch_get(name, version)
+        todo = [sha for sha in shas if sha not in known]
+        for i in range(0, len(todo), 100):
+            known.update(_touch_by_sha(top, todo[i:i + 100], name, prefix, ext_ok, store, version))
+        store.sha_touch_keep(name, shas)
         for sha in shas:
-            touched = set()
-            for repo_rel, ranges in _changed_ranges(top, sha).items():
-                if prefix and not repo_rel.startswith(prefix):
-                    continue
-                ext = os.path.splitext(repo_rel)[1].lower()
-                if ext not in ext_ok:
-                    continue
-                key = (sha, repo_rel)
-                if key not in cache:
-                    src = _git(["show", f"{sha}:{repo_rel}"], top)
-                    proj_rel = repo_rel[len(prefix):]
-                    cache[key] = (_extract_syms_at(f"{name}/{proj_rel}", name, src, ext)
-                                  if src else [])
-                for sid, a, b in cache[key]:
-                    if sid in sym_ids and any(a <= e and b >= s for s, e in ranges):
-                        touched.add(sid)
-            uniq = sorted(touched)
+            uniq = sorted(set(known.get(sha, ())) & sym_ids)
             if 1 < len(uniq) <= max_syms:        # ignora commits "barredera"
                 for i in range(len(uniq)):
                     for j in range(i + 1, len(uniq)):

@@ -143,7 +143,7 @@ def param_offsets(source: str, ext: str | None = None) -> dict:
     return out
 
 
-def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list]:
+def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list, list, dict]:
     ext = rel_path.rsplit(".", 1)[-1].lower()
     lang = _LANG_BY_EXT.get(ext, "javascript")
     src = source.encode("utf-8", "replace")
