@@ -1032,6 +1032,30 @@ class TestAuditM15(Base):
         self.assertIn("proj/a.py::f", store.all_node_ids())
         store.close()
 
+    def test_lsp_server_dying_before_initialize_falls_back(self):
+        # Un server que muere antes de leer el `initialize` (BrokenPipe al escribir) debe
+        # devolver None (sync prueba el siguiente candidato), no tumbar el runtime.
+        from memorygraf.runtime import lsp
+
+        class FakeProc:
+            def terminate(self): pass
+            def wait(self, timeout=None): pass
+            def kill(self): pass
+            def poll(self): return 1
+
+        class DeadClient:
+            def __init__(self, proc): self.diagnostics = {}
+            def _send(self, method, params, notify=False): raise BrokenPipeError(32, "Broken pipe")
+            def wait_response(self, *a, **k): return None
+
+        logs = []
+        with unittest.mock.patch.object(lsp.subprocess, "Popen", lambda *a, **k: FakeProc()), \
+             unittest.mock.patch.object(lsp, "_LspClient", DeadClient):
+            res = lsp._run_language(None, ("dead-ls", []), [], {"p": "."},
+                                    {"hover": False, "lsp_timeout": 0}, logs.append)
+        self.assertIsNone(res)
+        self.assertTrue(any("no arrancó" in m for m in logs))
+
 
 class TestDebtM15a(Base):
     """Deuda de M15a/M9 saldada: Java en layout Maven/Gradle, mismo paquete y wildcard

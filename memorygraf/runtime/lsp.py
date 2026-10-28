@@ -543,8 +543,12 @@ def _run_language(store, server, files, roots, rt, log, param_provider=None,
         # Se ESPERA la respuesta: un server roto (p. ej. typescript-language-server sin un
         # tsserver.js válido) responde con error y antes pasaba en silencio como "0 tipos".
         # Si solo tarda (jdtls indexando), se sigue igual que antes.
-        init = client.wait_response(client._send("initialize", init_params),
-                                    float(rt.get("lsp_init_timeout", 20)))
+        try:
+            rid = client._send("initialize", init_params)
+        except OSError:                    # murió antes de leer (BrokenPipe): no arrancó
+            log(f"runtime/lsp: {os.path.basename(binary)} no arrancó: terminó al iniciar")
+            return None
+        init = client.wait_response(rid, float(rt.get("lsp_init_timeout", 20)))
         if (init or {}).get("error") or (init is None and proc.poll() is not None):
             why = ((init or {}).get("error") or {}).get("message") or "terminó al iniciar"
             log(f"runtime/lsp: {os.path.basename(binary)} no arrancó: {why.splitlines()[0][:160]}")
