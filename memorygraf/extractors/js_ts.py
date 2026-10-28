@@ -28,7 +28,7 @@ def _line_of(source: str, idx: int) -> int:
     return source.count("\n", 0, idx) + 1
 
 
-def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list]:
+def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list, list, dict]:
     nodes, edges, raw_imports = [], [], []
     fid = file_id(rel_path)
     ext = rel_path.rsplit(".", 1)[-1].lower()

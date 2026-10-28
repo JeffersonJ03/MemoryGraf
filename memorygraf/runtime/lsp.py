@@ -337,12 +337,12 @@ def _collect_types(store, client, opened, file_lines, rt, log=lambda m: None,
         params_by_qual = {}
         locals_by_qual = {}
         ext = fid.rsplit(".", 1)[-1].lower() if "." in fid else ""
-        if want_params:
+        if want_params and param_provider:
             try:
                 params_by_qual = param_provider("\n".join(lines), ext) or {}
             except Exception:
                 params_by_qual = {}
-        if want_locals:
+        if want_locals and local_provider:
             try:
                 locals_by_qual = local_provider("\n".join(lines), ext) or {}
             except Exception:

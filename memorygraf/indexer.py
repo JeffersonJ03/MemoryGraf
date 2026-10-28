@@ -393,8 +393,8 @@ def _xcode_membership(text: str):
     proyecto; las del SDK/absolutas no cuentan). Un archivo en las "Compile Sources" de
     VARIOS targets queda como compartido ("")."""
     root = _parse_pbxproj(text)
-    objs = (root or {}).get("objects") if isinstance(root, dict) else None
-    if not isinstance(objs, dict):
+    objs = root.get("objects") if isinstance(root, dict) else None
+    if not isinstance(root, dict) or not isinstance(objs, dict):
         return {}, {}
     proj = objs.get(root.get("rootObject")) or {}
     ref_path, sync_path = {}, {}
@@ -1184,7 +1184,7 @@ class Indexer:
             head = raw.split(".")[0]
             self._ex_module_files(project, raw)          # asegura el índice perezoso
             return any(p == project and (m == head or m.startswith(head + "."))
-                       for p, m in self._ex_modules)
+                       for p, m in self._ex_modules or {})
         if g == "dart":
             own = self.dart_package.get(project)
             return ":" not in raw or bool(own and raw.startswith(f"package:{own}/"))

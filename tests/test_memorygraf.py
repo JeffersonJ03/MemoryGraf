@@ -27,7 +27,7 @@ class Base(unittest.TestCase):
         self.proj = os.path.join(self.tmp, "proj")
         os.makedirs(self.proj)
         self.db = os.path.join(self.tmp, "g.db")
-        self.config = {"projects": [{"name": "proj", "root": self.proj}]}
+        self.config: dict = {"projects": [{"name": "proj", "root": self.proj}]}
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -2158,6 +2158,8 @@ def _fake_local_llm_cm(llm):
 
 class _GitRepo:
     """Mixin con helpers para crear un repo git real de prueba (sin tests propios)."""
+    proj: str        # los pone Base.setUp (el mixin siempre va con Base)
+    config: dict
 
     def _git(self, *args):
         subprocess.run(["git", *args], cwd=self.proj, check=True,
@@ -2256,6 +2258,7 @@ class TestFullHistoryIncremental(_GitRepo, Base):
     def test_batched_ranges_match_per_commit(self):
         self._history()
         top = git_layer._toplevel(self.proj)
+        assert top is not None
         shas = (git_layer._git(["log", "--format=%H"], top) or "").split()
         many = git_layer._changed_ranges_many(top, shas)
         self.assertEqual(many, {sha: git_layer._changed_ranges(top, sha) for sha in shas})
@@ -2288,7 +2291,8 @@ class TestFullHistoryIncremental(_GitRepo, Base):
         self.write("m.c", "".join(lines))
         self._commit("c2")
         top = git_layer._toplevel(self.proj)
-        sha = git_layer._git(["rev-parse", "HEAD"], top).strip()
+        assert top is not None
+        sha = (git_layer._git(["rev-parse", "HEAD"], top) or "").strip()
         single = git_layer._changed_ranges(top, sha)
         self.assertEqual(single, {"m.c": [(4, 4), (27, 27)]})
         self.assertEqual(git_layer._changed_ranges_many(top, [sha]), {sha: single})
@@ -2300,6 +2304,7 @@ class TestFullHistoryIncremental(_GitRepo, Base):
         self.write("a b.c", "int x;\n")
         self._commit("c1")
         top = git_layer._toplevel(self.proj)
+        assert top is not None
         blobs = git_layer._cat_file_many(top, ["HEAD:no pe.c", "HEAD:a b.c"])
         self.assertEqual(blobs, {"HEAD:a b.c": "int x;\n"})
 
@@ -2358,6 +2363,7 @@ class TestGitLayer(_GitRepo, Base):
         self.assertIsNotNone(g)
         self.assertEqual(g["churn"], 2)
         top = git_layer._toplevel(self.proj)
+        assert top is not None
         sha = (git_layer._git(["rev-parse", "HEAD"], top) or "").strip()
         self.assertIn("ñandú.py", git_layer._changed_ranges(top, sha))
         self.assertIn("ñandú.py", git_layer._changed_ranges_many(top, [sha])[sha])
