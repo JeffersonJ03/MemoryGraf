@@ -1310,7 +1310,12 @@ class Indexer:
             try:
                 return ts_generic.extract(rel_id, project, source)
             except Exception:
-                pass
+                # Un fallo del extractor genérico degrada a nodo `file` (como sin
+                # tree-sitter), etiquetado con su gramática: el regex de JS leería un
+                # Ruby/Kotlin/SQL… como JavaScript y lo marcaría como tal.
+                grammar = ts_generic._GRAMMAR_BY_EXT.get(ext[1:], "code")
+                return ([Node(id=rel_id, type=NODE_FILE, name=rel_id.split("/")[-1],
+                              project=project, path=rel_id, tags=[grammar])], [], [], [], {})
         return js_ts.extract(rel_id, project, source)
 
     def _resolve_imports(self):

@@ -1105,6 +1105,17 @@ class TestAuditM15(Base):
         self.assertFalse(refs & {"on", "app_user", "db"})
         self.assertFalse({nm for _o, nm, k in out if k == "call"})
 
+    def test_generic_extractor_failure_degrades_to_file_node(self):
+        # Antes caía al regex de JS: un Kotlin salía etiquetado `js` con símbolos de JS.
+        from memorygraf.extractors import ts_generic
+        self.write("a.kt", "class Repo {\n  fun load() = fetch()\n}\nfunction x() {}\n")
+        with unittest.mock.patch.object(ts_generic, "extract", side_effect=RuntimeError("boom")):
+            store, _ = self.index()
+        nodes = {n["id"]: n for n in store.all_nodes()}
+        self.assertEqual(nodes["proj/a.kt"]["tags"], ["kotlin"])
+        self.assertFalse([i for i in nodes if i.startswith("proj/a.kt::")])
+        store.close()
+
 
 class TestDebtM15a(Base):
     """Deuda de M15a/M9 saldada: Java en layout Maven/Gradle, mismo paquete y wildcard
