@@ -3519,14 +3519,22 @@ class TestRuntimeLsp(Base):
 
     def test_sync_skips_language_without_server(self):
         # M4: con archivos .ts pero sin typescript-language-server, ese lenguaje se
-        # omite con degradación elegante (no crashea, lo reporta en 'missing').
+        # omite con degradación elegante (no crashea, lo reporta en 'missing'). El test
+        # AÍSLA la búsqueda de servidores (no depende de lo instalado en la máquina: antes
+        # se saltaba donde hay typescript-language-server o un TypeScript 7 global).
         from memorygraf.runtime import lsp
-        if lsp._find_lang_server(lsp._LANGUAGES[1]):
-            self.skipTest("hay typescript-language-server; este caso prueba su AUSENCIA")
+        real_which = lsp.shutil.which
+        hidden = {name for name, *_rest in lsp._LANGUAGES[1]["servers"]}
+
+        def which(cmd, *a, **k):
+            return None if os.path.basename(cmd) in hidden else real_which(cmd, *a, **k)
+
         self.write("app.ts", "export function suma(a: number, b: number): number {\n"
                              "  return a + b;\n}\n")
         store, _ = self.index()
-        r = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
+        with unittest.mock.patch.object(lsp.shutil, "which", which):
+            self.assertIsNone(lsp._find_lang_server(lsp._LANGUAGES[1]))
+            r = lsp.sync(store, {**self.config, "runtime": {"lsp": True}})
         self.assertFalse(r["enabled"])
         self.assertEqual(r["reason"], "sin language-server")
         self.assertIn("typescript", r.get("missing", []))
