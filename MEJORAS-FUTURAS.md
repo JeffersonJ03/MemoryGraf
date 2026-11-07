@@ -1,8 +1,9 @@
 # MemoryGraf — Deuda consciente y validación pendiente
 
 > **Estado (2026-10-27).** El backlog **M1–M12 está IMPLEMENTADO y probado**, y del anexo
-> M13–M20 ya entraron **M14 (`path A B`)** y **M15 completo**: M15a (Ruby, Kotlin, Swift,
-> Dart), M15b (Scala, Lua, Elixir, Bash) y M15c (SQL, Terraform/HCL, PowerShell); y la deuda registrada (§2 coste incremental de M1, deuda de
+> M13–M20 ya entraron **M14 (`path A B`)** y **M15a–c**: M15a (Ruby, Kotlin, Swift,
+> Dart), M15b (Scala, Lua, Elixir, Bash) y M15c (SQL, Terraform/HCL, PowerShell), 23 lenguajes
+> en total (M15d, propuesto, lleva a 36); y la deuda registrada (§2 coste incremental de M1, deuda de
 > M15a incluidos sus dos últimos límites, Java Maven/Gradle, LSP con TS 7) está **saldada**. Desde julio, además: **CI** en cada PR (Linux +
 > Windows nativo, modos portable y potencia; PR #13–#16 corrigieron los bugs que destapó)
 > e **imagen Docker** (`Dockerfile`). La fuente de verdad es el **código + los tests
@@ -15,6 +16,9 @@
 > Complementa `DESIGN.md` (principios §3, vinculantes).
 
 > **▶ Siguiente paso (actualizar al cerrar cada hito).**
+> 0. **M15d**: Erlang, Haskell, Perl, Clojure, Zig, Objective-C y Solidity cierran la meta de
+>    M15 (23 → 30); OCaml, F#, Julia, Protobuf, GraphQL y COBOL la llevan a 36. Sin
+>    dependencias nuevas.
 > 1. **M16** (instaladores multi-host): cierra el paquete de mayor retorno por esfuerzo
 >    junto con M14 y M15.
 > 2. Luego **M13** (comunidades) y **M17** (always-on). §9 sigue abierto en paralelo.
@@ -273,7 +277,7 @@ CLI o enriqueciendo tools existentes, no como tool nueva. Lo que no cumple está
 |---|---|---|---|:--:|
 | **M13** | Comunidades / subsistemas | La única capacidad **analítica** que Graphify tiene y MemoryGraf no | Medio | **Alto** |
 | **M14** ✅ | `path A B` — cómo se conectan dos nodos | Consulta que hoy no existe (hay `neighbors`, no camino) | **Bajo** | **Alto** |
-| **M15** (a ✅) | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; hoy MemoryGraf no sirve en repos Kotlin/Swift/Ruby | **Bajo** | **Alto** |
+| **M15** (a–c ✅, d propuesta) | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; con M15a–c, 23; M15d lleva a 36 | **Bajo** | **Alto** |
 | **M16** | Instaladores multi-host | `install claude` es el único; el resto es copiar JSON a mano | **Bajo** | **Alto** |
 | **M17** | Always-on: hooks de git + instrucciones de agente | El grafo se queda obsoleto y el asistente no lo usa por su cuenta | Bajo-medio | **Alto** |
 | **M18** | Exportadores (GraphML / Cypher / Obsidian / wiki) | Hoy solo JSON + HTML | Bajo | Medio |
@@ -387,7 +391,7 @@ trivial, datos ya en memoria, cero dependencias.
 
 ---
 
-### M15 · Ampliar la matriz de gramáticas (~12 → ~30 lenguajes)  (COMPLETO ✅: M15a 2026-10-26, M15b y M15c 2026-10-27)
+### M15 · Ampliar la matriz de gramáticas (~12 → ~30 lenguajes)  (M15a–c ✅: M15a 2026-10-26, M15b y M15c 2026-10-27 · M15d PROPUESTA: 23 → 36)
 
 **Hecho — M15a (2026-10-26).** Ruby (`.rb`), Kotlin (`.kt`/`.kts`), Swift (`.swift`) y Dart
 (`.dart`) entran con **símbolos + `defines` + `calls` intra-archivo + `imports`/`calls`
@@ -580,6 +584,177 @@ que NO debe generar arista). Skip limpio si la gramática no está instalada.
 **Riesgo/Esfuerzo.** **Bajo por lenguaje**, pero se multiplica: presupuestar ~1 corrida por
 grupo, no por lenguaje. Riesgo acotado — si una gramática falla, ese lenguaje se omite y el
 resto del `sync` sigue (degradación ya implementada).
+
+### M15d · Cerrar y superar la meta de M15: de 23 a 36 lenguajes  (PROPUESTA, 2026-10-28)
+
+**Contexto.** M15a–c dejan **23 lenguajes**: los 12 de partida (C, C++, Java, C#, Go,
+Rust, PHP, R, VB, asm, Python, JS/TS) más los 11 nuevos. El título de M15 prometía **~30**
+y Graphify cubre 36. Faltan **7** para la meta; M15d entra con **13** (cuatro grupos) y
+deja MemoryGraf a la par de Graphify. Igual que antes, el coste de gramática ya
+está pagado: **todas las gramáticas de abajo vienen en `tree-sitter-language-pack` 1.13.3**,
+que ya es dependencia del extra `parsers`. M15d **no añade dependencias**. Verificado
+2026-10-28 cargando cada gramática y parseando un fragmento sin `ERROR`; están empaquetadas
+y no se descarga nada.
+
+**Criterio de selección.** Demanda real **y** que el lenguaje haga explícito a quién se
+llama. Gana el lenguaje cuyo módulo es el **nombre de archivo** o un **header declarado**
+(como Kotlin), o cuya llamada cross-file lleva el módulo **escrito** (`mod:f`, `ns/f`,
+`Mod::f`). Esos entran con cross-file sin adivinar nada.
+
+**M15d-1 — la meta (7 lenguajes, resolución clara).** Con estos se llega a **30**.
+
+| Lenguaje | Ext. | Imports | Calls cross-file | Particularidad del AST (sondeado) |
+|---|---|---|---|---|
+| **Erlang** | `.erl` `.hrl` | `-include("x.hrl")` relativo, o `include/` de la app; `-include_lib("app/include/x.hrl")` → directorio de la app | `mod:f(...)` (nodo `remote`) → `f` en el archivo `mod.erl`. El nombre de módulo es **global en la VM** y debe coincidir con el archivo, así que la unicidad es la semántica del lenguaje, no una heurística. `?MODULE:f` → mismo archivo. Sin archivo (`lists:map`) → `external:lists` | `fun_decl`, `module_attribute`, `export_attribute`, `call`/`remote`/`remote_module` |
+| **Haskell** | `.hs` | `import [qualified] A.B [as X] [(f, g)]` → el archivo cuyo **header** es `module A.B` (no la ruta, como Kotlin con `package`), si es único | `X.f` con `as X` → `f` en `A.B`; `f` de una lista de import explícita → `A.B`; `import` abierto sin lista → solo si `f` no es local y lo define **uno solo** de los módulos abiertos | `header`/`module_id`, `imports`/`import`, `function`, `signature`, `data_type`, `class`; el `instance` cuelga del tipo, no se enlaza |
+| **Perl** | `.pm` `.pl` `.t` | `use A::B` → archivo con `package A::B;` (`lib/A/B.pm` por convención, pero manda el header), si es único; `require "x.pl"` relativo | `A::B::f()` → `sub f` del paquete; `A::B->new` → `A::B::new`; `use A::B qw(f)` explícito → `f`. **Sin arista** en `$obj->m` (dinámico) | `package_statement`, `use_statement`, `require_expression`, `subroutine_declaration_statement`, `function_call_expression` |
+| **Clojure** | `.clj` `.cljs` `.cljc` | `(ns a.b (:require [c.d :as u] [e.f :refer [g]]))` → archivo con `(ns c.d)`, si es único (el `-` del ns es `_` en el nombre de archivo) | `u/f` → `f` en `c.d`; `g` de `:refer [g]` → `e.f`; `:refer :all` → solo si es único. Desde `.cljs` se prefiere `.cljs`/`.cljc` y desde `.clj`, `.clj`/`.cljc` (un ns puede existir en ambas plataformas) | **Todo es `list_lit`**: la semántica sale del primer símbolo (`ns`, `defn`, `defn-`, `def`, `defmacro`, `defprotocol`, `defrecord`, `deftype`, `defmulti`/`defmethod`). Hace falta un recorrido propio, como en Elixir; `sym_ns` + `sym_name` dan `u/f` ya separado |
+| **Zig** | `.zig` | `@import("x.zig")` relativo al archivo; `@import("std")` → `external:std`; un nombre de módulo de `build.zig` (`addModule("m", .{ .root_source_file = b.path("src/m.zig") })`) → ese archivo, con lectura estática y **solo literales** (como Xcode y Gradle) | `const u = @import(...)` + `u.f()` → `pub fn f` de ese archivo. Un archivo es un struct, así que `const S = struct { pub fn m() }` → `S.m` | Gramática estilo PEG: `Decl`, `FnProto`, `VarDecl`, `ContainerDecl`, `BUILTINIDENTIFIER` (`@import`), `SuffixExpr`/`FnCallArguments` |
+| **Objective-C** | `.m` `.mm` (+ `.h` por contenido, ver abajo) | `#import "Foo.h"` → **la misma regla que C hoy** (ruta exacta y, si no, stem); `@import UIKit` y `#import <UIKit/…>` → `external:` | `[Foo greet:x]` con receptor **nombre de clase** declarado en un `@interface` de un header importado → método `Foo.greet:` del `@implementation`. Funciones C → regla `_c_call_candidates`. **Sin arista** en `[obj m]` con receptor instancia (v1) | `class_interface`/`class_implementation`, `method_declaration`/`method_definition`, `message_expression`, `module_import`, `preproc_include`. Los métodos se nombran por **selector completo** (`greet:with:`); una categoría `@interface Foo (X)` cuelga de `Foo` |
+| **Solidity** | `.sol` | `import "./X.sol"` y `import {A} from "./X.sol"` relativos; `@openzeppelin/…` → `remappings.txt`/`foundry.toml` si mapea a un directorio del repo, si no `external:@openzeppelin/contracts` | `Lib.f()` → `f` de la `library`/`contract` importada; `f()` interno → el propio contrato y luego la cadena `is A, B` (solo padres **importados** y con nombre único) | `contract_declaration` (también `library`/`interface`), `inheritance_specifier`, `function_definition`, `import_directive`; `modifier`, `event` y `struct` como símbolos |
+
+**Choques de extensión (nuevo en el motor, junto con la normalización de COBOL).** Hoy `_GRAMMAR_BY_EXT` es 1:1. M15d
+necesita un **sniff de contenido** en tres extensiones, y ante la duda gana el
+comportamiento actual:
+- **`.h`**: sigue siendo C/C++ salvo que las primeras ~8 KB tengan `@interface`,
+  `@protocol`, `@class` o `#import` → Objective-C. Un header de C nunca cambia de lenguaje
+  por accidente; test de precisión con un `.h` de C que menciona `@interface` en un
+  comentario.
+- **`.m`**: Objective-C solo con esas mismas pistas; si no (MATLAB, Mercury), el archivo no
+  se indexa con gramática y degrada a nodo `file`.
+- **`.pl`**: Perl salvo pistas de Prolog (cláusulas `:-` a inicio de línea sin `use` ni
+  `sub`) → nodo `file`.
+
+**M15d-2 — cross-file ambiguo (regla de M15b).** Entran con símbolos y
+`calls` intra-archivo; el cross-file **solo si sale inequívoco** y, si no, se declaran
+symbols-only en `doctor`:
+- **OCaml** (`.ml`/`.mli`): el módulo es el nombre de archivo capitalizado (`util.ml` →
+  `Util`), así que `Util.f` va a `util.ml` si es **único** en el proyecto. Con dune,
+  `(library (name x))` lo envuelve en `X.Util`; dos librerías con `util.ml` → sin arista.
+  El `.mli` se enlaza con su `.ml`. Nodos: `value_definition`/`let_binding`,
+  `module_definition`, `type_definition`, `value_path`/`module_path`, `open_module`.
+- **F#** (`.fs`/`.fsi`/`.fsx`): el orden de compilación del `.fsproj` (`<Compile Include>`)
+  manda; un archivo solo ve lo que se compila **antes**, y eso reduce los candidatos de
+  forma exacta. `open`, `module`, `namespace`. Nodos: `named_module`, `import_decl`,
+  `function_or_value_defn`, `type_definition`, `long_identifier`.
+- **Julia** (`.jl`): `include("x.jl")` es inclusión textual (lo incluido pertenece al módulo
+  que incluye); `using .Util` y `import ..X` son relativos. Despacho múltiple: varios
+  métodos `f` en el mismo módulo son **una** función, así que la arista va a la función y no
+  se elige método. Nodos: `module_definition`, `function_definition`, `struct_definition`,
+  `using_statement`, `call_expression`, `field_expression`.
+
+**M15d-3 — contratos de servicio (como M15c).** Aristas `references` con
+procedencia `ast-ref` → EXTRACTED:
+- **Protobuf** (`.proto`): `import "a/b.proto"` contra las raíces de `buf.yaml` o, si no
+  hay, relativo; `common.Money` → `message Money` del `package common`; `rpc` → nodos
+  con `references` a su request y response. Nodos: `message`, `service`, `rpc`, `enum`,
+  `package`, `import`, `message_or_enum_type`.
+- **GraphQL** (`.graphql`/`.gql`): `type`/`interface`/`enum`/`input`, `extend type` cuelga
+  del tipo, campos → `references` al tipo. Sin enlazar operaciones de cliente con el
+  esquema (eso es otra cosa).
+
+**M15d-4 — COBOL (mainframe).** No lo tenemos hoy: ni extensión ni regla. Es donde vive la
+lógica de banca, seguros y telecomunicaciones, y un grafo vale más justo en esos sistemas,
+porque son grandes y nadie los recuerda enteros.
+- **Extensiones:** `.cbl`, `.cob`, `.cobol` y `.cpy` (copybooks).
+- **Símbolos:** el programa (`PROGRAM-ID`), los párrafos y secciones de la PROCEDURE
+  DIVISION y los registros de nivel 01. Los programas anidados (`END PROGRAM`) cuelgan de
+  su padre. Los nombres no distinguen mayúsculas.
+- **Aristas:**
+  - `PERFORM X` y `PERFORM A THRU B` → `calls` al párrafo, dentro del mismo programa.
+  - `CALL 'PGM'` con **literal** → el archivo cuyo `PROGRAM-ID` es `PGM`, si es único. El
+    nombre de programa es global en la librería de carga, como el módulo en Erlang.
+  - `COPY EMPREC` → `imports` al copybook `EMPREC.cpy` (o `.cbl`) del repo, si es único,
+    sin expandirlo; `REPLACING` no cambia la arista.
+  - `EXEC CICS LINK/XCTL PROGRAM('X')` → `calls` a `X`, solo con literal.
+  - `EXEC SQL …` → el bloque pasa por **`sql_lex`** (M15c) y sus `references` caen en las
+    tablas del DDL ya indexado. Así el COBOL queda conectado con el esquema DB2 del mismo
+    repo.
+  - **Sin arista** en `CALL WS-PGM` (dinámico, el nombre está en una variable).
+- **Particularidad de la gramática (verificado 2026-10-28):** solo entiende **formato fijo**
+  (área A desde la columna 8) y da `ERROR` en `EXEC CICS`. Mitigación **probada**, que
+  normaliza antes de parsear sin mover ninguna línea:
+  1. Cada bloque `EXEC … END-EXEC` se extrae de forma léxica y luego se reemplaza por
+     espacios, conservando los saltos de línea.
+  2. El formato libre (`>>SOURCE FORMAT FREE`, o sin números de secuencia ni área A) se
+     convierte a fijo prefijando 7 espacios a cada línea.
+
+  Con eso, un fuente con números de secuencia, comentarios en la columna 7, `EXEC SQL` y
+  `EXEC CICS`, y otro en formato libre, parsean sin `ERROR` y con los números de línea
+  originales. Nodos: `program_name`, `paragraph_header`, `perform_procedure`,
+  `call_statement`, `copy_statement`.
+
+M15d-1 cumple la meta (**30**); M15d-2 lleva a 33, M15d-3 a 35 y M15d-4 a **36**, a la par
+de Graphify.
+
+**Descartados, con el porqué:**
+- **Groovy**: la gramática del pack es **superficial**. `class A { def run() {…} }` sale como
+  una lista de `command`, sin nodos de clase ni de método (verificado 2026-10-28). Con eso no
+  se pueden dar ni símbolos. Los builds de Gradle ya los lee la deuda saldada de Java
+  Maven/Gradle, y los manifiestos van a M21.
+- **MATLAB**: choca con `.m` y la demanda entre los usuarios objetivo es baja.
+- **Vala**: no está en el pack.
+- **Make/CMake/Nix/Starlark**: son configuración de build, no código con símbolos; su sitio
+  es **M21** (manifiestos, runtimes).
+- **Vue/Svelte/Astro**: mucha demanda, pero no son una gramática más. Hay que extraer el
+  bloque `<script>` y pasarlo por el extractor TS/JS existente con desplazamiento de línea,
+  y resolver `import X from './C.vue'`. Es otro mecanismo (lenguaje incrustado), así que se
+  propone aparte como **M15e** en lugar de meterlo aquí.
+
+**Regla que no se negocia** (la de M15): precisión primero. Cada lenguaje de M15d-1 entra con
+cross-file porque su resolución es inequívoca; si en la validación en vivo aparece una arista
+falsa que no se pueda cerrar, ese lenguaje baja a symbols-only antes que meter enlaces
+adivinados.
+
+**Pruebas.**
+- **Fixture por lenguaje:** el patrón M9/M15 de siempre en `tests/fixtures/crossfile/<lang>/`.
+  Dos archivos o más, con los símbolos esperados y los `calls`/`imports` esperados.
+- **`TestPrecisionM15d`:** al menos un caso que NO debe enlazar por lenguaje, verificado
+  por mutación como en `TestPrecisionM15a`:
+  - Erlang: `lists:map` no apunta a un `lists.erl` inexistente.
+  - Haskell: dos módulos abiertos que definen `f`.
+  - Perl: `$obj->m`.
+  - Clojure: el mismo ns en `.clj` y `.cljs`.
+  - Zig: `@import` de un módulo de build que no es literal.
+  - Objective-C: `[obj m]` con receptor instancia.
+  - Solidity: un padre `is X` que no se importa.
+  - OCaml: dos librerías dune con `util.ml`.
+  - F#: un símbolo que se compila **después** del llamante.
+  - Julia: `f` definida en dos módulos no relacionados.
+  - Protobuf: `Money` en dos paquetes sin calificar.
+  - COBOL: `CALL WS-PGM` dinámico, y dos programas con el mismo `PROGRAM-ID`.
+- **Sniff de extensión:** un `.h` de C (incluido el caso del comentario), un `.h` de
+  Objective-C, un `.m` de MATLAB y un `.pl` de Prolog.
+- **Normalización COBOL:** formato fijo con números de secuencia, formato libre y bloques
+  `EXEC SQL`/`EXEC CICS`, con aserción de los números de línea de cada símbolo.
+- **Portable:** skip limpio sin tree-sitter, como hoy.
+
+**Validación en vivo** (un repo real por lenguaje, como en M15a–c):
+
+| Lenguaje | Repo |
+|---|---|
+| Erlang | cowboy |
+| Haskell | ShellCheck |
+| Perl | Mojolicious |
+| Clojure | ring |
+| Zig | zls |
+| Objective-C | SDWebImage |
+| Solidity | openzeppelin-contracts |
+
+M15d-2 se valida con dune, Fantomas y DataFrames.jl; M15d-3 con googleapis (un
+subconjunto) y un esquema GraphQL público; M15d-4 con **CardDemo** de AWS (COBOL + CICS +
+DB2 + copybooks: ejercita todas las aristas de arriba).
+
+**Riesgo/Esfuerzo.** **Bajo-medio.**
+- Cinco de los siete son relleno de tablas (`_GRAMMAR_BY_EXT`, `_SPEC`, `_CALLS`,
+  `_IMPORT_NODES`) más su regla en el `indexer`.
+- Lo distinto es Clojure, que necesita un recorrido propio (todo es `list_lit`), el sniff de
+  `.h`/`.m`/`.pl`, que es pequeño pero toca C, la lectura estática de `build.zig` y la
+  normalización previa de COBOL (más su enlace con `sql_lex`).
+- Presupuesto: una corrida para M15d-1 (dividida en Erlang/Haskell/Perl/Zig/Solidity y
+  luego Clojure/Objective-C) y una por cada grupo siguiente (M15d-2, M15d-3, M15d-4).
+- Riesgo acotado igual que en M15: si una gramática falla, ese lenguaje se omite y el
+  `sync` sigue.
 
 ---
 
