@@ -412,7 +412,7 @@ def _blame_symbols(store, config, repos, st, log) -> int:
         if line_sha is None:
             continue
         for sym in symbols:
-            _attr_symbol(store, sym, line_sha, meta, st)
+            _attr_symbol(store, sym, line_sha, meta or {}, st)   # meta=None solo si line_sha=None
         if chash:
             store.git_blame_mark(fid, chash)
         blamed += 1

@@ -225,7 +225,7 @@ class Server:
             sys.stderr.write(f"[memorygraf] índice recargado (sync v{current})\n")
             sys.stderr.flush()
 
-    def call_tool(self, name: str, args: dict) -> str:
+    def call_tool(self, name: str | None, args: dict) -> str:
         self._maybe_reload()
         q = self.query
         if name == "overview":
