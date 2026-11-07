@@ -3,8 +3,9 @@
 > **Estado (2026-11-07).** El backlog **M1–M12 está IMPLEMENTADO y probado**, y del anexo
 > M13–M20 ya entraron **M14 (`path A B`)**, **M15a–c**: M15a (Ruby, Kotlin, Swift,
 > Dart), M15b (Scala, Lua, Elixir, Bash) y M15c (SQL, Terraform/HCL, PowerShell), y
-> **M15d-1** (Erlang, Haskell, Perl, Zig, Solidity, Clojure y Objective-C): **30 lenguajes,
-> la meta de M15** (el resto de M15d lleva a 36); y la deuda registrada (§2 coste incremental de M1, deuda de
+> **M15d-1** (Erlang, Haskell, Perl, Zig, Solidity, Clojure y Objective-C: **30 lenguajes,
+> la meta de M15**) y **M15d-2** (OCaml, F#, Julia): 33 (M15d-3 y -4 llevan a 36); y la deuda
+> registrada (§2 coste incremental de M1, deuda de
 > M15a incluidos sus dos últimos límites, Java Maven/Gradle, LSP con TS 7) está **saldada**. Desde julio, además: **CI** en cada PR (Linux +
 > Windows nativo, modos portable y potencia; PR #13–#16 corrigieron los bugs que destapó)
 > e **imagen Docker** (`Dockerfile`). La fuente de verdad es el **código + los tests
@@ -17,8 +18,8 @@
 > Complementa `DESIGN.md` (principios §3, vinculantes).
 
 > **▶ Siguiente paso (actualizar al cerrar cada hito).**
-> 0. **M15d**: M15d-1 hecho (23 → 30, meta de M15 cumplida). Siguen M15d-2 (OCaml, F#,
->    Julia), M15d-3 (Protobuf, GraphQL) y M15d-4 (COBOL), hasta 36. Sin dependencias nuevas.
+> 0. **M15d**: M15d-1 y M15d-2 hechos (23 → 33; la meta de M15, 30, cumplida). Siguen
+>    M15d-3 (Protobuf, GraphQL) y M15d-4 (COBOL), hasta 36. Sin dependencias nuevas.
 > 1. **M16** (instaladores multi-host): cierra el paquete de mayor retorno por esfuerzo
 >    junto con M14 y M15.
 > 2. Luego **M13** (comunidades) y **M17** (always-on). §9 sigue abierto en paralelo.
@@ -49,6 +50,7 @@
 | M15b | **Scala, Lua, Elixir, Bash**: ídem, cross-file solo donde es inequívoco | `ts_generic` + `indexer`. Ver §M15. |
 | M15c | **SQL** (extractor léxico propio, todos los dialectos, incluido PL/SQL), **Terraform/HCL**, **PowerShell** | `sql_lex` + `ts_generic` + `indexer`. Ver §M15. |
 | M15d-1 | **Erlang, Haskell, Perl, Zig, Solidity, Clojure, Objective-C**: símbolos + `calls` intra + `imports`/`calls` cross-file; sniff de `.pl` (Prolog), `.h` y `.m` | `ts_generic` + `indexer`. Ver §M15d. |
+| M15d-2 | **OCaml, F#, Julia**: ídem, por nombre completo y solo donde es inequívoco | `ts_generic` + `indexer`. Ver §M15d. |
 
 Cada mejora entró con **test de regresión** y verificación en vivo (regla DESIGN §11).
 
@@ -278,7 +280,7 @@ CLI o enriqueciendo tools existentes, no como tool nueva. Lo que no cumple está
 |---|---|---|---|:--:|
 | **M13** | Comunidades / subsistemas | La única capacidad **analítica** que Graphify tiene y MemoryGraf no | Medio | **Alto** |
 | **M14** ✅ | `path A B` — cómo se conectan dos nodos | Consulta que hoy no existe (hay `neighbors`, no camino) | **Bajo** | **Alto** |
-| **M15** (a–c ✅, d en curso) | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; con M15a–c, 23; con M15d-1, 30; M15d lleva a 36 | **Bajo** | **Alto** |
+| **M15** (a–c ✅, d en curso) | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; con M15a–c, 23; con M15d-1, 30; con M15d-2, 33; M15d lleva a 36 | **Bajo** | **Alto** |
 | **M16** | Instaladores multi-host | `install claude` es el único; el resto es copiar JSON a mano | **Bajo** | **Alto** |
 | **M17** | Always-on: hooks de git + instrucciones de agente | El grafo se queda obsoleto y el asistente no lo usa por su cuenta | Bajo-medio | **Alto** |
 | **M18** | Exportadores (GraphML / Cypher / Obsidian / wiki) | Hoy solo JSON + HTML | Bajo | Medio |
@@ -392,7 +394,7 @@ trivial, datos ya en memoria, cero dependencias.
 
 ---
 
-### M15 · Ampliar la matriz de gramáticas (~12 → ~30 lenguajes)  (M15a–c ✅: M15a 2026-10-26, M15b y M15c 2026-10-27 · M15d EN CURSO: 23 → 30 → 36)
+### M15 · Ampliar la matriz de gramáticas (~12 → ~30 lenguajes)  (M15a–c ✅: M15a 2026-10-26, M15b y M15c 2026-10-27 · M15d EN CURSO: 23 → 33 → 36)
 
 **Hecho — M15a (2026-10-26).** Ruby (`.rb`), Kotlin (`.kt`/`.kts`), Swift (`.swift`) y Dart
 (`.dart`) entran con **símbolos + `defines` + `calls` intra-archivo + `imports`/`calls`
@@ -586,7 +588,7 @@ que NO debe generar arista). Skip limpio si la gramática no está instalada.
 grupo, no por lenguaje. Riesgo acotado — si una gramática falla, ese lenguaje se omite y el
 resto del `sync` sigue (degradación ya implementada).
 
-### M15d · Cerrar y superar la meta de M15: de 23 a 36 lenguajes  (PROPUESTA 2026-10-28 · M15d-1 ✅ 2026-11-07)
+### M15d · Cerrar y superar la meta de M15: de 23 a 36 lenguajes  (PROPUESTA 2026-10-28 · M15d-1 y M15d-2 ✅ 2026-11-07)
 
 **Hecho — M15d-1 (2026-11-07).** Erlang, Haskell, Perl, Zig, Solidity, Clojure y
 Objective-C entran con
@@ -684,7 +686,29 @@ comportamiento actual:
 - **`.pl`**: Perl salvo pistas de Prolog (cláusulas `:-` a inicio de línea sin `use` ni
   `sub`) → nodo `file`.
 
-**M15d-2 — cross-file ambiguo (regla de M15b).** Entran con símbolos y
+**Hecho — M15d-2 (2026-11-07).** Los tres entran con cross-file (ninguno symbols-only),
+resuelto por **nombre completo**: prefijo de módulo del archivo + nombre del símbolo, buscado
+en los archivos que el llamante puede ver; los nombres ligados localmente (parámetros,
+patrones, `let ... in`, asignaciones locales de Julia) tapan a lo importado.
+- **OCaml:** módulo = archivo con la primera letra en mayúscula (`myModule.ml` → `MyModule`)
+  y, si dune envuelve la librería, también `Lib.Util`. Con dos `util.ml`, gana el de la misma
+  librería (directorio) que el llamante; si no, ninguno. `module M = A.B` y `open`/`include`
+  se expanden (tras `open Lib`, `Util.f` también es `Lib.Util.f`). Solo cuentan como ruta de
+  módulo los nombres (`A.B`), no los functores ni los `struct` en línea. El `.mli` enlaza con
+  su `.ml`, y las llamadas nunca van al `.mli`. Un módulo anidado de otro archivo no es
+  `external:`.
+- **F#:** prefijo = `namespace` o la parte de fuera de `module A.B.C` de cabecera. Solo ven
+  los archivos que el `.fsproj` compila antes (un `.fsx`, lo que carga con `#load`; sin
+  `.fsproj`, nada), nunca un `.fsi`. Rutas `A.B.f` (el parser parte las de 3+ tramos en
+  `dot_expression`). `open X` no es una arista de archivo; es interno si su primer tramo es
+  un namespace, un módulo o un script del proyecto (`BuildCommon.fsx` → `BuildCommon`).
+- **Julia:** el módulo de un archivo es el contexto del `include` que lo trae (inclusión
+  textual), así que los `.jl` se re-parsean al registrarlos (también los sin cambios). Orden:
+  el mismo módulo (también en otro archivo incluido), `import A: f`, `using A`. Varios
+  métodos de una función en archivos distintos son UNA función (se enlaza su primera
+  definición); el mismo nombre en dos módulos `using` a la vez, ambiguo.
+
+**M15d-2 — cross-file ambiguo (regla de M15b), propuesta original.** Entran con símbolos y
 `calls` intra-archivo; el cross-file **solo si sale inequívoco** y, si no, se declaran
 symbols-only en `doctor`:
 - **OCaml** (`.ml`/`.mli`): el módulo es el nombre de archivo capitalizado (`util.ml` →

@@ -24,7 +24,8 @@ from .extractors import python_ast, js_ts, ts_treesitter, ts_generic, sql_lex
 # Python (ast) y JS/TS (tree-sitter, con calls/imports) tienen extractor propio.
 _TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 # El resto (C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly/Ruby/Kotlin/Swift/Dart/Scala/Lua/
-# Elixir/Bash/Terraform/PowerShell/Erlang/Haskell/Perl/Zig/Solidity/Clojure/ObjC) usa el extractor genérico (símbolos + defines) cuando
+# Elixir/Bash/Terraform/PowerShell/Erlang/Haskell/Perl/Zig/Solidity/Clojure/ObjC/OCaml/
+# F#/Julia) usa el extractor genérico (símbolos + defines) cuando
 # tree-sitter está. SQL va por `sql_lex` (léxico, sin tree-sitter).
 _GENERIC_EXTS = {"." + e for e in ts_generic._GRAMMAR_BY_EXT}
 # SQL (M15c): extractor LÉXICO propio (stdlib, todos los dialectos, incluido PL/SQL)
@@ -546,6 +547,77 @@ def _load_sol_remappings(root: str) -> list:
     return sorted(out.items(), key=lambda kv: -len(kv[0]))
 
 
+_RE_DUNE_STANZA = re.compile(r"\((library|executables?|tests?)\b")
+_RE_DUNE_NAME = re.compile(r"\(name\s+([A-Za-z_][\w]*)\)")
+_RE_FSPROJ_COMPILE = re.compile(r'<Compile\s+Include\s*=\s*"([^"]+)"')
+_RE_FS_NAMESPACE = re.compile(r"^\s*namespace\s+(?:rec\s+)?(?:global\.)?([A-Za-z_][\w.]*)", re.MULTILINE)
+_RE_FS_TOPMODULE = re.compile(r"^module\s+(?:rec\s+)?([A-Za-z_][\w.]*)\s*$", re.MULTILINE)
+
+
+def _walk_named(root: str, excludes: set, match) -> list:
+    """[(dir_relativo, ruta_absoluta)] de los archivos cuyo nombre cumple `match`."""
+    out = []
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in excludes and not d.startswith("."))
+        rel = os.path.relpath(dirpath, root).replace("\\", "/")
+        for f in sorted(files):
+            if match(f):
+                out.append(("" if rel == "." else rel, os.path.join(dirpath, f)))
+    return out
+
+
+def _load_dune_libraries(root: str, excludes: set) -> dict:
+    """{dir: nombre} de las `(library (name x))` de dune (M15d-2): sus módulos se ven desde
+    fuera envueltos como `X.Util`. Con `(wrapped false)` no hay envoltorio."""
+    out = {}
+    for d, path in _walk_named(root, excludes | {"_build", "_opam"}, lambda f: f == "dune"):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                src = f.read()
+        except OSError:
+            continue
+        starts = [(m.start(), m.group(1)) for m in _RE_DUNE_STANZA.finditer(src)]
+        for i, (pos, kind) in enumerate(starts):
+            stanza = src[pos:starts[i + 1][0] if i + 1 < len(starts) else None]
+            m = _RE_DUNE_NAME.search(stanza)
+            if kind == "library" and m and "(wrapped false)" not in stanza:
+                out[d] = m.group(1)
+    return out
+
+
+def _load_fsproj_order(root: str, excludes: set) -> dict:
+    """{relpath: (fsproj, índice)}: el orden de compilación de cada .fsproj (M15d-2). En F#
+    un archivo solo ve lo que se compila ANTES que él."""
+    out = {}
+    for d, path in _walk_named(root, excludes | {"bin", "obj"}, lambda f: f.endswith(".fsproj")):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                src = f.read()
+        except OSError:
+            continue
+        proj = os.path.relpath(path, root).replace("\\", "/")
+        for i, inc in enumerate(_RE_FSPROJ_COMPILE.findall(src)):
+            rel = os.path.normpath(os.path.join(d, inc.replace("\\", "/"))).replace("\\", "/")
+            out.setdefault(rel, (proj, i))
+    return out
+
+
+def _cap(name: str) -> str:
+    """`myModule` -> `MyModule`: OCaml y F# solo suben la PRIMERA letra (str.capitalize()
+    bajaría el resto)."""
+    return name[:1].upper() + name[1:]
+
+
+def _fs_namespace(source: str) -> str:
+    """Prefijo de nombre completo de un archivo F#: su `namespace`, o la parte de fuera de
+    su `module A.B.C` de cabecera (`A.B`; `C` ya es el contenedor de sus símbolos)."""
+    m = _RE_FS_NAMESPACE.search(source)
+    if m:
+        return m.group(1)
+    m = _RE_FS_TOPMODULE.search(source)
+    return m.group(1).rsplit(".", 1)[0] if m and "." in m.group(1) else ""
+
+
 def _load_xcode_targets(root: str, excludes: set) -> list:
     """Targets de los `.xcodeproj` del proyecto: [(dir_relativo, {carpeta: target},
     {archivo: target|""})]. Ver _xcode_membership."""
@@ -749,6 +821,17 @@ class Indexer:
         self.clj_ns_index = {}     # (project, ns) -> [file_id .clj/.cljs/.cljc]
         self._objc_classes = None  # (project, clase) -> [file_id]  (perezoso)
         self.ext_override = {}     # file_id -> ext efectiva (`.h` con Objective-C -> `.m`)
+        # M15d-2: OCaml (módulo = archivo, librerías de dune), F# (namespace + orden del
+        # .fsproj) y Julia (módulo heredado por `include`)
+        self.ml_mod_index = {}     # (project, Módulo o Lib.Módulo) -> [file_id .ml]
+        self.dune_libs = {}        # project -> {dir: librería}
+        self.fs_order = {}         # project -> {relpath: (fsproj, índice)}
+        self.fs_ns = {}            # file_id -> prefijo de nombre completo
+        self.fs_heads = {}         # project -> {primeros tramos de namespaces/módulos propios}
+        self.jl_includes = {}      # file_id -> [(contexto, ruta)]
+        self._jl_prefix = None     # file_id -> módulo de su código top-level  (perezoso)
+        self._fullnames = None     # (project, lenguaje, nombre_completo) -> [(file, sid)]
+        self._ml_nested = None     # project -> {nombres de módulos anidados de OCaml}
         for proj in config["projects"]:
             name, root = proj["name"], proj["root"]
             zig = _load_zig_modules(root, self.excludes)
@@ -757,6 +840,12 @@ class Indexer:
             remaps = _load_sol_remappings(root)
             if remaps:
                 self.sol_remaps[name] = remaps
+            dune = _load_dune_libraries(root, self.excludes)
+            if dune:
+                self.dune_libs[name] = dune
+            order = _load_fsproj_order(root, self.excludes)
+            if order:
+                self.fs_order[name] = order
             al = _load_ts_aliases(root)
             if al:
                 self.js_aliases[name] = al
@@ -1199,6 +1288,12 @@ class Indexer:
                     for f in (self._hs_module_files(project, m) if g == "haskell"
                               else self._clj_ns_files(project, m, ext))
                     for sid in short_index.get((f, callee), []) if sid != caller]
+        if g == "ocaml":
+            return self._ml_pairs(project, file_id_, caller, callee, via, bindings, at)
+        if g == "fsharp":
+            return self._fs_pairs(project, file_id_, caller, callee, via, bindings, name_index)
+        if g == "julia":
+            return self._jl_pairs(project, file_id_, caller, callee, via, bindings)
         if g == "objc":
             if via is None:
                 return [(sid.split("::", 1)[0], sid) for sid in
@@ -1235,6 +1330,187 @@ class Indexer:
             return (self._sol_inherited(project, file_id_, caller, callee, name_index, scope)
                     or at(scope, callee))
         return []
+
+    # --- M15d-2: OCaml ------------------------------------------------------------
+    def _ml_module_files(self, project, module, from_file):
+        """Archivo `.ml` del módulo `module` (`Util` o `Lib.Util`). Si hay varios, gana el de
+        la misma librería (directorio) que quien lo usa; si no, ninguno."""
+        files = self.ml_mod_index.get((project, module), [])
+        if len(files) > 1:
+            here = os.path.dirname(from_file)
+            files = [f for f in files if os.path.dirname(f) == here]
+        return self._unique(files)
+
+    def _ml_locate(self, project, from_file, path):
+        """(archivo, [submódulos]) de una ruta de módulo: el prefijo más largo que es un
+        archivo (`Util.Sub` -> util.ml + ["Sub"]); (None, []) si no hay o es ambiguo."""
+        parts = path.split(".")
+        for i in range(len(parts), 0, -1):
+            files = self.ml_mod_index.get((project, ".".join(parts[:i])), [])
+            if files:
+                hit = self._ml_module_files(project, ".".join(parts[:i]), from_file)
+                return (hit[0], parts[i:]) if hit else (None, [])
+        return None, []
+
+    def _ml_pairs(self, project, file_id_, caller, callee, via, bindings, at):
+        """OCaml: `M.f` -> `f` en el archivo del módulo M (alias `module M = A.B` expandido;
+        tras `open Lib`, `Util.f` también puede ser `Lib.Util.f`); `f` libre -> los módulos
+        abiertos con `open`/`include`."""
+        def expand(path):
+            head, _, rest = path.partition(".")
+            alias = bindings.get(f"alias:{head}")
+            return (alias[0] + ("." + rest if rest else "")) if alias else path
+        opens = [expand(k[5:]) for k in bindings if k.startswith("open:")]
+        paths = ([expand(via)] + [f"{o}.{expand(via)}" for o in opens]) if via else opens
+        pairs = []
+        for p in paths:
+            f, inner = self._ml_locate(project, file_id_, p)
+            if f:
+                pairs += at([f], ".".join(inner + [callee]))
+        return pairs
+
+    def _ml_nested_modules(self, project):
+        """Nombres de los módulos anidados de OCaml del proyecto (`module Sub = struct`)."""
+        if self._ml_nested is None:
+            self._ml_nested = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                if (n.get("tags") or [])[:2] in (["ocaml", "class"], ["ocaml_interface", "class"]):
+                    self._ml_nested.setdefault(n.get("project"), set()).add(n["name"].split(".")[-1])
+        return self._ml_nested.get(project, set())
+
+    # --- M15d-2: F# ---------------------------------------------------------------
+    def _fs_visible(self, project, file_id_):
+        """Archivos que un archivo F# puede ver: los que su .fsproj compila ANTES (un
+        script `.fsx`: los que carga con `#load`). Sin .fsproj, ninguno."""
+        order = self.fs_order.get(project, {})
+        rel = file_id_[len(project) + 1:]
+        if rel in order:
+            proj, idx = order[rel]
+            return [f"{project}/{r}" for r, (p, i) in order.items() if p == proj and i < idx]
+        if file_id_.endswith(".fsx"):
+            return [e["target"] for e in self.store.neighbors(
+                file_id_, edge_types=[EDGE_IMPORTS], direction="out")]
+        return []
+
+    def _fs_pairs(self, project, file_id_, caller, callee, via, bindings, name_index):
+        """F#: el nombre completo (`App.Util.Validator.check`) que la llamada puede querer
+        decir desde el namespace propio, sus padres y los `open` (también relativos al
+        namespace), buscado en los archivos visibles por el orden de compilación."""
+        if via:
+            head, _, rest = via.partition(".")
+            alias = bindings.get(f"alias:{head}")
+            via = (alias[0] + ("." + rest if rest else "")) if alias else via
+        ns = self.fs_ns.get(file_id_, "")
+        parts = ns.split(".") if ns else []
+        bases = [".".join(parts[:i]) for i in range(len(parts), -1, -1)]
+        opens = [k[5:] for k in bindings if k.startswith("open:")]
+        scopes = bases + [f"{b}.{o}" if b else o for o in opens for b in bases]
+        tail = f"{via}.{callee}" if via else callee
+        fulls = {f"{s}.{tail}" if s else tail for s in scopes}
+        pairs = []
+        for g in self._fs_visible(project, file_id_):
+            if g.endswith(".fsi"):
+                continue                               # la firma: se enlaza la implementación
+            gns = self.fs_ns.get(g, "")
+            for full in fulls:
+                q = full[len(gns) + 1:] if gns and full.startswith(gns + ".") else (None if gns else full)
+                if q and (g, q) in name_index and name_index[(g, q)] != caller:
+                    pairs.append((g, name_index[(g, q)]))
+        return pairs
+
+    # --- M15d-2: Julia -----------------------------------------------------------
+    def _jl_module_of(self, file_id_):
+        """Módulo al que pertenece el código top-level de un archivo Julia: el contexto del
+        `include` que lo trae (encadenado: inclusión textual), o "" si nadie lo incluye."""
+        if self._jl_prefix is None:
+            parent = {}
+            for f, incs in self.jl_includes.items():
+                proj = f.split("/", 1)[0]
+                fdir = os.path.dirname(f[len(proj) + 1:])
+                for ctx, p in incs:
+                    g = self.file_index.get((proj, os.path.normpath(os.path.join(fdir, p)).replace("\\", "/")))
+                    if g and g != f:
+                        parent.setdefault(g, (f, ctx))
+            done: dict = {}
+
+            def prefix(f, depth=0):
+                if f in done:
+                    return done[f]
+                if f not in parent or depth > 50:
+                    return ""
+                inc, ctx = parent[f]
+                done[f] = ".".join(x for x in (prefix(inc, depth + 1), ctx) if x)
+                return done[f]
+            for f in parent:
+                prefix(f)
+            self._jl_prefix = done
+        return self._jl_prefix.get(file_id_, "")
+
+    def _fullname_index(self, project, lang):
+        """{nombre_completo: [(file, sid)]} de un lenguaje M15d-2 (Julia: módulo heredado por
+        `include` + nombre del símbolo)."""
+        if self._fullnames is None:
+            self._fullnames = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                tags = n.get("tags") or []
+                if tags[:1] == ["julia"] and n.get("path"):
+                    full = ".".join(x for x in (self._jl_module_of(n["path"]), n["name"]) if x)
+                    self._fullnames.setdefault((n.get("project"), "julia", full), []).append(
+                        (n["path"], n["id"]))
+        return lambda full: self._fullnames.get((project, lang, full), [])  # type: ignore[union-attr]
+
+    def _jl_absolute(self, file_id_, ctx, path):
+        """`using .A` / `..A` / `A.B` (escrito en el módulo `ctx` del archivo) -> nombre
+        completo del módulo."""
+        dots = len(path) - len(path.lstrip("."))
+        rest = path.lstrip(".")
+        if not dots:
+            return rest
+        base = [x for x in ".".join(y for y in (self._jl_module_of(file_id_), ctx) if y).split(".") if x]
+        up = dots - 1
+        if up > len(base):
+            return None
+        return ".".join(base[:len(base) - up] + ([rest] if rest else []))
+
+    def _jl_pairs(self, project, file_id_, caller, callee, via, bindings):
+        """Julia: el mismo módulo primero (también en otros archivos incluidos en él), luego
+        `import A: f` / `using A: f`, luego los `using A` abiertos. `X.f` se busca desde el
+        módulo del llamante hacia fuera. Varios métodos de la MISMA función en archivos
+        distintos son una función: se enlaza su primera definición."""
+        lookup = self._fullname_index(project, "julia")
+        cq = caller.split("::", 1)[1]
+        own = ".".join(x for x in (self._jl_module_of(file_id_), cq.rsplit(".", 1)[0] if "." in cq else "") if x)
+        anc = own.split(".") if own else []
+        chain = [".".join(anc[:i]) for i in range(len(anc), -1, -1)]
+
+        def hits(full):
+            return [p for p in lookup(full) if p[1] != caller] if full else []
+
+        if via:
+            tiers = [[f"{m}.{via}.{callee}" if m else f"{via}.{callee}"] for m in chain]
+        else:
+            explicit = [self._jl_absolute(file_id_, ctx, path) for k, (path, ctx) in bindings.items()
+                        if k.startswith(f"n:{callee}:")]
+            opened = [self._jl_absolute(file_id_, ctx, path) for k, (path, ctx) in bindings.items()
+                      if k.startswith("use:")]
+            tiers = [[f"{own}.{callee}" if own else callee],
+                     [f"{m}.{callee}" for m in explicit if m],
+                     [f"{m}.{callee}" for m in opened if m]]
+        for tier in tiers:
+            by_full = {full: hits(full) for full in dict.fromkeys(tier)}
+            by_full = {k: v for k, v in by_full.items() if v}
+            if len(by_full) == 1:
+                return [min(next(iter(by_full.values())))]   # una función (quizá varios archivos)
+            if by_full:
+                return [p for v in by_full.values() for p in v]   # varias funciones: ambiguo
+        return []
+
+    def _jl_use_target(self, project, file_id_, raw):
+        """`using/import A.B` -> el archivo que define el módulo `A.B` (único), o None."""
+        _kind, ctx, path = raw.split(":", 2)
+        full = self._jl_absolute(file_id_, ctx, path)
+        files = {f for f, _sid in self._fullname_index(project, "julia")(full or "") if f != file_id_}
+        return files.pop() if len(files) == 1 else None
 
     def _unique(self, files):
         return list(files) if len(files) == 1 else []
@@ -1512,6 +1788,21 @@ class Indexer:
             return head != "clojure" and any(
                 p == project and (n == raw or n.split(".")[0] == head)
                 for p, n in self.clj_ns_index)
+        if g in ("ocaml", "ocaml_interface"):
+            name = raw.split(":", 1)[1].split(".")[0]
+            return (raw.startswith("impl:") or bool(self.ml_mod_index.get((project, name)))
+                    or name.lower() in {v.lower() for v in self.dune_libs.get(project, {}).values()}
+                    or name in self._ml_nested_modules(project))
+        if g in ("fsharp", "fsharp_signature"):
+            if not raw.startswith("open:"):
+                return True
+            return raw[5:].split(".")[0] in self.fs_heads.get(project, set())
+        if g == "julia":
+            kind, _ctx, path = raw.split(":", 2)
+            if kind == "inc" or path.startswith("."):
+                return True
+            head = path.split(".")[0]
+            return bool(self._fullname_index(project, "julia")(head))
         if g == "objc":
             if raw.startswith("fw:"):                 # header propio repetido: ambiguo
                 return "/" in raw and len(self._by_basename(project, raw[3:])) > 1
@@ -1654,6 +1945,30 @@ class Indexer:
         if ext == ".hs":
             m = _RE_HS_MODULE.search(source)
             self.hs_mod_index.setdefault((project, m.group(1) if m else "Main"), []).append(rel_id)
+        if ext == ".ml":
+            mod = _cap(os.path.basename(relpath)[:-3])
+            self.ml_mod_index.setdefault((project, mod), []).append(rel_id)
+            lib = self.dune_libs.get(project, {}).get(os.path.dirname(relpath))
+            if lib:
+                self.ml_mod_index.setdefault((project, f"{_cap(lib)}.{mod}"), []).append(rel_id)
+        if ext in (".fs", ".fsi", ".fsx"):
+            self.fs_ns[rel_id] = _fs_namespace(source)
+            # namespace, `module A.B` de cabecera y el módulo implícito (el nombre del archivo)
+            top = _RE_FS_TOPMODULE.search(source)
+            heads = self.fs_heads.setdefault(project, set())
+            heads.update(x.split(".")[0] for x in (
+                self.fs_ns[rel_id], top.group(1) if top else "",
+                _cap(os.path.basename(relpath).rsplit(".", 1)[0])) if x)
+        if ext == ".jl" and ts_treesitter.available():
+            try:
+                src = source.encode("utf-8", "replace")
+                root = ts_generic._parser("julia").parse(src).root_node
+                incs = ts_generic.julia_includes(
+                    root, lambda n: src[n.start_byte:n.end_byte].decode("utf-8", "replace"))
+            except Exception:
+                incs = []
+            if incs:
+                self.jl_includes[rel_id] = incs
         if ext in _CLJ_PLATFORM:
             m = _RE_CLJ_NS.search(source)
             if m:
@@ -1724,6 +2039,8 @@ class Indexer:
                         prior[raw.split(".")[-1]] = raw
                 if ext == ".py":
                     target = self._resolve_py(project, raw, base_dir)
+                elif ext == ".jl" and raw.startswith("use:"):
+                    target = self._jl_use_target(project, file_id_, raw)
                 elif ext in _TS_EXTS:
                     target = self._resolve_js(project, base_dir, raw)
                 else:
@@ -1759,6 +2076,12 @@ class Indexer:
                         pkg = raw                                # std, builtin, un paquete
                     elif ext in (".clj", ".cljs", ".cljc"):
                         pkg = raw.split(".")[0]                  # clojure, cheshire…
+                    elif ext in (".ml", ".mli"):
+                        pkg = raw[4:].split(".")[0]              # mod:Printf -> Printf
+                    elif ext in (".fs", ".fsi", ".fsx"):
+                        pkg = raw[5:].split(".")[0] if raw.startswith("open:") else ""
+                    elif ext == ".jl":
+                        pkg = raw.split(":", 2)[2].split(".")[0]   # LinearAlgebra
                     elif ext in (".m", ".mm"):
                         pkg = raw[3:].split("/")[0]              # fw:UIKit/X.h -> UIKit
                     elif ext == ".sol":
@@ -1878,7 +2201,10 @@ class Indexer:
           zig:  `@import("x.zig")` relativo; un nombre -> su módulo de build.zig.
           solidity: relativo, remapping de foundry o ruta desde la raíz.
           clojure: `(:require [a.b ...])` -> el archivo con `(ns a.b)` de la plataforma.
-          objc: como C y, si no, el header por nombre (mapa de headers de Xcode)."""
+          objc: como C y, si no, el header por nombre (mapa de headers de Xcode).
+          ocaml: `mod:A.B` -> el archivo del prefijo más largo que es módulo; `.mli` -> `.ml`.
+          fsharp: `#load "x.fsx"` relativo (`open` es un namespace: sin arista).
+          julia: `include("x.jl")` relativo; `using` -> ver _jl_use_target."""
         g = EXT_LANG.get(ext)
         if g in ts_generic._JVM:
             if raw.endswith(".*"):
@@ -1973,6 +2299,23 @@ class Indexer:
         if g == "clojure":
             files = self._clj_ns_files(project, raw, ext)
             return files[0] if files else None
+        if g in ("ocaml", "ocaml_interface"):
+            if raw.startswith("impl:"):               # .mli -> su .ml (mismo directorio)
+                return self.file_index.get((project, "/".join(
+                    x for x in (base_dir, raw[5:] + ".ml") if x)))
+            f, _inner = self._ml_locate(project, f"{project}/{base_dir}/x", raw[4:])
+            return f                                  # `Util.Sub` -> util.ml
+        if g in ("fsharp", "fsharp_signature"):
+            if raw.startswith("load:"):
+                return self.file_index.get((project, os.path.normpath(
+                    os.path.join(base_dir, raw[5:])).replace("\\", "/")))
+            return None                                # `open X`: un namespace, no un archivo
+        if g == "julia":
+            kind, ctx, path = raw.split(":", 2)
+            if kind == "inc":
+                return self.file_index.get((project, os.path.normpath(
+                    os.path.join(base_dir, path)).replace("\\", "/")))
+            return None                                # `using`: ver _jl_use_target
         if g == "objc":
             if raw.startswith("fw:"):
                 # `<Fw/X.h>`: el framework del PROPIO proyecto si X.h existe una sola vez en

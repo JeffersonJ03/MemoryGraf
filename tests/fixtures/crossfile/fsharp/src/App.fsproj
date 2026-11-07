@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <Compile Include="Util.fs" />
+    <Compile Include="Billing.fs" />
+    <Compile Include="Late.fs" />
+  </ItemGroup>
+</Project>

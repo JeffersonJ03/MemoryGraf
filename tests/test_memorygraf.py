@@ -935,10 +935,9 @@ class TestM15c(Base):
         self.assertEqual(deps, set())
 
 
-class TestM15d(Base):
-    """M15d-1: Erlang, Haskell, Perl, Zig, Solidity, Clojure y Objective-C. Fixtures en
-    tests/fixtures/crossfile/<lenguaje>/; los casos que NO deben enlazar, con un
-    proyecto propio por test (precisión primero, como TestPrecisionM15a/b)."""
+class _M15dGraph(Base):
+    """Base de los tests de M15d: indexa un fixture (o el proyecto del test) y devuelve
+    (calls xfile, imports/depends_on, calls intra-archivo, nombres de símbolos)."""
 
     def _graph(self, lang=None):
         if lang:
@@ -954,6 +953,12 @@ class TestM15d(Base):
                 {(s, t) for s, t, ty, _pv in rows if ty in ("imports", "depends_on")},
                 {(s, t) for s, t, ty, pv in rows if ty == "calls" and pv == "tree-sitter"},
                 syms)
+
+
+class TestM15d(_M15dGraph):
+    """M15d-1: Erlang, Haskell, Perl, Zig, Solidity, Clojure y Objective-C. Fixtures en
+    tests/fixtures/crossfile/<lenguaje>/; los casos que NO deben enlazar, con un
+    proyecto propio por test (precisión primero, como TestPrecisionM15a/b)."""
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_fixture_imports_and_calls(self):
@@ -1161,6 +1166,85 @@ class TestM15d(Base):
             nodes, *_rest = ts_generic.extract(path, "p", src)
             got = [(n.span_start, n.span_end) for n in nodes if n.name == name]
             self.assertEqual(got, [span], path)
+
+
+class TestM15d2(_M15dGraph):
+    """M15d-2: OCaml, F# y Julia, resueltos por nombre completo (módulo del archivo +
+    símbolo) solo cuando el destino es inequívoco."""
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_m15d2_fixture_imports_and_calls(self):
+        o, f, j = "ocaml", "fsharp/src", "julia/src"
+        cases = {
+            "ocaml": ({(f"{o}/bin/main.ml::run", f"{o}/lib/util.ml::Sub.go"),     # alias M
+                       (f"{o}/bin/main.ml::run", f"{o}/lib/util.ml::check"),      # open Mylib
+                       (f"{o}/bin/main.ml::run", f"{o}/lib/fmt.ml::pretty"),      # Mylib.Fmt
+                       (f"{o}/lib/fmt.ml::pretty", f"{o}/lib/util.ml::check")},   # misma librería
+                      {(f"{o}/bin/main.ml", f"{o}/lib/fmt.ml"),
+                       (f"{o}/bin/main.ml", "external:Printf"),
+                       (f"{o}/lib/util.mli", f"{o}/lib/util.ml")}),               # .mli -> .ml
+            "fsharp": ({(f"{f}/Billing.fs::Billing.run", f"{f}/Util.fs::Validator.check"),
+                        (f"{f}/Late.fs::Late.later", f"{f}/Billing.fs::Billing.run")},
+                       {(f"{f}/Billing.fs", "external:System")}),
+            "julia": ({(f"{j}/billing.jl::run", f"{j}/util.jl::check"),          # mismo módulo
+                       (f"{j}/billing.jl::run", f"{j}/App.jl::App.Sub.sub_go")},  # using .Sub
+                      {(f"{j}/App.jl", f"{j}/util.jl"), (f"{j}/billing.jl", f"{j}/App.jl"),
+                       (f"{j}/App.jl", "external:LinearAlgebra")}),
+        }
+        for lang, (calls, deps) in cases.items():
+            xcalls, got_deps, _intra, _syms = self._graph(lang)
+            self.assertEqual(calls - xcalls, set(), lang)
+            self.assertEqual(deps - got_deps, set(), lang)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ocaml_two_dune_libraries_and_shadowing(self):
+        # `util.ml` en DOS librerías y quien llama no está en ninguna -> ambiguo (sin
+        # arista y sin `external:Util`). `check` es un parámetro que tapa al de `open B`.
+        # `Nested` es un módulo anidado de b/util.ml (visible por el `open`): tampoco es
+        # una dependencia externa.
+        self.write("a/dune", "(library (name a))\n")
+        self.write("a/util.ml", "let f x = x\n")
+        self.write("b/dune", "(library (name b))\n")
+        self.write("b/util.ml", "let f x = x\nlet check x = x\n"
+                   "module Nested = struct let go x = x end\n")
+        self.write("bin/main.ml", "open B.Util\nlet run check x = Util.f x + check x + Nested.go x\n")
+        xcalls, deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, {("proj/bin/main.ml::run", "proj/b/util.ml::Nested.go")})
+        self.assertEqual({t for s, t in deps if s == "proj/bin/main.ml"}, {"proj/b/util.ml"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_camelcase_module_names(self):
+        # OCaml `myModule.ml` es `MyModule` (no `Mymodule`). En F#, `open BuildCommon` de un
+        # script `BuildCommon.fsx` es un módulo propio, no `external:BuildCommon`.
+        self.write("myModule.ml", "let f x = x\n")
+        self.write("main.ml", "let run x = MyModule.f x\n")
+        self.write("scripts/BuildCommon.fsx", "let common x = x\n")
+        self.write("build.fsx", '#load "scripts/BuildCommon.fsx"\nopen BuildCommon\n')
+        xcalls, deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, {("proj/main.ml::run", "proj/myModule.ml::f")})
+        self.assertEqual(deps, {("proj/main.ml", "proj/myModule.ml"),
+                                ("proj/build.fsx", "proj/scripts/BuildCommon.fsx")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_fsharp_symbol_compiled_after_caller(self):
+        # B.fs se compila ANTES que C.fs: no puede ver C.later (y sin .fsproj, nada)
+        self.write("P.fsproj", '<Project><ItemGroup><Compile Include="B.fs" />'
+                   '<Compile Include="C.fs" /></ItemGroup></Project>\n')
+        self.write("B.fs", "module App.B\nlet run x = App.C.later x\n")
+        self.write("C.fs", "module App.C\nlet later x = x\n")
+        self.write("loose/D.fs", "module App.D\nlet go x = App.B.run x\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_julia_same_name_in_two_modules_and_parameter(self):
+        # `f` lo exportan dos módulos no relacionados usados a la vez -> ambiguo. `g` es un
+        # parámetro, aunque `A` defina un `g`.
+        self.write("A.jl", "module A\nf(x) = x\ng(x) = x\nend\n")
+        self.write("B.jl", "module B\nf(x) = x\nend\n")
+        self.write("main.jl", "using A, B\nrun(g, x) = f(x) + g(x)\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
 
 
 class TestAuditM15(Base):

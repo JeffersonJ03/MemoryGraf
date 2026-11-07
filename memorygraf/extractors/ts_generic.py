@@ -4,7 +4,7 @@ Un solo recorrido, parametrizado por gramática, que emite nodos `symbol` (funci
 clases/estructuras/tipos, métodos) y aristas `defines`. Cubre C, C++, Java, C#, Go, Rust,
 PHP, R, Visual Basic, Assembly, (M15a) Ruby, Kotlin, Swift, Dart, (M15b) Scala, Lua,
 Elixir, Bash, (M15c) Terraform/HCL y PowerShell, y (M15d) Erlang, Haskell, Perl, Zig,
-Solidity, Clojure y Objective-C. (Python vive en
+Solidity, Clojure, Objective-C, OCaml, F# y Julia. (Python vive en
 `python_ast`; JS/TS en `ts_treesitter`, que además resuelve `calls`/`imports`.)
 
 Alcance v1 (honesto): SÍMBOLOS + `defines` (lo uniforme y de mayor valor: `overview`,
@@ -54,11 +54,21 @@ _CALLS = {
     "solidity": ({"call_expression", "modifier_invocation"}, None),
     "clojure": ({"list_lit"}, None),
     "objc": ({"message_expression", "call_expression"}, None),
+    # M15d-2
+    "ocaml": ({"application_expression"}, None),
+    "ocaml_interface": (set(), None),
+    "fsharp": ({"application_expression"}, None),
+    "fsharp_signature": (set(), None),
+    "julia": ({"call_expression"}, None),
 }
 
 # M15d: lenguajes con su propio casado de llamadas (_find_calls_m15d) e imports
 # (_imports_m15d). Sus cláusulas/ecuaciones/sobrecargas de un mismo nombre son UN símbolo.
-_M15D = {"erlang", "haskell", "perl", "zig", "solidity", "clojure", "objc"}
+_M15D = {"erlang", "haskell", "perl", "zig", "solidity", "clojure", "objc",
+         "ocaml", "ocaml_interface", "fsharp", "fsharp_signature", "julia"}
+# M15d-2: resolución por NOMBRE COMPLETO (prefijo de módulo del archivo + símbolo) en el
+# indexer; aquí solo salen la ruta escrita (`Util.Sub` de `Util.Sub.f`) y los `open`/`using`
+_FULLNAME = {"ocaml", "fsharp", "julia"}
 
 # Lenguajes con nombres que NO distinguen mayúsculas (PowerShell: `invoke-deploy` llama a
 # `Invoke-Deploy`): el casado intra-archivo y cross-file compara en minúsculas.
@@ -132,6 +142,9 @@ _GRAMMAR_BY_EXT = {
     "erl": "erlang", "hrl": "erlang", "hs": "haskell",
     "pm": "perl", "pl": "perl", "t": "perl", "zig": "zig", "sol": "solidity",
     "clj": "clojure", "cljs": "clojure", "cljc": "clojure",
+    "ml": "ocaml", "mli": "ocaml_interface", "fs": "fsharp", "fsi": "fsharp_signature",
+    "fsx": "fsharp",
+    "jl": "julia",
     "m": "objc", "mm": "objc",           # `.h` es C salvo pistas de ObjC: ver _looks_like_objc
 }
 
@@ -1602,9 +1615,175 @@ def _extract_clojure(root, text, fid, add):
     walk(root)
 
 
+def _extract_ocaml(root, text, fid, add):
+    """OCaml (`.ml`) y su interfaz (`.mli`): `let f`/`let rec f ... and g`, `external f`,
+    `val f` (interfaz), tipos y `module M = struct ... end` / `module M : sig ... end` como
+    contenedor (`M.f`, anidados cualificados). `let () = ...` no es un símbolo."""
+    def walk(node, prefix, parent_id):
+        def q(name):
+            return f"{prefix}.{name}" if prefix else name
+        kind = "method" if prefix else "func"
+        for ch in node.children:
+            if ch.type == "value_definition":
+                for lb in (c for c in ch.children if c.type == "let_binding"):
+                    p = lb.child_by_field_name("pattern")
+                    if p is not None and p.type == "value_name":
+                        add(q(text(p)), kind, lb, parent_id)
+            elif ch.type in ("external", "value_specification"):
+                vn = _first_child(ch, "value_name")
+                if vn is not None:
+                    add(q(text(vn)), kind, ch, parent_id)
+            elif ch.type == "type_definition":
+                for tb in (c for c in ch.children if c.type == "type_binding"):
+                    nm = tb.child_by_field_name("name")
+                    if nm is not None:
+                        add(q(text(nm)), "type", tb, parent_id)
+            elif ch.type == "module_definition":
+                for mb in (c for c in ch.children if c.type == "module_binding"):
+                    mn = _first_child(mb, "module_name")
+                    body = mb.child_by_field_name("body") or mb.child_by_field_name("module_type")
+                    if mn is not None and body is not None and body.type in ("structure", "signature"):
+                        walk(body, q(text(mn)), add(q(text(mn)), "class", mb, parent_id))
+
+    walk(root, None, fid)
+
+
+def _extract_fsharp(root, text, fid, add):
+    """F# (`.fs`/`.fsx`/`.fsi`): `namespace` es ámbito (no prefija: el indexer lo usa como
+    prefijo de nombre completo); `module A.B.C` de cabecera y `module M =` son contenedores;
+    `let f`/`let x` son funciones; los tipos son clases con sus `member` (`T.M`). Un
+    `module V = A.B` es un alias, no un contenedor."""
+    def defn_name(d):
+        left = _first_child(d, "function_declaration_left") or _first_child(d, "value_declaration_left")
+        if left is None:
+            return None
+        first = left.named_children[0] if left.named_children else None
+        while first is not None and first.type in ("identifier_pattern", "long_identifier_or_op"):
+            first = first.named_children[0] if first.named_children else None
+        return text(first) if first is not None and first.type == "identifier" else None
+
+    def walk(node, prefix, parent_id):
+        def q(name):
+            return f"{prefix}.{name}" if prefix else name
+        for ch in node.children:
+            t = ch.type
+            if t in ("function_or_value_defn", "value_definition"):
+                nm = defn_name(ch)
+                if nm:
+                    add(q(nm), "method" if prefix else "func", ch, parent_id)
+            elif t == "named_module":
+                nm = ch.child_by_field_name("name")
+                last = text(nm).split(".")[-1] if nm is not None else None
+                if last:
+                    walk(ch, q(last), add(q(last), "class", ch, parent_id))
+            elif t == "module_defn":
+                idn = _first_child(ch, "identifier")
+                body = ch.child_by_field_name("block")
+                if idn is not None and (body is None or body.type != "dot_expression"):
+                    walk(ch, q(text(idn)), add(q(text(idn)), "class", ch, parent_id))
+            elif t == "type_definition":
+                for td in ch.named_children:
+                    tn = _first_child(td, "type_name")
+                    nm = tn.child_by_field_name("type_name") if tn is not None else None
+                    if nm is not None:
+                        cid = add(q(text(nm)), "class", td, parent_id)
+                        for m in _descendants(td, "member_defn"):
+                            mp = _first_child(m, "method_or_prop_defn")
+                            pi = mp.child_by_field_name("name") if mp is not None else None
+                            mn = (pi.child_by_field_name("method") or _first_child(pi, "identifier")) \
+                                if pi is not None else None
+                            if mn is not None:
+                                add(f"{q(text(nm))}.{text(mn)}", "method", m, cid)
+            elif t in ("namespace", "declaration_expression", "file"):
+                walk(ch, prefix, parent_id)
+
+    walk(root, None, fid)
+
+
+def _fs_path(n, text):
+    """`A.B.f` de F# como lista de nombres. El parser lo parte de varias formas
+    (`long_identifier`, `long_identifier_or_op` con un identificador suelto, o
+    `dot_expression` desde el tercer tramo); None si algún tramo no es un nombre."""
+    if n.type == "identifier":
+        return [text(n)]
+    if n.type not in ("long_identifier_or_op", "long_identifier", "dot_expression"):
+        return None
+    parts = []
+    for c in n.named_children:
+        sub = _fs_path(c, text)
+        if sub is None:
+            return None
+        parts += sub
+    return parts or None
+
+
+def _descendants(node, type_name):
+    """Descendientes de un tipo, sin entrar en ellos."""
+    for c in node.named_children:
+        if c.type == type_name:
+            yield c
+        else:
+            yield from _descendants(c, type_name)
+
+
+def _jl_sig_name(sig, text):
+    """Nombre de la función de una firma Julia: `f(x)`, `f(x)::T`, `f(x) where T`; None si
+    extiende la de otro módulo (`Base.show(...)`)."""
+    n = sig
+    while n is not None and n.type in ("signature", "where_expression", "typed_expression"):
+        n = n.named_children[0] if n.named_children else None
+    if n is not None and n.type == "call_expression":
+        n = n.named_children[0] if n.named_children else None
+    return text(n) if n is not None and n.type == "identifier" else None
+
+
+def _extract_julia(root, text, fid, add):
+    """Julia: `module M ... end` es contenedor (`M.f`); `function f(...)`, `f(x) = ...` y
+    `f = x -> ...` son funciones (sus métodos, por despacho múltiple, un solo símbolo);
+    `struct`/`abstract type` son tipos; `macro m` es `@m`. `Base.show(...) = ...` extiende
+    la función de otro módulo: no es un símbolo propio."""
+    def walk(node, prefix, parent_id):
+        def q(name):
+            return f"{prefix}.{name}" if prefix else name
+        for ch in node.named_children:
+            t = ch.type
+            if t in ("module_definition", "baremodule_definition"):
+                nm = ch.child_by_field_name("name")
+                if nm is not None:
+                    walk(ch, q(text(nm)), add(q(text(nm)), "class", ch, parent_id))
+            elif t in ("function_definition", "macro_definition"):
+                sig = _first_child(ch, "signature")
+                nm = _jl_sig_name(sig, text) if sig is not None else None
+                if nm:
+                    add(q(("@" if t == "macro_definition" else "") + nm), "func", ch, parent_id)
+            elif t == "assignment":
+                lhs = ch.named_children[0] if ch.named_children else None
+                rhs = ch.named_children[-1] if ch.named_children else None
+                if lhs is not None and lhs.type in ("call_expression", "where_expression",
+                                                     "typed_expression"):
+                    nm = _jl_sig_name(lhs, text)
+                    if nm:
+                        add(q(nm), "func", ch, parent_id)
+                elif lhs is not None and lhs.type == "identifier" and rhs is not None \
+                        and rhs.type == "arrow_function_expression":
+                    add(q(text(lhs)), "func", ch, parent_id)
+            elif t in ("struct_definition", "abstract_definition", "primitive_definition"):
+                head = _first_child(ch, "type_head")
+                idn = next(_descendants(head, "identifier"), None) if head is not None else None
+                if idn is not None:
+                    add(q(text(idn)), "type", ch, parent_id)
+            elif t in ("block", "if_statement", "let_statement", "const_statement"):
+                walk(ch, prefix, parent_id)
+
+    walk(root, None, fid)
+
+
 _M15D_DEFS = {"erlang": _extract_erlang, "haskell": _extract_haskell,
               "perl": _extract_perl, "zig": _extract_zig, "solidity": _extract_solidity,
-              "clojure": _extract_clojure, "objc": _extract_objc}
+              "clojure": _extract_clojure, "objc": _extract_objc,
+              "ocaml": _extract_ocaml, "ocaml_interface": _extract_ocaml,
+              "fsharp": _extract_fsharp, "fsharp_signature": _extract_fsharp,
+              "julia": _extract_julia}
 
 
 def _call_parts_m15d(n, grammar, text):
@@ -1663,6 +1842,34 @@ def _call_parts_m15d(n, grammar, text):
         if fc is not None:
             return head, text(fc)                               # x.f(...)
         return None, None                                       # a.b.f(...): opaco
+    if grammar == "ocaml":
+        fn = n.child_by_field_name("function")
+        if fn is None or fn.type != "value_path":
+            return None, None
+        mp, vn = _first_child(fn, "module_path"), _first_child(fn, "value_name")
+        return (text(mp) if mp is not None else None), (text(vn) if vn is not None else None)
+    if grammar == "fsharp":
+        head = n.named_children[0] if n.named_children else None
+        parts = _fs_path(head, text) if head is not None else None
+        if not parts:
+            return (_OPAQUE if head is not None and head.type == "dot_expression" else None), None
+        return (".".join(parts[:-1]) or None), parts[-1]
+    if grammar == "julia":
+        if _jl_def_call(n):
+            return None, None                                   # la firma, no una llamada
+        fn = n.named_children[0] if n.named_children else None
+        if fn is not None and fn.type == "identifier":
+            return None, (None if text(fn) == "include" else text(fn))
+        parts = []
+        while fn is not None and fn.type == "field_expression":
+            kids = fn.named_children
+            if len(kids) != 2 or kids[1].type != "identifier":
+                return _OPAQUE, None
+            parts.insert(0, text(kids[1]))
+            fn = kids[0]
+        if fn is not None and fn.type == "identifier" and parts:
+            return ".".join([text(fn)] + parts[:-1]), parts[-1]      # A.B.f(...)
+        return (_OPAQUE if parts else None), (parts[-1] if parts else None)
     if grammar == "clojure":
         par = n.parent
         if par is not None and par.type == "list_lit" and _clj_head(par, text)[0] in _CLJ_IMPL:
@@ -1990,9 +2197,144 @@ def _objc_imports(root, text, _module):
     return list(dict.fromkeys(raws)), {}
 
 
+_RE_ML_PATH = re.compile(r"[A-Z][\w']*(?:\.[A-Z][\w']*)*")   # `A.B`, no `F(X)` ni `struct`
+
+
+def _ml_imports(root, text, module):
+    """OCaml: cada ruta de módulo usada (`A.B` de `A.B.f`, `open M`, `include M`, `module X =
+    M`) es un raw "mod:A.B"; un `.mli` lleva "impl:<stem>" (su `.ml`). Bindings: "open:<ruta>" y
+    "alias:<X>" -> ruta (`module X = A.B`). Los módulos definidos en el archivo no son
+    imports."""
+    raws, b = [], {}
+
+    def walk(n):
+        t = n.type
+        if t in ("open_module", "include_module"):
+            mp = n.child_by_field_name("module")
+            if mp is not None and _RE_ML_PATH.fullmatch(text(mp)):
+                raws.append("mod:" + text(mp))
+                b[f"open:{text(mp)}"] = (text(mp), None)
+            return
+        if t == "module_binding":
+            mn, body = _first_child(n, "module_name"), n.child_by_field_name("body")
+            if mn is not None and body is not None and body.type == "module_path" \
+                    and _RE_ML_PATH.fullmatch(text(body)):
+                b[f"alias:{text(mn)}"] = (text(body), None)
+                raws.append("mod:" + text(body))
+        if t == "value_path":
+            mp = _first_child(n, "module_path")
+            if mp is not None and _RE_ML_PATH.fullmatch(text(mp)):
+                raws.append("mod:" + text(mp))
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    if root.type == "compilation_unit" and not any(c.type == "value_definition" for c in root.children) \
+            and any(c.type == "value_specification" for c in root.children):
+        raws.insert(0, "impl:" + module)                     # .mli -> su .ml
+    local = {text(mn) for mb in _descendants(root, "module_binding")
+             for mn in [_first_child(mb, "module_name")] if mn is not None}
+    return [r for r in dict.fromkeys(raws) if r[4:].split(".")[0] not in local], b
+
+
+def _fs_imports(root, text, _module):
+    """F#: `open X` -> "open:X" (raw y binding); `module V = A.B` -> binding "alias:V";
+    `#load "x.fsx"` -> "load:x.fsx". La visibilidad (orden del .fsproj) es del indexer."""
+    raws, b = [], {}
+
+    def walk(n):
+        t = n.type
+        if t == "import_decl":
+            li = _first_child(n, "long_identifier")
+            if li is not None:
+                raws.append("open:" + text(li))
+                b[f"open:{text(li)}"] = (text(li), None)
+            return
+        if t == "module_defn":
+            idn, body = _first_child(n, "identifier"), n.child_by_field_name("block")
+            if idn is not None and body is not None and body.type == "dot_expression":
+                b[f"alias:{text(idn)}"] = (re.sub(r"\s+", "", text(body)), None)
+                return
+        if t == "fsi_directive_decl":
+            s = _first_child(n, "string")
+            if s is not None and text(n).lstrip().startswith("#load"):
+                raws.append("load:" + text(s).strip('"'))
+            return
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    return list(dict.fromkeys(raws)), b
+
+
+def julia_includes(root, text):
+    """[(contexto_de_módulo, ruta)] de los `include("x.jl")` de un archivo Julia: lo incluido
+    pertenece al módulo que lo incluye (inclusión textual). Lo usa también el indexer para
+    los archivos sin cambios."""
+    out = []
+
+    def walk(n, ctx):
+        if n.type in ("module_definition", "baremodule_definition"):
+            nm = n.child_by_field_name("name")
+            ctx = f"{ctx}.{text(nm)}" if ctx and nm is not None else (text(nm) if nm is not None else ctx)
+        if n.type == "call_expression":
+            kids = n.named_children
+            if len(kids) == 2 and kids[0].type == "identifier" and text(kids[0]) == "include":
+                lit = _first_child(kids[1], "string_literal")
+                if lit is not None and len(lit.named_children) == 1 \
+                        and lit.named_children[0].type == "content":
+                    out.append((ctx, text(lit.named_children[0])))   # sin interpolación
+                return
+        for c in n.named_children:
+            walk(c, ctx)
+
+    walk(root, "")
+    return out
+
+
+def _jl_imports(root, text, _module):
+    """Julia: `include("x.jl")` -> "inc:<ctx>:x.jl"; `using/import A.B` (o `.B`, `..B`) ->
+    "use:<ctx>:<ruta>". Bindings: "use:<i>" -> (ruta, ctx) para los `using` (abiertos) y
+    "n:<f>:<i>" -> (ruta, ctx) para los nombres explícitos (`import A: f`, `using A: f`)."""
+    raws = [f"inc:{ctx}:{p}" for ctx, p in julia_includes(root, text)]
+    b = {}
+
+    def path_of(n):
+        return re.sub(r"\s+", "", text(n))
+
+    def walk(n, ctx):
+        if n.type in ("module_definition", "baremodule_definition"):
+            nm = n.child_by_field_name("name")
+            ctx = f"{ctx}.{text(nm)}" if ctx and nm is not None else (text(nm) if nm is not None else ctx)
+        if n.type in ("using_statement", "import_statement"):
+            for i, item in enumerate(n.named_children):
+                key = f"{n.start_byte}.{i}"
+                if item.type == "selected_import":
+                    kids = item.named_children
+                    if not kids:
+                        continue
+                    path = path_of(kids[0])
+                    raws.append(f"use:{ctx}:{path}")
+                    for nm in kids[1:]:
+                        if nm.type == "identifier":
+                            b[f"n:{text(nm)}:{key}"] = (path, ctx)
+                elif item.type in ("import_path", "identifier", "scoped_identifier"):
+                    path = path_of(item)
+                    raws.append(f"use:{ctx}:{path}")
+                    if n.type == "using_statement":
+                        b[f"use:{key}"] = (path, ctx)
+            return
+        for c in n.named_children:
+            walk(c, ctx)
+
+    walk(root, "")
+    return list(dict.fromkeys(raws)), b
+
+
 _M15D_IMPORTS = {"erlang": _erl_imports, "haskell": _hs_imports, "perl": _perl_imports,
                  "zig": _zig_imports, "solidity": _sol_imports, "clojure": _clj_imports,
-                 "objc": _objc_imports}
+                 "objc": _objc_imports, "ocaml": _ml_imports, "ocaml_interface": _ml_imports,
+                 "fsharp": _fs_imports, "fsharp_signature": _fs_imports, "julia": _jl_imports}
 
 
 def _imports_m15d(root, grammar, text, module):
@@ -2093,6 +2435,77 @@ def _clj_bound_names(root, text) -> set:
     return out
 
 
+def _jl_def_call(call) -> bool:
+    """¿Este `call_expression` es la firma de una definición (`function f(x)`, `f(x) = ...`)?"""
+    p = call.parent
+    while p is not None and p.type in ("where_expression", "typed_expression"):
+        p = p.parent
+    return p is not None and (p.type == "signature" or (
+        p.type == "assignment" and p.named_children and p.named_children[0].start_byte
+        <= call.start_byte <= p.named_children[0].end_byte))
+
+
+def _local_names(root, grammar, text) -> set:
+    """Nombres ligados LOCALMENTE en OCaml/F#/Julia (parámetros, patrones, lambdas, `for` y
+    lo definido DENTRO de una función: `let ... in`, `let g` anidado, asignaciones de Julia).
+    Tapan a lo importado: una llamada a uno de ellos nunca se resuelve cross-file."""
+    out: set = set()
+
+    def collect(n):
+        if n.type in ("identifier", "value_name", "value_pattern"):
+            out.add(text(n))
+        if n.type in ("typed_expression", "assignment", "kw_argument") and n.named_children:
+            collect(n.named_children[0])             # `x::T`, `x = 1`: liga x, no T ni 1
+            return
+        for c in n.named_children:
+            if c.type != "call_expression":          # `f(x = g())`: g no es un parámetro
+                collect(c)
+
+    def walk(n, inside):
+        t = n.type
+        if grammar == "ocaml":
+            if t == "value_pattern":
+                out.add(text(n))
+            elif inside and t == "let_binding":
+                p = n.child_by_field_name("pattern")
+                if p is not None:
+                    collect(p)
+        elif grammar == "fsharp":
+            if t == "argument_patterns" or (inside and t in ("identifier_pattern", "typed_pattern")):
+                collect(n)
+                return
+            if inside and t == "function_or_value_defn":
+                left = _first_child(n, "function_declaration_left") or \
+                    _first_child(n, "value_declaration_left")
+                idn = next(_descendants(left, "identifier"), None) if left is not None else None
+                if idn is not None:
+                    out.add(text(idn))
+            if not inside and t in ("function_declaration_left", "value_declaration_left"):
+                for c in n.named_children:              # su nombre NO es local: solo params
+                    if c.type == "argument_patterns":
+                        collect(c)
+                return
+        elif grammar == "julia":
+            if (t == "argument_list" and n.parent is not None and n.parent.type == "call_expression"
+                    and _jl_def_call(n.parent)) or t == "for_binding":
+                collect(n)
+                return
+            if t == "arrow_function_expression" and n.named_children:
+                collect(n.named_children[0])
+            if inside and t == "assignment" and n.named_children \
+                    and n.named_children[0].type == "identifier":
+                out.add(text(n.named_children[0]))
+        body = inside or t in ("let_binding", "function_or_value_defn", "function_definition",
+                               "arrow_function_expression", "fun_expression") or (
+            grammar == "julia" and t == "assignment" and bool(n.named_children)
+            and n.named_children[0].type == "call_expression")
+        for c in n.named_children:
+            walk(c, body)
+
+    walk(root, False)
+    return out
+
+
 def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls_out,
                      module):
     """Llamadas M15d: `calls` intra-archivo por ámbito léxico (el contenedor del llamante
@@ -2109,7 +2522,8 @@ def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls
     for q, sid in by_qual.items():
         shorts.setdefault(q.rsplit(".", 1)[-1], []).append(sid)
     bound = (_hs_bound_names(root, text) if grammar == "haskell"
-             else _clj_bound_names(root, text) if grammar == "clojure" else set())
+             else _clj_bound_names(root, text) if grammar == "clojure"
+             else _local_names(root, grammar, text) if grammar in _FULLNAME else set())
 
     def enclosing(byte):
         for a, b_, sid in ordered:
@@ -2148,6 +2562,13 @@ def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls
                 callee = local[0] if len(local) == 1 else None
                 if not local:
                     calls_out.append((caller, method, None))
+        elif grammar in _FULLNAME:
+            head = recv.split(".")[0] if recv else None
+            if head in bound or (not recv and method in bound):
+                continue                                            # local: tapa lo importado
+            callee = scoped(cq, f"{recv}.{method}" if recv else method)
+            if callee is None and not (head and head in containers):
+                calls_out.append((caller, method, recv))            # el indexer, por nombre completo
         elif grammar == "objc":
             own = cq.split(".")[0] if "." in cq else (cq if cq in containers else "")
             if recv == "self" and own:

@@ -548,8 +548,8 @@ archivo). Así el sistema es agnóstico del LLM también en la generación, no s
 La extracción estructural dejó de ser solo Python + JS/TS. Un extractor GENÉRICO dirigido por
 config sobre tree-sitter cubre **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic, Assembly**,
 (M15a) **Ruby, Kotlin, Swift, Dart**, (M15b) **Scala, Lua, Elixir, Bash**, (M15c)
-**Terraform/HCL y PowerShell** y (M15d) **Erlang, Haskell, Perl, Zig, Solidity, Clojure y
-Objective-C** (SQL va
+**Terraform/HCL y PowerShell** y (M15d) **Erlang, Haskell, Perl, Zig, Solidity, Clojure,
+Objective-C, OCaml, F# y Julia** (SQL va
 aparte: extractor léxico propio, ver abajo):
 emite `symbol` (funciones, clases/tipos, métodos `Clase.m`) + aristas `defines` + `calls`
 INTRA-archivo (callee resuelto por nombre local), con extracción de nombre por-gramática
@@ -596,7 +596,13 @@ por `(ns …)` como Haskell (`u/f`, `:refer`, `:use`), prefiriendo la misma plat
 (`.clj`/`.cljs` + `.cljc`); Objective-C por selector completo (`Foo.greet:with:`), `[Foo m]`
 si Foo está declarada en lo importado (transitivo), `[self m]` a la propia clase y la regla de
 C para funciones, con el mapa de headers de Xcode (`#import "Foo.h"` por nombre, si es único)
-y `<Fw/X.h>` del framework propio. Las cláusulas/ecuaciones/sobrecargas de un nombre son un
+y `<Fw/X.h>` del framework propio. **M15d-2** resuelve por nombre completo (prefijo de
+módulo del archivo + símbolo): OCaml con módulo = archivo (y `Lib.Util` si dune envuelve la
+librería; gana la librería propia), alias `module M = A.B` y `open`; F# con su `namespace`/
+`module A.B` de cabecera, los `open` y solo los archivos que el `.fsproj` compila antes (nunca
+el `.fsi`); Julia con el módulo heredado por `include` (inclusión textual), `using .A`/`..A` y
+`import A: f`, contando los métodos de una función como una sola. Los nombres ligados
+localmente tapan a lo importado. Las cláusulas/ecuaciones/sobrecargas de un nombre son un
 solo símbolo, y la extensión no basta en tres casos: `.pl` de Prolog y `.m` de MATLAB quedan
 como nodo `file`, y un `.h` es Objective-C solo con directivas propias fuera de comentarios. Regla transversal: una llamada con receptor no resoluble
 (`a.b().m()`) nunca se trata como llamada libre. Encima, una **capa LLM
@@ -660,8 +666,9 @@ diffs y blobs leídos en lote (`git show` multi-commit + `git cat-file --batch`)
   degradación; espejo "en vivo" del instalador.
 - **Indexado multi-lenguaje (§18.7):** Python + JS/TS y C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly
   + (M15a) Ruby/Kotlin/Swift/Dart + (M15b) Scala/Lua/Elixir/Bash + (M15c) SQL/Terraform/
-  PowerShell + (M15d) Erlang/Haskell/Perl/Zig/Solidity/Clojure/Objective-C (símbolos +
-  `defines` + `calls` intra); `calls`/`imports`/`references` **cross-file** en los 28 lenguajes genéricos donde
+  PowerShell + (M15d) Erlang/Haskell/Perl/Zig/Solidity/Clojure/Objective-C/OCaml/F#/Julia
+  (símbolos + `defines` + `calls` intra); `calls`/`imports`/`references` **cross-file** en
+  los 31 lenguajes genéricos donde
   aplica (M9/M15), + capa LLM opcional
   de desambiguación.
 - **Suite:** 155 tests (`python -m unittest discover -s tests`), sin dependencias.
