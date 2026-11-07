@@ -195,7 +195,7 @@ def _read_source(node: dict, roots: dict) -> str:
     return "\n".join(lines[:60])
 
 
-def _build_context(store: Store, node: dict, roots: dict = None,
+def _build_context(store: Store, node: dict, roots: dict | None = None,
                    need_source: bool = False) -> dict:
     """Reúne el contexto que el summarizer necesita desde el grafo."""
     ctx = {}
@@ -319,7 +319,7 @@ def _has_pending(store: Store, rebuild: bool, only_missing: bool) -> bool:
     return False
 
 
-def _expected_backend_name(config, store: Store) -> str | None:
+def _expected_backend_name(config, store: Store | None = None) -> str | None:
     """Nombre del summarizer que el backend configurado PRODUCIRÍA. None para 'auto'
     (no se puede saber sin resolver disponibilidad en red)."""
     s = _resolve_summary_settings(config)

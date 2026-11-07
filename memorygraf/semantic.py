@@ -108,7 +108,7 @@ class SemanticSearcher:
         self.vectors = list(self.store.iter_embeddings(name))
 
     def rank(self, query: str, limit: int = 30, allowed: set | None = None) -> list[tuple[str, float]]:
-        if not self.available:
+        if not self.available or self.embedder is None:
             return []
         from .embedders import cosine
         qv = self.embedder.embed_one(query)

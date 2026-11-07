@@ -561,7 +561,7 @@ class Store:
                 pass
         like = f"%{query}%"
         q = ("SELECT * FROM nodes WHERE (name LIKE ? OR summary LIKE ? OR path LIKE ?)")
-        params = [like, like, like]
+        params: list = [like, like, like]
         if types:
             q += " AND type IN (%s)" % ",".join("?" * len(types))
             params += list(types)
