@@ -1,9 +1,10 @@
 # MemoryGraf — Deuda consciente y validación pendiente
 
-> **Estado (2026-10-27).** El backlog **M1–M12 está IMPLEMENTADO y probado**, y del anexo
-> M13–M20 ya entraron **M14 (`path A B`)** y **M15a–c**: M15a (Ruby, Kotlin, Swift,
-> Dart), M15b (Scala, Lua, Elixir, Bash) y M15c (SQL, Terraform/HCL, PowerShell), 23 lenguajes
-> en total (M15d, propuesto, lleva a 36); y la deuda registrada (§2 coste incremental de M1, deuda de
+> **Estado (2026-11-07).** El backlog **M1–M12 está IMPLEMENTADO y probado**, y del anexo
+> M13–M20 ya entraron **M14 (`path A B`)**, **M15a–c**: M15a (Ruby, Kotlin, Swift,
+> Dart), M15b (Scala, Lua, Elixir, Bash) y M15c (SQL, Terraform/HCL, PowerShell), y la
+> **parte 1 de M15d-1** (Erlang, Haskell, Perl, Zig y Solidity): 28 lenguajes en total
+> (el resto de M15d lleva a 36); y la deuda registrada (§2 coste incremental de M1, deuda de
 > M15a incluidos sus dos últimos límites, Java Maven/Gradle, LSP con TS 7) está **saldada**. Desde julio, además: **CI** en cada PR (Linux +
 > Windows nativo, modos portable y potencia; PR #13–#16 corrigieron los bugs que destapó)
 > e **imagen Docker** (`Dockerfile`). La fuente de verdad es el **código + los tests
@@ -16,9 +17,9 @@
 > Complementa `DESIGN.md` (principios §3, vinculantes).
 
 > **▶ Siguiente paso (actualizar al cerrar cada hito).**
-> 0. **M15d**: Erlang, Haskell, Perl, Clojure, Zig, Objective-C y Solidity cierran la meta de
->    M15 (23 → 30); OCaml, F#, Julia, Protobuf, GraphQL y COBOL la llevan a 36. Sin
->    dependencias nuevas.
+> 0. **M15d**: hechos Erlang, Haskell, Perl, Zig y Solidity (23 → 28). Faltan **Clojure y
+>    Objective-C** (con el sniff de `.h`/`.m`) para cerrar la meta de M15 (30); luego OCaml,
+>    F#, Julia, Protobuf, GraphQL y COBOL la llevan a 36. Sin dependencias nuevas.
 > 1. **M16** (instaladores multi-host): cierra el paquete de mayor retorno por esfuerzo
 >    junto con M14 y M15.
 > 2. Luego **M13** (comunidades) y **M17** (always-on). §9 sigue abierto en paralelo.
@@ -48,6 +49,7 @@
 | M15a | **Ruby, Kotlin, Swift, Dart**: símbolos + `calls` intra + `imports`/`calls` cross-file | `ts_generic` + `indexer`. Ver §M15. |
 | M15b | **Scala, Lua, Elixir, Bash**: ídem, cross-file solo donde es inequívoco | `ts_generic` + `indexer`. Ver §M15. |
 | M15c | **SQL** (extractor léxico propio, todos los dialectos, incluido PL/SQL), **Terraform/HCL**, **PowerShell** | `sql_lex` + `ts_generic` + `indexer`. Ver §M15. |
+| M15d-1 (parte 1) | **Erlang, Haskell, Perl, Zig, Solidity**: símbolos + `calls` intra + `imports`/`calls` cross-file; sniff de `.pl` (Prolog) | `ts_generic` + `indexer`. Ver §M15d. |
 
 Cada mejora entró con **test de regresión** y verificación en vivo (regla DESIGN §11).
 
@@ -277,7 +279,7 @@ CLI o enriqueciendo tools existentes, no como tool nueva. Lo que no cumple está
 |---|---|---|---|:--:|
 | **M13** | Comunidades / subsistemas | La única capacidad **analítica** que Graphify tiene y MemoryGraf no | Medio | **Alto** |
 | **M14** ✅ | `path A B` — cómo se conectan dos nodos | Consulta que hoy no existe (hay `neighbors`, no camino) | **Bajo** | **Alto** |
-| **M15** (a–c ✅, d propuesta) | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; con M15a–c, 23; M15d lleva a 36 | **Bajo** | **Alto** |
+| **M15** (a–c ✅, d en curso) | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; con M15a–c, 23; con M15d-1 parte 1, 28; M15d lleva a 36 | **Bajo** | **Alto** |
 | **M16** | Instaladores multi-host | `install claude` es el único; el resto es copiar JSON a mano | **Bajo** | **Alto** |
 | **M17** | Always-on: hooks de git + instrucciones de agente | El grafo se queda obsoleto y el asistente no lo usa por su cuenta | Bajo-medio | **Alto** |
 | **M18** | Exportadores (GraphML / Cypher / Obsidian / wiki) | Hoy solo JSON + HTML | Bajo | Medio |
@@ -391,7 +393,7 @@ trivial, datos ya en memoria, cero dependencias.
 
 ---
 
-### M15 · Ampliar la matriz de gramáticas (~12 → ~30 lenguajes)  (M15a–c ✅: M15a 2026-10-26, M15b y M15c 2026-10-27 · M15d PROPUESTA: 23 → 36)
+### M15 · Ampliar la matriz de gramáticas (~12 → ~30 lenguajes)  (M15a–c ✅: M15a 2026-10-26, M15b y M15c 2026-10-27 · M15d EN CURSO: 23 → 28 → 36)
 
 **Hecho — M15a (2026-10-26).** Ruby (`.rb`), Kotlin (`.kt`/`.kts`), Swift (`.swift`) y Dart
 (`.dart`) entran con **símbolos + `defines` + `calls` intra-archivo + `imports`/`calls`
@@ -585,7 +587,50 @@ que NO debe generar arista). Skip limpio si la gramática no está instalada.
 grupo, no por lenguaje. Riesgo acotado — si una gramática falla, ese lenguaje se omite y el
 resto del `sync` sigue (degradación ya implementada).
 
-### M15d · Cerrar y superar la meta de M15: de 23 a 36 lenguajes  (PROPUESTA, 2026-10-28)
+### M15d · Cerrar y superar la meta de M15: de 23 a 36 lenguajes  (PROPUESTA 2026-10-28 · M15d-1 parte 1 ✅ 2026-11-07)
+
+**Hecho — M15d-1 parte 1 (2026-11-07).** Erlang, Haskell, Perl, Zig y Solidity entran con
+símbolos + `defines` + `calls` intra-archivo + `imports`/`calls` cross-file, ninguno como
+symbols-only. El casado de llamadas va aparte (`_find_calls_m15d`): intra-archivo por ámbito
+léxico (el contenedor del llamante y hacia fuera), no por "el último símbolo con ese nombre".
+Las cláusulas de Erlang, ecuaciones de Haskell y sobrecargas de Solidity son **un** símbolo
+con el span de todas. Decisiones tomadas al implementar, además de la tabla de abajo:
+- **Erlang:** cada módulo usado en `mod:f(...)`, `fun mod:f/1` o `-import` es un import (en
+  Erlang el módulo no se declara): arista a `mod.erl` o `external:mod`. Records como `#r`.
+  `-include` prueba junto al archivo y luego el `include/` más cercano hacia arriba;
+  `-include_lib` busca el directorio de la app (`app/`, `app-1.2/`, `apps/app/`) o la raíz si el
+  proyecto es la app (`src/app.app.src`).
+- **Haskell:** los nombres ligados localmente (parámetros, patrones, `where`/`let`, `<-`) y
+  los campos de record del archivo tapan a los importados; un import con `hiding (f)` no
+  aporta `f`. Externo = dos primeros tramos (`external:Data.Map`).
+- **Perl:** símbolos `A::B.f` (el paquete con `::`, el miembro con `.`); el paquete se
+  resuelve por los símbolos `package` (AST), no por regex, así que el POD con ejemplos no
+  confunde. Pragmas en minúscula no son dependencias; `use parent`/`use base` sí importan sus
+  paquetes. Externo = el módulo completo (`external:List::Util`). `.pl` de Prolog: sniff ✅.
+- **Zig:** `const S = u.S` y `const f = u.f` se siguen como alias. Un nombre de build.zig
+  cuyo módulo no sale de `b.dependency`/`b.lazyDependency` (opciones de `addOptions`, código
+  generado) es propio aunque no tenga ruta: sin arista y sin `external:`.
+- **Solidity:** el scope es transitivo (`import "x"` trae lo que x importó). Una llamada
+  heredada va al ancestro que define la función y tapa a los demás (`B is A`, ambos con `f`
+  → `B.f`); si llega por dos ramas (que Solidity obliga a resolver con un `override`
+  propio), sin arista. `Tipo(x)` (conversión) no es una llamada.
+
+Validación en vivo (clon superficial, 2026-11-07), sin caídas; muestras revisadas a mano
+contra el código, sin falsos positivos encontrados:
+
+| Repo (commit) | Archivos | Símbolos | `calls` xfile | `imports` | Externos |
+|---|---:|---:|---:|---:|---|
+| cowboy (269595e) | 189 | 3 205 | 1 574 | 283 | 78 (cowlib, ranch, gun…) |
+| ShellCheck (b8dd508) | 31 | 3 623 | 996 | 136 | 42 (`Data.Map`, `Control.Monad`…) |
+| Mojolicious (33648dc) | 275 | 1 533 | 283 | 892 | 48 (`Carp`, `Encode`, `Digest::SHA`…) |
+| zls (c275dd2) | 90 | 1 370 | 415 | 267 | 5 (`std`, `builtin`, `diffz`, `known-folders`, `lsp`) |
+| openzeppelin-contracts (efaa6f7) | 740 | 4 018 sol | 1 230 | 1 324 | `forge-std` (submódulo vacío en el clon) |
+
+La validación destapó dos fallos que ya están corregidos y con test: en zls los módulos de
+`addOptions` salían como `external:`, y `tracy` quedaba ambiguo porque la regex de build.zig
+cortaba `x.import_table.get(...)` en `x`. Límite conocido: en Haskell, un campo de record de
+OTRO módulo no es símbolo, así que su uso no genera arista (pérdida de recall, no de
+precisión).
 
 **Contexto.** M15a–c dejan **23 lenguajes**: los 12 de partida (C, C++, Java, C#, Go,
 Rust, PHP, R, VB, asm, Python, JS/TS) más los 11 nuevos. El título de M15 prometía **~30**

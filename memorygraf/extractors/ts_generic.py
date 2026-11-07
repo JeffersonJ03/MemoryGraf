@@ -3,7 +3,8 @@
 Un solo recorrido, parametrizado por gramática, que emite nodos `symbol` (funciones,
 clases/estructuras/tipos, métodos) y aristas `defines`. Cubre C, C++, Java, C#, Go, Rust,
 PHP, R, Visual Basic, Assembly, (M15a) Ruby, Kotlin, Swift, Dart, (M15b) Scala, Lua,
-Elixir, Bash y (M15c) Terraform/HCL y PowerShell. (Python vive en
+Elixir, Bash, (M15c) Terraform/HCL y PowerShell, y (M15d) Erlang, Haskell, Perl, Zig y
+Solidity. (Python vive en
 `python_ast`; JS/TS en `ts_treesitter`, que además resuelve `calls`/`imports`.)
 
 Alcance v1 (honesto): SÍMBOLOS + `defines` (lo uniforme y de mayor valor: `overview`,
@@ -44,7 +45,18 @@ _CALLS = {
     "bash":  ({"command"}, "name"),
     # M15c
     "powershell": ({"command", "invokation_expression"}, None),
+    # M15d (ver _call_parts y _find_calls_m15d)
+    "erlang": ({"call", "remote"}, None),
+    "haskell": ({"apply"}, None),
+    "perl": ({"function_call_expression", "ambiguous_function_call_expression",
+              "method_call_expression"}, None),
+    "zig": ({"SuffixExpr"}, None),
+    "solidity": ({"call_expression", "modifier_invocation"}, None),
 }
+
+# M15d: lenguajes con su propio casado de llamadas (_find_calls_m15d) e imports
+# (_imports_m15d). Sus cláusulas/ecuaciones/sobrecargas de un mismo nombre son UN símbolo.
+_M15D = {"erlang", "haskell", "perl", "zig", "solidity"}
 
 # Lenguajes con nombres que NO distinguen mayúsculas (PowerShell: `invoke-deploy` llama a
 # `Invoke-Deploy`): el casado intra-archivo y cross-file compara en minúsculas.
@@ -114,6 +126,9 @@ _GRAMMAR_BY_EXT = {
     "sh": "bash", "bash": "bash",
     # M15c (SQL va por su extractor léxico, `sql_lex`, no por tree-sitter)
     "tf": "hcl", "hcl": "hcl", "ps1": "powershell", "psm1": "powershell",
+    # M15d (`.pl` puede ser Prolog: ver _looks_like_prolog)
+    "erl": "erlang", "hrl": "erlang", "hs": "haskell",
+    "pm": "perl", "pl": "perl", "t": "perl", "zig": "zig", "sol": "solidity",
 }
 
 # Por gramática: tipos de nodo por categoría.
@@ -184,6 +199,8 @@ _SPEC = {
 def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list, list, dict]:
     ext = rel_path.rsplit(".", 1)[-1].lower()
     grammar = _GRAMMAR_BY_EXT.get(ext)
+    if ext == "pl" and _looks_like_prolog(source):
+        grammar = None                   # Prolog: solo el nodo `file`, nunca como Perl
     fid = file_id(rel_path)
     nodes = [Node(id=fid, type=NODE_FILE, name=rel_path.split("/")[-1],
                   project=project, path=rel_path, tags=[grammar or "code"])]
@@ -205,6 +222,15 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     by_qual: dict = {}        # nombre cualificado -> sid (`Tipo.metodo` intra-archivo)
 
     def add(qual, kind, node, parent_id):
+        if grammar in _M15D and qual in by_qual:
+            # Cláusulas de Erlang, ecuaciones de Haskell, sobrecargas de Solidity: un
+            # solo símbolo cuyo span cubre todas (se llaman por nombre, no por aridad).
+            sid = by_qual[qual]
+            for n in nodes:
+                if n.id == sid:
+                    n.span_end = max(n.span_end or 0, node.end_point[0] + 1)
+            spans.append((node.start_byte, node.end_byte, sid))
+            return sid
         sid = symbol_id(rel_path, qual)
         nodes.append(Node(id=sid, type=NODE_SYMBOL, name=qual, project=project,
                           path=rel_path, span_start=node.start_point[0] + 1,
@@ -232,6 +258,14 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
         # dentro del directorio = módulo) y `source` de los `module` como imports.
         calls_out, raw_imports = _extract_hcl(root, text, fid, add, spans)
         return nodes, edges, raw_imports, calls_out, {}
+    elif grammar in _M15D:
+        _M15D_DEFS[grammar](root, text, fid, add)
+        module = rel_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]    # Erlang: módulo = archivo
+        raw_imports, bindings = _imports_m15d(root, grammar, text, module)
+        calls_out = []
+        _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls_out,
+                         module)
+        return nodes, edges, raw_imports, calls_out, bindings
     else:
         _walk_defs(root, _SPEC[grammar], grammar, text, src, rel_path, fid, add)
 
@@ -313,6 +347,8 @@ def _call_parts(n, grammar, text):
     """(receptor, método_corto) de una llamada; receptor=None si NO hay receptor (llamada
     libre) y _OPAQUE si lo hay pero no es un nombre. El receptor se contrasta contra los
     bindings de import."""
+    if grammar in _M15D:
+        return _call_parts_m15d(n, grammar, text)
     if grammar == "java" and n.type == "method_invocation":
         obj, nm = n.child_by_field_name("object"), n.child_by_field_name("name")
         recv = _recv(obj, text)
@@ -1260,3 +1296,578 @@ def _find_calls_asm(root, text, spans, by_short, edges):
             walk(c)
 
     walk(root)
+
+
+# --------------------------------------------------------------------------- #
+# M15d · Erlang, Haskell, Perl, Zig y Solidity
+# --------------------------------------------------------------------------- #
+# Prolog también usa `.pl`: directivas `:- ...` o cláusulas `cabeza :- cuerpo` a inicio
+# de línea y nada de Perl. Ante la duda gana Perl (lo que la extensión ya decía).
+_RE_PROLOG = re.compile(r"^(?::-|[a-z]\w*(?:\([^)\n]*\))?\s*:-)", re.MULTILINE)
+_RE_PERLISH = re.compile(r"^\s*(?:use|sub|my|our|package|require)\b|\$\w", re.MULTILINE)
+
+
+def _looks_like_prolog(source: str) -> bool:
+    head = source[:8192]
+    return bool(_RE_PROLOG.search(head)) and not _RE_PERLISH.search(head)
+
+
+def _erl_atom(s: str) -> str:
+    """`'run'` y `run` son el mismo átomo."""
+    return s[1:-1] if len(s) > 1 and s[0] == s[-1] == "'" else s
+
+
+def _extract_erlang(root, text, fid, add):
+    """Erlang: cada `fun_decl` es una función con el nombre de su primera cláusula (las
+    aridades distintas comparten símbolo: la llamada se casa por nombre) y cada
+    `-record(r, ...)` un tipo `#r` (los records tienen su propio espacio de nombres).
+    Entra en los bloques del preprocesador (`-ifdef`), no en los cuerpos."""
+    def walk(node):
+        for ch in node.children:
+            if ch.type == "fun_decl":
+                cl = _first_child(ch, "function_clause")
+                nm = cl.child_by_field_name("name") if cl is not None else None
+                if nm is not None and nm.type == "atom":
+                    add(_erl_atom(text(nm)), "func", ch, fid)
+            elif ch.type == "record_decl":
+                nm = ch.child_by_field_name("name")
+                if nm is not None:
+                    add("#" + _erl_atom(text(nm)), "type", ch, fid)
+            elif ch.named_child_count:
+                walk(ch)
+
+    walk(root)
+
+
+_HS_TYPES = {"data_type", "newtype", "type_synomym", "type_family", "data_family"}
+
+
+def _extract_haskell(root, text, fid, add):
+    """Haskell: funciones y valores top-level (`f x = ...`, `main = do ...`), tipos
+    (`data`/`newtype`/`type`) y clases, cuyas firmas son `Clase.metodo`. El `instance`
+    cuelga del tipo y no se emite; los operadores tampoco."""
+    decls = _first_child(root, "declarations")
+    for ch in (decls.children if decls is not None else []):
+        nm = ch.child_by_field_name("name")
+        if nm is None:
+            continue
+        if ch.type in ("function", "bind") and nm.type == "variable":
+            add(text(nm), "func", ch, fid)
+        elif ch.type in _HS_TYPES:
+            add(text(nm), "type", ch, fid)
+        elif ch.type == "class":
+            cid = add(text(nm), "class", ch, fid)
+            body = ch.child_by_field_name("declarations")
+            for d in (body.children if body is not None else []):
+                m = d.child_by_field_name("name") if d.type == "signature" else None
+                if m is not None and m.type == "variable":
+                    add(f"{text(nm)}.{text(m)}", "method", d, cid)
+
+
+def _extract_perl(root, text, fid, add):
+    """Perl: `package A::B;` (hasta el siguiente o el fin del bloque) y `package A::B
+    { ... }` son contenedores (símbolo `A::B`) y sus `sub f` son `A::B.f`; `sub A::B::f`
+    se cualifica solo. El código de `main` deja sus subs sin prefijo."""
+    pkgs: dict = {}
+
+    def pkg_sym(name, node):
+        if name not in pkgs:
+            pkgs[name] = add(name, "class", node, fid)
+        return pkgs[name]
+
+    def walk(node, pkg):
+        for ch in node.children:
+            if ch.type == "package_statement":
+                nm = ch.child_by_field_name("name")
+                if nm is None:
+                    continue
+                name = text(nm)
+                if name != "main":
+                    pkg_sym(name, ch)
+                blk = _first_child(ch, "block")
+                if blk is not None:
+                    walk(blk, name)                # `package X { ... }`: solo el bloque
+                else:
+                    pkg = name                     # `package X;`: hasta el siguiente
+            elif ch.type == "subroutine_declaration_statement":
+                nm = ch.child_by_field_name("name")
+                if nm is None:
+                    continue
+                full = text(nm)
+                owner, sub = full.rsplit("::", 1) if "::" in full else (pkg, full)
+                if owner and owner != "main":
+                    add(f"{owner}.{sub}", "method", ch, pkg_sym(owner, ch))
+                else:
+                    add(sub, "func", ch, fid)
+            else:
+                walk(ch, pkg)                      # un bloque acota el `package X;` interno
+
+    walk(root, None)
+
+
+def _extract_zig(root, text, fid, add):
+    """Zig: un archivo es un struct. `fn f` top-level es una función y `const S = struct
+    {...}` (o enum/union/opaque) un contenedor cuyas `fn` son `S.m`; los anidados se
+    cualifican (`S.Inner.m`), igual que se nombran desde fuera."""
+    def container(vd):
+        e = _first_child(vd, "ErrorUnionExpr")
+        s = _first_child(e, "SuffixExpr") if e is not None else None
+        c = s.named_children[0] if s is not None and s.named_children else None
+        return c if c is not None and c.type == "ContainerDecl" else None
+
+    def walk(node, prefix, parent_id):
+        for d in node.children:
+            if d.type != "Decl":
+                continue
+            fp = _first_child(d, "FnProto")
+            if fp is not None:
+                nm = fp.child_by_field_name("function")
+                if nm is not None:
+                    add(f"{prefix}.{text(nm)}" if prefix else text(nm),
+                        "method" if prefix else "func", d, parent_id)
+                continue
+            vd = _first_child(d, "VarDecl")
+            nm = vd.child_by_field_name("variable_type_function") if vd is not None else None
+            cd = container(vd) if vd is not None else None
+            if nm is not None and cd is not None:
+                qual = f"{prefix}.{text(nm)}" if prefix else text(nm)
+                walk(cd, qual, add(qual, "class", d, parent_id))
+
+    walk(root, None, fid)
+
+
+_SOL_CONTAINERS = {"contract_declaration", "library_declaration", "interface_declaration"}
+_SOL_MEMBERS = {"function_definition": "method", "modifier_definition": "method",
+                "constructor_definition": "method", "fallback_receive_definition": "method",
+                "event_definition": "type", "struct_declaration": "type",
+                "enum_declaration": "type", "error_declaration": "type"}
+
+
+def _extract_solidity(root, text, fid, add):
+    """Solidity: `contract`/`library`/`interface` son contenedores; sus funciones,
+    modificadores, constructor, eventos, structs, enums y errores son `C.x`. Las
+    funciones, structs y errores a nivel de archivo quedan sin prefijo."""
+    def name_of(n):
+        if n.type == "constructor_definition":
+            return "constructor"
+        if n.type == "fallback_receive_definition":
+            return text(n).lstrip().split("(", 1)[0].strip() or None   # fallback / receive
+        nm = n.child_by_field_name("name")
+        return text(nm) if nm is not None else None
+
+    for ch in root.children:
+        if ch.type in _SOL_CONTAINERS:
+            cn = ch.child_by_field_name("name")
+            if cn is None:
+                continue
+            cid = add(text(cn), "class", ch, fid)
+            body = ch.child_by_field_name("body")
+            for m in (body.children if body is not None else []):
+                nm = name_of(m) if m.type in _SOL_MEMBERS else None
+                if nm:
+                    add(f"{text(cn)}.{nm}", _SOL_MEMBERS[m.type], m, cid)
+        elif ch.type in _SOL_MEMBERS:
+            nm = name_of(ch)
+            if nm:
+                add(nm, "func" if _SOL_MEMBERS[ch.type] == "method" else "type", ch, fid)
+
+
+_M15D_DEFS = {"erlang": _extract_erlang, "haskell": _extract_haskell,
+              "perl": _extract_perl, "zig": _extract_zig, "solidity": _extract_solidity}
+
+
+def _call_parts_m15d(n, grammar, text):
+    """(receptor, nombre) de una llamada M15d; mismo contrato que _call_parts."""
+    if grammar == "erlang":
+        if n.type == "remote":                                  # mod:f(...)
+            mod, fun = n.child_by_field_name("module"), n.child_by_field_name("fun")
+            m = mod.child_by_field_name("module") if mod is not None else None
+            f = fun.child_by_field_name("expr") if fun is not None and fun.type == "call" else None
+            if f is None or f.type != "atom":
+                return None, None
+            if m is not None and m.type == "atom":
+                return _erl_atom(text(m)), _erl_atom(text(f))
+            if m is not None and text(m) == "?MODULE":
+                return None, _erl_atom(text(f))
+            return _OPAQUE, _erl_atom(text(f))                  # Var:f(...): dinámico
+        if n.parent is not None and n.parent.type == "remote":
+            return None, None                                   # el `f(...)` de mod:f(...)
+        ex = n.child_by_field_name("expr")
+        return None, (_erl_atom(text(ex)) if ex is not None and ex.type == "atom" else None)
+    if grammar == "haskell":
+        fn = n.child_by_field_name("function")
+        if fn is not None and fn.type == "variable":
+            return None, text(fn)
+        if fn is not None and fn.type == "qualified":           # M.f / Data.Map.f
+            mod, ident = fn.child_by_field_name("module"), fn.child_by_field_name("id")
+            if mod is not None and ident is not None and ident.type == "variable":
+                return text(mod).rstrip("."), text(ident)       # el nodo incluye el `.`
+        return None, None              # `f a b` = apply(apply(f, a), b): cuenta el interno
+    if grammar == "perl":
+        if n.type == "method_call_expression":
+            inv, m = n.child_by_field_name("invocant"), n.child_by_field_name("method")
+            name = text(m) if m is not None else ""
+            if not re.fullmatch(r"\w+", name):
+                return None, None                               # $obj->$metodo
+            # `A::B->new`: método de clase; `$obj->m`: dinámico (sin arista)
+            return (text(inv) if inv is not None and inv.type == "bareword" else _OPAQUE), name
+        fn = n.child_by_field_name("function")
+        name = text(fn).lstrip("&") if fn is not None else ""
+        if not re.fullmatch(r"\w+(?:::\w+)*", name):
+            return None, None
+        if "::" in name:
+            pkg, sub = name.rsplit("::", 1)
+            if pkg in ("SUPER", "CORE", "CORE::GLOBAL"):
+                return None, None
+            return (None, sub) if pkg == "main" else (pkg, sub)
+        return None, name
+    if grammar == "zig":
+        kids = n.named_children
+        if len(kids) < 2 or kids[0].type != "IDENTIFIER":
+            return None, None                                   # @import(...).f(), etc.
+        head = text(kids[0])
+        if kids[1].type == "FnCallArguments":
+            return None, head                                   # f(...)
+        fc = kids[1].child_by_field_name("function_call") if kids[1].type == "FieldOrFnCall" else None
+        if fc is not None:
+            return head, text(fc)                               # x.f(...)
+        return None, None                                       # a.b.f(...): opaco
+    if grammar == "solidity":
+        if n.type == "modifier_invocation":
+            idn = _first_child(n, "identifier")
+            return None, (text(idn) if idn is not None else None)
+        fn = n.child_by_field_name("function")
+        e = fn.named_children[0] if fn is not None and fn.named_children else fn
+        if e is not None and e.type == "identifier":
+            return None, text(e)
+        if e is not None and e.type == "member_expression":
+            obj, prop = e.child_by_field_name("object"), e.child_by_field_name("property")
+            return _recv(obj, text), (text(prop) if prop is not None else None)
+    return None, None
+
+
+def _erl_imports(root, text, module):
+    """Erlang: `-include("x.hrl")` -> "inc:x.hrl", `-include_lib("app/include/x.hrl")`
+    -> "lib:...", y cada módulo usado en `mod:f(...)`, `fun mod:f/1` o `-import` ->
+    "mod:mod" (en Erlang el módulo se usa sin declararlo). `-import(m, [f/1])` liga f."""
+    raws, b = [], {}
+
+    def walk(n):
+        t = n.type
+        if t in ("pp_include", "pp_include_lib"):
+            f = n.child_by_field_name("file")
+            m = re.fullmatch(r'"([^"$?]+)"', text(f)) if f is not None else None
+            if m:
+                raws.append(("inc:" if t == "pp_include" else "lib:") + m.group(1))
+            return
+        if t == "import_attribute":
+            mod = n.child_by_field_name("module")
+            if mod is not None and mod.type == "atom":
+                raw = "mod:" + _erl_atom(text(mod))
+                raws.append(raw)
+                for fa in (c for c in n.children if c.type == "fa"):
+                    fn = fa.child_by_field_name("fun")
+                    if fn is not None:
+                        b[_erl_atom(text(fn))] = (raw, _erl_atom(text(fn)))
+            return
+        if t in ("remote", "external_fun"):
+            mod = n.child_by_field_name("module")
+            m = mod.child_by_field_name("module" if t == "remote" else "name") \
+                if mod is not None else None
+            if m is not None and m.type == "atom" and _erl_atom(text(m)) != module:
+                raws.append("mod:" + _erl_atom(text(m)))
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    return list(dict.fromkeys(raws)), b
+
+
+def _hs_imports(root, text, _module):
+    """Haskell: raw = el módulo importado. Bindings (los resuelve el indexer):
+      "q:<X>:<Mod>"  -> `X.f` vale para Mod (X = su alias `as X`, o su nombre completo)
+      "n:<f>:<Mod>"  -> `f` viene de la lista explícita `import Mod (f)`
+      "open:<Mod>"   -> import abierto (sin lista, o con `hiding`: los ocultos van en
+                        el segundo campo, separados por comas)"""
+    raws, b = [], {}
+    imps = _first_child(root, "imports")
+    for imp in (imps.children if imps is not None else []):
+        mod = imp.child_by_field_name("module") if imp.type == "import" else None
+        if mod is None:
+            continue
+        m = text(mod)
+        raws.append(m)
+        kw = {c.type for c in imp.children if not c.is_named}
+        alias = imp.child_by_field_name("alias")
+        lst = imp.child_by_field_name("names")
+        names = [text(v) for it in (lst.children if lst is not None else [])
+                 if it.type == "import_name"
+                 for v in [it.child_by_field_name("variable")] if v is not None]
+        b[f"q:{text(alias) if alias is not None else m}:{m}"] = (m, None)
+        if "qualified" in kw:
+            continue
+        if lst is None or "hiding" in kw:
+            b[f"open:{m}"] = (m, ",".join(names) if lst is not None else None)
+        else:
+            for nm in names:
+                b[f"n:{nm}:{m}"] = (m, nm)
+    return list(dict.fromkeys(raws)), b
+
+
+_PERL_PRAGMA = re.compile(r"[a-z][a-z0-9_]*")       # strict, warnings, utf8, lib, parent…
+
+
+def _perl_imports(root, text, _module):
+    """Perl: `use A::B` / `require A::B` -> "pkg:A::B"; `use parent`/`use base` -> sus
+    paquetes; `require "x.pl"` -> "cwd:x.pl" (depende del @INC: el indexer solo lo
+    enlaza si es único). `use A::B qw(f)` liga f; si dos `use` exportan el mismo nombre,
+    queda sin paquete (no se adivina)."""
+    raws, b = [], {}
+
+    def words(n):
+        out = []
+        for c in n.children:
+            content = c.child_by_field_name("content") if c.is_named else None
+            if c.type == "quoted_word_list" and content is not None:
+                out += text(content).split()
+            elif c.type in ("string_literal", "interpolated_string_literal") \
+                    and content is not None:
+                out.append(text(content))
+            elif c.type == "list_expression":
+                out += words(c)
+        return out
+
+    def walk(n):
+        if n.type == "use_statement":
+            mod = n.child_by_field_name("module")
+            if mod is None:
+                return
+            name = text(mod)
+            if _PERL_PRAGMA.fullmatch(name):
+                if name in ("parent", "base"):
+                    raws.extend("pkg:" + a for a in words(n) if not a.startswith("-"))
+                return
+            raws.append("pkg:" + name)
+            for a in words(n):
+                a = a.lstrip("&")
+                if re.fullmatch(r"[A-Za-z_]\w*", a):
+                    prev = b.get(a)
+                    b[a] = (name, a) if prev is None or prev[0] == name else ("", a)
+            return
+        if n.type == "require_expression":
+            bw = _first_child(n, "bareword")
+            lit = next((c for c in n.children if c.type in (
+                "string_literal", "interpolated_string_literal")), None)
+            content = lit.child_by_field_name("content") if lit is not None else None
+            if bw is not None:
+                raws.append("pkg:" + text(bw))
+            elif content is not None and re.fullmatch(r"[\w./-]+", text(content)):
+                p = text(content)
+                if p.endswith(".pm") and not p.startswith((".", "/")):
+                    raws.append("pkg:" + p[:-3].replace("/", "::"))   # "A/B.pm" = A::B
+                else:
+                    raws.append("cwd:" + p)
+            return
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    return list(dict.fromkeys(raws)), b
+
+
+def _zig_imports(root, text, _module):
+    """Zig: cada `@import("x")` es un raw ("x.zig" relativo al archivo, o un módulo:
+    `std`, uno de build.zig…). `const u = @import("x.zig")` liga u al archivo;
+    `const S = @import("x.zig").S` y `const f = u.f` ligan el miembro (u.f -> (x, "f"))."""
+    raws, b = [], {}
+    decls = []
+
+    def import_of(sfx):
+        kids = sfx.named_children
+        if len(kids) >= 2 and kids[0].type == "BUILTINIDENTIFIER" \
+                and text(kids[0]) == "@import" and kids[1].type == "FnCallArguments":
+            m = re.fullmatch(r'\(\s*"([^"]+)"\s*\)', text(kids[1]))
+            return (m.group(1) if m else None), kids[2:]
+        return None, []
+
+    def member(rest):
+        """`.a.b` (solo accesos a campo) -> "a.b"; nada -> ""; otra cosa -> None."""
+        out = []
+        for k in rest:
+            fa = k.child_by_field_name("field_access") if k.type == "FieldOrFnCall" else None
+            if fa is None or k.child_by_field_name("function_call") is not None:
+                return None
+            out.append(text(fa))
+        return ".".join(out)
+
+    def walk(n):
+        if n.type == "SuffixExpr":
+            raw, _rest = import_of(n)
+            if raw:
+                raws.append(raw)
+        elif n.type == "VarDecl":
+            nm = n.child_by_field_name("variable_type_function")
+            e = _first_child(n, "ErrorUnionExpr")
+            s = _first_child(e, "SuffixExpr") if e is not None else None
+            if nm is not None and s is not None:
+                decls.append((text(nm), s))
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    for name, s in decls:                                   # 1º los @import directos
+        raw, rest = import_of(s)
+        mem = member(rest) if raw else None
+        if raw and mem is not None:
+            b[name] = (raw, mem or None)
+    for _ in range(3):                                      # luego los alias encadenados
+        for name, s in decls:
+            kids = s.named_children
+            if name in b or not kids or kids[0].type != "IDENTIFIER" or text(kids[0]) not in b:
+                continue
+            mem = member(kids[1:])
+            if mem:
+                raw, base = b[text(kids[0])]
+                b[name] = (raw, f"{base}.{mem}" if base else mem)
+    return list(dict.fromkeys(raws)), b
+
+
+def _sol_imports(root, text, _module):
+    """Solidity: raw = la ruta del import. `import {A as B} from "x"` liga B -> (x, "A");
+    `import * as U from "x"` y `import "x" as U` ligan U -> (x, None) (un espacio de
+    nombres). `import "x"` no liga nada: lo visible va por el scope transitivo."""
+    raws, b = [], {}
+    for imp in root.children:
+        src = imp.child_by_field_name("source") if imp.type == "import_directive" else None
+        if src is None:
+            continue
+        raw = text(src).strip("\"'")
+        raws.append(raw)
+        pending = None
+        for i, c in enumerate(imp.children):
+            f = imp.field_name_for_child(i)
+            if f == "import_name":
+                pending = text(c)
+                b[pending] = (raw, pending)
+            elif f == "alias":
+                if pending is not None:
+                    b.pop(pending, None)
+                    b[text(c)] = (raw, pending)
+                else:
+                    b[text(c)] = (raw, None)
+                pending = None
+    return list(dict.fromkeys(raws)), b
+
+
+_M15D_IMPORTS = {"erlang": _erl_imports, "haskell": _hs_imports, "perl": _perl_imports,
+                 "zig": _zig_imports, "solidity": _sol_imports}
+
+
+def _imports_m15d(root, grammar, text, module):
+    """(raw_imports, bindings) de un lenguaje M15d. La resolución a archivo vive en el
+    indexer (`_resolve_generic`, `_m15d_pairs`)."""
+    return _M15D_IMPORTS[grammar](root, text, module)
+
+
+def _hs_bound_names(root, text) -> set:
+    """Nombres ligados LOCALMENTE en un archivo Haskell (parámetros, patrones de `case`,
+    lambdas y `<-`, las funciones de `where`/`let` y los campos de record, que son
+    funciones del archivo). Tapan a cualquier import: una llamada a uno de ellos nunca se
+    resuelve cross-file (aunque sea de otra función)."""
+    out: set = set()
+    top = _first_child(root, "declarations")
+
+    def variables(n):
+        if n.type == "variable":
+            out.add(text(n))
+        for c in n.children:
+            variables(c)
+
+    def walk(n):
+        for i, c in enumerate(n.children):
+            if n.field_name_for_child(i) in ("patterns", "pattern") or c.type == "field_name":
+                variables(c)
+                continue
+            if c.type in ("function", "bind") and n is not top:
+                nm = c.child_by_field_name("name")
+                if nm is not None:
+                    variables(nm)
+            walk(c)
+
+    walk(root)
+    return out
+
+
+def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls_out,
+                     module):
+    """Llamadas M15d: `calls` intra-archivo por ámbito léxico (el contenedor del llamante
+    y hacia fuera, nunca "el último símbolo con ese nombre") y `calls_out` cross-file que
+    resuelve el indexer. Una llamada a algo que el archivo no puede ver no sale."""
+    ordered = sorted(spans, key=lambda s: s[1] - s[0])
+    qual_of = {sid: q for q, sid in by_qual.items()}
+    containers = set()                     # cada prefijo `A`, `A.B` de un `A.B.m`
+    for q in by_qual:
+        while "." in q:
+            q = q.rsplit(".", 1)[0]
+            containers.add(q)
+    shorts: dict = {}
+    for q, sid in by_qual.items():
+        shorts.setdefault(q.rsplit(".", 1)[-1], []).append(sid)
+    bound = _hs_bound_names(root, text) if grammar == "haskell" else set()
+
+    def enclosing(byte):
+        for a, b_, sid in ordered:
+            if a <= byte <= b_:
+                return sid
+        return None
+
+    def scoped(cq, name):
+        """`name` visto desde el símbolo `cq`: su contenedor, el de fuera… y el archivo."""
+        base = cq if cq in containers else (cq.rsplit(".", 1)[0] if "." in cq else "")
+        while True:
+            hit = by_qual.get(f"{base}.{name}" if base else name)
+            if hit or not base:
+                return hit
+            base = base.rsplit(".", 1)[0] if "." in base else ""
+
+    seen = set()
+    for byte, recv, method in _iter_calls(root, grammar, text):
+        caller = enclosing(byte)
+        if not (caller and method) or recv == _OPAQUE:
+            continue
+        cq = qual_of.get(caller, "")
+        callee = None
+        if grammar == "erlang":
+            if recv in (None, module):
+                callee = by_qual.get(method)
+                if callee is None and recv is None and method in bindings:
+                    calls_out.append((caller, method, None))        # -import(m, [f/1])
+            else:
+                calls_out.append((caller, method, recv))            # mod:f(...)
+        elif grammar == "haskell":
+            if recv:
+                calls_out.append((caller, method, recv))            # X.f: alias o módulo
+            elif method not in bound:
+                local = shorts.get(method, [])
+                callee = local[0] if len(local) == 1 else None
+                if not local:
+                    calls_out.append((caller, method, None))
+        elif grammar == "perl":
+            own = cq.rsplit(".", 1)[0] if "." in cq else (cq if cq in containers else "")
+            want = f"{recv}.{method}" if recv else (f"{own}.{method}" if own else method)
+            callee = by_qual.get(want)
+            if callee is None:
+                calls_out.append((caller, method, recv))
+        elif recv and recv in bindings:                              # zig / solidity
+            calls_out.append((caller, method, recv))                # u.f / U.f
+        elif recv:
+            callee = scoped(cq, f"{recv}.{method}")
+            if callee is None and grammar == "solidity" and _is_type(recv):
+                calls_out.append((caller, method, recv))            # Lib.f importado
+        elif not (grammar == "solidity" and method[:1].isupper()):  # Tipo(x): conversión
+            callee = scoped(cq, method)
+            if callee is None and (grammar == "solidity" or method in bindings):
+                calls_out.append((caller, method, None))            # heredado / alias
+        if callee and callee != caller and (caller, callee) not in seen:
+            seen.add((caller, callee))
+            edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))

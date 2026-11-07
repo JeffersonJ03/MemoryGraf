@@ -547,8 +547,9 @@ archivo). Así el sistema es agnóstico del LLM también en la generación, no s
 
 La extracción estructural dejó de ser solo Python + JS/TS. Un extractor GENÉRICO dirigido por
 config sobre tree-sitter cubre **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic, Assembly**,
-(M15a) **Ruby, Kotlin, Swift, Dart**, (M15b) **Scala, Lua, Elixir, Bash** y (M15c)
-**Terraform/HCL y PowerShell** (SQL va aparte: extractor léxico propio, ver abajo):
+(M15a) **Ruby, Kotlin, Swift, Dart**, (M15b) **Scala, Lua, Elixir, Bash**, (M15c)
+**Terraform/HCL y PowerShell** y (M15d) **Erlang, Haskell, Perl, Zig y Solidity** (SQL va
+aparte: extractor léxico propio, ver abajo):
 emite `symbol` (funciones, clases/tipos, métodos `Clase.m`) + aristas `defines` + `calls`
 INTRA-archivo (callee resuelto por nombre local), con extracción de nombre por-gramática
 (campo `name`; casos especiales: declarator en C/C++, `type_spec` en Go, `impl` en Rust,
@@ -583,7 +584,15 @@ stdlib válido para todos los dialectos (la gramática de tree-sitter no entiend
 `references` a tablas/vistas (procedencia `ast-ref` = EXTRACTED) y `calls` a rutinas sobre
 el espacio de nombres global del proyecto; Terraform por directorio (= módulo) y
 `module.m.out` → `output`; PowerShell por dot-sourcing relativo al script y ámbito de
-módulo. Regla transversal: una llamada con receptor no resoluble
+módulo. **M15d:** Erlang por módulo = nombre de archivo (`mod:f`, `-import`, `-include` y
+`-include_lib`); Haskell por el header `module` (`import qualified … as X`, listas
+explícitas, imports abiertos con `hiding`; los nombres ligados localmente tapan a los
+importados); Perl por `package` (`A::B::f`, `A::B->m`, `use A::B qw(f)`, `require "x.pl"`);
+Zig por `@import` relativo o los módulos de build.zig (solo literales; `b.dependency` es
+externo); Solidity por imports relativos/remappings con scope transitivo, alias de import y
+herencia `is A, B` (gana el ancestro que tapa a los demás; dos ramas = sin arista). Las
+cláusulas/ecuaciones/sobrecargas de un nombre son un solo símbolo, y `.pl` de Prolog se
+detecta por contenido y queda como nodo `file`. Regla transversal: una llamada con receptor no resoluble
 (`a.b().m()`) nunca se trata como llamada libre. Encima, una **capa LLM
 opcional y opt-in** (`resolver.llm` / `MEMORYGRAF_XLINK_LLM`) desempata los casos ambiguos que el
 resolutor estático deja sin enlazar (confidence baja + provenance `llm`, fallback determinista).
@@ -645,7 +654,8 @@ diffs y blobs leídos en lote (`git show` multi-commit + `git cat-file --batch`)
   degradación; espejo "en vivo" del instalador.
 - **Indexado multi-lenguaje (§18.7):** Python + JS/TS y C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly
   + (M15a) Ruby/Kotlin/Swift/Dart + (M15b) Scala/Lua/Elixir/Bash + (M15c) SQL/Terraform/
-  PowerShell (símbolos + `defines` + `calls` intra); `calls`/`imports`/`references`
-  **cross-file** en los 21 lenguajes genéricos donde aplica (M9/M15), + capa LLM opcional
+  PowerShell + (M15d) Erlang/Haskell/Perl/Zig/Solidity (símbolos + `defines` + `calls`
+  intra); `calls`/`imports`/`references` **cross-file** en los 26 lenguajes genéricos donde
+  aplica (M9/M15), + capa LLM opcional
   de desambiguación.
 - **Suite:** 155 tests (`python -m unittest discover -s tests`), sin dependencias.

@@ -935,6 +935,165 @@ class TestM15c(Base):
         self.assertEqual(deps, set())
 
 
+class TestM15d(Base):
+    """M15d-1 (parte 1): Erlang, Haskell, Perl, Zig y Solidity. Fixtures en
+    tests/fixtures/crossfile/<lenguaje>/; los casos que NO deben enlazar, con un
+    proyecto propio por test (precisión primero, como TestPrecisionM15a/b)."""
+
+    def _graph(self, lang=None):
+        if lang:
+            root = os.path.join(CROSSFILE_DIR, lang)
+            store = Store(os.path.join(self.tmp, f"{lang}.db"))
+            Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        else:
+            store, _ = self.index()
+        rows = [(e["source"], e["target"], e["type"], e["provenance"]) for e in store.all_edges()]
+        syms = {n["name"] for n in store.all_nodes(types=["symbol"])}
+        store.close()
+        return ({(s, t) for s, t, ty, pv in rows if ty == "calls" and pv == "xfile"},
+                {(s, t) for s, t, ty, _pv in rows if ty in ("imports", "depends_on")},
+                {(s, t) for s, t, ty, pv in rows if ty == "calls" and pv == "tree-sitter"},
+                syms)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_fixture_imports_and_calls(self):
+        e, h, p = "erlang/src/billing.erl", "haskell/src/App", "perl/lib/App"
+        z, s = "zig/src", "solidity/contracts"
+        cases = {
+            "erlang": ({(f"{e}::run", "erlang/src/util.erl::check"),          # util:check(X)
+                        (f"{e}::run", "erlang/src/fmt.erl::pretty")},        # -import(fmt, …)
+                       {(e, "erlang/include/records.hrl"), (e, "erlang/src/util.erl"),
+                        (e, "erlang/src/fmt.erl"), (e, "external:lists")}),
+            "haskell": ({(f"{h}/Main.hs::run", f"{h}/Util.hs::check"),        # U.check (as U)
+                         (f"{h}/Main.hs::run", f"{h}/Fmt.hs::pretty"),        # import (pretty)
+                         (f"{h}/Main.hs::run", f"{h}/Open.hs::opened")},      # import abierto
+                        {(f"{h}/Main.hs", f"{h}/Util.hs"), (f"{h}/Main.hs", f"{h}/Fmt.hs"),
+                         (f"{h}/Main.hs", f"{h}/Open.hs")}),
+            "perl": ({(f"{p}/Billing.pm::App::Billing.run", f"{p}/Util.pm::App::Util.check"),
+                      (f"{p}/Billing.pm::App::Billing.run", f"{p}/Model.pm::App::Model.save"),
+                      (f"{p}/Billing.pm::App::Billing.run", f"{p}/Model.pm::App::Model.load"),
+                      ("perl/run.pl::main", "perl/lib/helpers.pl::greet")},   # require "x.pl"
+                     {(f"{p}/Billing.pm", f"{p}/Util.pm"), (f"{p}/Billing.pm", f"{p}/Model.pm"),
+                      (f"{p}/Billing.pm", "external:List::Util"),
+                      ("perl/run.pl", "perl/lib/helpers.pl")}),
+            "zig": ({(f"{z}/main.zig::main", f"{z}/util.zig::check"),         # u.f y alias f
+                     (f"{z}/main.zig::main", f"{z}/util.zig::Shape.init"),    # const S = u.S
+                     (f"{z}/main.zig::main", f"{z}/core.zig::go")},           # módulo de build.zig
+                    {(f"{z}/main.zig", f"{z}/util.zig"), (f"{z}/main.zig", f"{z}/core.zig"),
+                     (f"{z}/main.zig", "external:std")}),
+            "solidity": ({(f"{s}/Vault.sol::Vault.deposit", f"{s}/Math.sol::Math.mul"),
+                          (f"{s}/Vault.sol::Vault.deposit", f"{s}/Util.sol::helper"),
+                          # heredadas: Base llega por un import transitivo (Math -> Base);
+                          # Ownable, por el remapping de remappings.txt
+                          (f"{s}/Vault.sol::Vault.deposit", f"{s}/Base.sol::Base.baseFn"),
+                          (f"{s}/Vault.sol::Vault.deposit", f"{s}/Base.sol::freeFn"),
+                          (f"{s}/Vault.sol::Vault.deposit",
+                           "solidity/lib/oz/contracts/access/Ownable.sol::Ownable.onlyOwner")},
+                         {(f"{s}/Vault.sol", "solidity/lib/oz/contracts/access/Ownable.sol"),
+                          (f"{s}/Vault.sol", "external:forge-std")}),
+        }
+        for lang, (calls, deps) in cases.items():
+            xcalls, got_deps, _intra, _syms = self._graph(lang)
+            self.assertEqual(calls - xcalls, set(), lang)
+            self.assertEqual(deps - got_deps, set(), lang)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_erlang_external_module_and_duplicate_module(self):
+        # `lists:map` no apunta a un lists.erl que no existe (y queda `external:lists`);
+        # `dup` existe en dos apps: el módulo es ambiguo -> ni call ni import ni external.
+        self.write("apps/a/src/a.erl", "-module(a).\nrun() -> lists:map(fun f/1, []), dup:f().\n"
+                   "f(X) -> X.\n")
+        self.write("apps/a/src/dup.erl", "-module(dup).\nf() -> 1.\n")
+        self.write("apps/b/src/dup.erl", "-module(dup).\nf() -> 2.\n")
+        xcalls, deps, intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+        self.assertEqual(deps, {("proj/apps/a/src/a.erl", "external:lists")})
+        self.assertEqual(intra, set())         # `fun f/1` es una referencia, no una llamada
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_haskell_ambiguous_open_imports_and_shadowing(self):
+        # `f` lo definen DOS módulos abiertos -> ambiguo. `g` es un parámetro que tapa al
+        # `g` de B. `h` está oculto con `hiding`. `k` es un campo de record del archivo.
+        self.write("Main.hs", "module Main where\nimport A\nimport B hiding (h)\n"
+                   "data R = R { k :: Int }\nrun g r = f 1 + g 2 + h 3 + k r\n")
+        self.write("A.hs", "module A where\nf x = x\n")
+        self.write("B.hs", "module B where\nf x = x\ng x = x\nh x = x\nk x = x\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_perl_dynamic_method_and_conflicting_exports(self):
+        # `$obj->save` es dinámico; `check` lo exportan dos `use` -> sin arista.
+        self.write("lib/A.pm", "package A;\nuse B qw(check);\nuse C qw(check);\n"
+                   "sub run { my $obj = shift; $obj->save; check(1); }\n1;\n")
+        self.write("lib/B.pm", "package B;\nsub check { 1 }\nsub save { 1 }\n1;\n")
+        self.write("lib/C.pm", "package C;\nsub check { 2 }\n1;\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_zig_non_literal_build_module(self):
+        # `m` se declara en build.zig con una ruta NO literal y `opts` sale de addOptions:
+        # son propios pero sin destino -> ni arista ni `external:`. `kf` viene de un
+        # `lazyDependency` (build.zig.zon): ese sí es externo.
+        self.write("build.zig", 'pub fn build(b: *std.Build) void {\n'
+                   '    _ = b.addModule("m", .{ .root_source_file = b.path(src) });\n'
+                   '    const opts = b.addOptions();\n'
+                   '    const kf = b.lazyDependency("kf", .{}).?.module("kf");\n'
+                   '    exe.root_module.addImport("opts", opts.createModule());\n'
+                   '    exe.root_module.addImport("kf", kf);\n}\n')
+        self.write("src/main.zig", 'const m = @import("m");\nconst o = @import("opts");\n'
+                   'const kf = @import("kf");\npub fn main() void { m.go(); }\n')
+        self.write("src/m.zig", "pub fn go() void {}\n")
+        xcalls, deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+        self.assertEqual({t for s, t in deps if s == "proj/src/main.zig"}, {"external:kf"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_solidity_parent_not_imported(self):
+        # `is Base` sin importar Base.sol: el padre no está en el scope -> sin arista.
+        self.write("V.sol", "contract V is Base {\n  function f() public { baseFn(); }\n}\n")
+        self.write("Base.sol", "contract Base {\n  function baseFn() internal {}\n}\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_solidity_inherited_override_and_two_branches(self):
+        # C is B, B is A; A y B definen f -> B.f (tapa a A.f). `g` llega por DOS ramas
+        # (X y A vía B): Solidity exige un override propio, así que no se adivina.
+        self.write("A.sol", "contract A {\n  function f() internal {}\n  function g() internal {}\n}\n")
+        self.write("B.sol", 'import "./A.sol";\ncontract B is A {\n  function f() internal {}\n}\n')
+        self.write("X.sol", "contract X {\n  function g() internal {}\n}\n")
+        self.write("C.sol", 'import "./B.sol";\nimport "./X.sol";\n'
+                   "contract C is B, X {\n  function run() public { f(); g(); }\n}\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, {("proj/C.sol::C.run", "proj/B.sol::B.f")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_prolog_pl_is_not_parsed_as_perl(self):
+        # `rules.pl` del fixture es Prolog: solo el nodo `file`, sin símbolos de Perl
+        store = Store(os.path.join(self.tmp, "pl.db"))
+        Indexer(store, {"projects": [{"name": "perl",
+                                      "root": os.path.join(CROSSFILE_DIR, "perl")}]}).index_all()
+        rules = [n for n in store.all_nodes() if (n.get("path") or "") == "perl/rules.pl"]
+        store.close()
+        self.assertEqual([(n["type"], n["tags"]) for n in rules], [("file", ["code"])])
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_clauses_and_overloads_are_one_symbol(self):
+        # Erlang `f/1` y `f/2`, ecuaciones de Haskell y sobrecargas de Solidity: UN
+        # símbolo por nombre, con el span de todas.
+        from memorygraf.extractors import ts_generic
+        cases = {"m.erl": ("-module(m).\nf(X) -> X.\nf(X, Y) -> X + Y.\n", "f", (2, 3)),
+                 "M.hs": ("module M where\nf 0 = 0\nf n = n\n", "f", (2, 3)),
+                 "C.sol": ("contract C {\n  function f() public {}\n"
+                           "  function f(uint x) public {}\n}\n", "C.f", (2, 3))}
+        for path, (src, name, span) in cases.items():
+            nodes, *_rest = ts_generic.extract(path, "p", src)
+            got = [(n.span_start, n.span_end) for n in nodes if n.name == name]
+            self.assertEqual(got, [span], path)
+
+
 class TestAuditM15(Base):
     """Regresiones de la auditoría de M15 (SQL léxico, Xcode, LSP). Cada test reproduce
     un fallo concreto: aristas falsas, símbolos perdidos o una excepción que tumbaba el sync."""

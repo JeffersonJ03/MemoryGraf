@@ -24,7 +24,7 @@ from .extractors import python_ast, js_ts, ts_treesitter, ts_generic, sql_lex
 # Python (ast) y JS/TS (tree-sitter, con calls/imports) tienen extractor propio.
 _TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 # El resto (C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly/Ruby/Kotlin/Swift/Dart/Scala/Lua/
-# Elixir/Bash/Terraform/PowerShell) usa el extractor genérico (símbolos + defines) cuando
+# Elixir/Bash/Terraform/PowerShell/Erlang/Haskell/Perl/Zig/Solidity) usa el extractor genérico (símbolos + defines) cuando
 # tree-sitter está. SQL va por `sql_lex` (léxico, sin tree-sitter).
 _GENERIC_EXTS = {"." + e for e in ts_generic._GRAMMAR_BY_EXT}
 # SQL (M15c): extractor LÉXICO propio (stdlib, todos los dialectos, incluido PL/SQL)
@@ -305,6 +305,26 @@ _RE_KT_EXPECT = re.compile(
 _RE_TF_MODULE = re.compile(r'''\bmodule\s+"([\w-]+)"\s*\{[^{}]*?\bsource\s*=\s*"([^"]+)"''', re.S)
 _RE_DART_EXPORT = re.compile(r'''^\s*export\s+['"]([^'"]+)['"]''', re.MULTILINE)
 _RE_DART_PART = re.compile(r'''^\s*part\s+['"]([^'"]+)['"]''', re.MULTILINE)
+# M15d. Haskell: el módulo lo da el header (`module A.B where`), no la ruta; sin header
+# es `Main`. Solidity: la cadena `contract C is A, B(x) {`, sin comentarios.
+_RE_HS_MODULE = re.compile(r"^module\s+([A-Z][\w']*(?:\.[A-Z][\w']*)*)", re.MULTILINE)
+_RE_SOL_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+_RE_SOL_IS = re.compile(r"\b(?:contract|interface)\s+(\w+)\s+is\s+([^{;]+)\{")
+# Raíces jerárquicas de la base de Haskell: compartirlas no hace interno un import
+_HS_STD_ROOTS = {"Data", "Control", "System", "Text", "Foreign", "GHC", "Numeric",
+                 "Prelude", "Debug", "Test", "Network", "Unsafe"}
+
+
+def _sol_parents(source: str) -> dict:
+    """{contrato: [padres]} de `contract C is A, B(args)`. Los argumentos de constructor
+    se descartan y un padre cualificado (`U.Base`) no se resuelve: se omite."""
+    out = {}
+    for name, parents in _RE_SOL_IS.findall(_RE_SOL_COMMENT.sub(" ", source)):
+        prev = None
+        while prev != parents:                       # quita (args) anidados
+            prev, parents = parents, re.sub(r"\([^()]*\)", "", parents)
+        out[name] = [p.strip() for p in parents.split(",") if re.fullmatch(r"\s*\w+\s*", p)]
+    return out
 
 
 def _kmp_source_set(relpath: str):
@@ -440,6 +460,85 @@ def _xcode_membership(text: str):
                     members.setdefault(path, set()).add(name)
     files = {p: (next(iter(ts)) if len(ts) == 1 else "") for p, ts in members.items()}
     return folders, files
+
+
+_RE_ZIG_ROOT = re.compile(
+    r'''\.root_source_file\s*=\s*(?:b\.path\(\s*"([^"]+)"\s*\)|\.\{\s*\.path\s*=\s*"([^"]+)"\s*\})''')
+_RE_ZIG_VAR_MOD = re.compile(r'''(?:const|var)\s+(\w+)\s*=\s*b\.(?:createModule|addModule)\(''')
+_RE_ZIG_ADD_MOD = re.compile(r'''\baddModule\(\s*"([^"]+)"''')
+_RE_ZIG_IMPORT = re.compile(
+    r'''\baddImport\(\s*"([^"]+)"\s*,\s*([\w.]+)|\.name\s*=\s*"([^"]+)"\s*,\s*\.module\s*=\s*([\w.]+)''')
+_RE_ZIG_DEP_VAR = re.compile(r'''(?:const|var)\s+(\w+)\s*=\s*b\.(?:lazyDependency|dependency)\(''')
+
+
+def _load_zig_modules(root: str, excludes: set) -> dict:
+    """{nombre: {ruta}} de los módulos que declaran los build.zig del proyecto (M15d),
+    con lectura estática y SOLO literales: `b.addModule("m", .{ .root_source_file =
+    b.path("src/m.zig") })`, o `const x = b.createModule(.{ ... })` + `addImport("m", x)`
+    / `.imports = &.{ .{ .name = "m", .module = x } }`. La ruta es relativa al build.zig.
+    Un nombre con dos rutas queda ambiguo (el indexer no lo enlaza). Un nombre cuyo módulo
+    no viene de `b.dependency(...)` (opciones de `addOptions`, código generado) es propio
+    aunque no tenga ruta: sin arista, pero nunca `external:`."""
+    out: dict = {}
+    skip = excludes | {"zig-cache", ".zig-cache", "zig-out"}
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in skip and not d.startswith("."))
+        if "build.zig" not in files:
+            continue
+        try:
+            with open(os.path.join(dirpath, "build.zig"), "r", encoding="utf-8",
+                      errors="replace") as f:
+                src = f.read()
+        except OSError:
+            continue
+        rel = os.path.relpath(dirpath, root).replace("\\", "/")
+        base = "" if rel == "." else rel
+
+        def path_after(pos):
+            end = src.find("});", pos)                       # fin de la llamada
+            m = _RE_ZIG_ROOT.search(src[pos:end if end != -1 else None])
+            p = (m.group(1) or m.group(2)) if m else None
+            return os.path.normpath(os.path.join(base, p)).replace("\\", "/") if p else None
+
+        # Un módulo declarado con una ruta NO literal también se registra (sin ruta): es
+        # código propio, así que su `@import` queda sin arista y nunca como `external:`.
+        by_var = {m.group(1): path_after(m.end()) for m in _RE_ZIG_VAR_MOD.finditer(src)}
+        deps = set(_RE_ZIG_DEP_VAR.findall(src))
+        for m in _RE_ZIG_ADD_MOD.finditer(src):
+            p = path_after(m.end())
+            out.setdefault(m.group(1), set()).update([p] if p else [])
+        for m in _RE_ZIG_IMPORT.finditer(src):
+            name, expr = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+            if expr.split(".")[0] in deps:
+                continue                                 # paquete de build.zig.zon: externo
+            p = by_var.get(expr)
+            out.setdefault(name, set()).update([p] if p else [])
+    return out
+
+
+def _load_sol_remappings(root: str) -> list:
+    """[(prefijo, destino)] de `remappings.txt` y de `remappings = [...]` en foundry.toml,
+    del prefijo más largo al más corto (M15d). El contexto (`ctx:a=b`) se ignora."""
+    lines = []
+    for name in ("remappings.txt", "foundry.toml"):
+        try:
+            with open(os.path.join(root, name), "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if name == "remappings.txt":
+            lines += text.splitlines()
+        else:
+            m = re.search(r'^\s*remappings\s*=\s*\[(.*?)\]', text, re.S | re.M)
+            lines += re.findall(r'''["']([^"']+)["']''', m.group(1)) if m else []
+    out = {}
+    for line in lines:
+        line = line.strip()
+        if "=" not in line or line.startswith("#"):
+            continue
+        pre, dst = line.split("=", 1)
+        out.setdefault(pre.split(":", 1)[-1].strip(), dst.strip())
+    return sorted(out.items(), key=lambda kv: -len(kv[0]))
 
 
 def _load_xcode_targets(root: str, excludes: set) -> list:
@@ -631,8 +730,25 @@ class Indexer:
         self.tf_dir_index = {}     # (project, dir) -> [file_id .tf]
         self.tf_module_src = {}    # (project, dir, módulo) -> `source` del bloque module
         self._sql_objects = None   # project -> {nombre_minúsculas: [(file, sid, kind)]}
+        # M15d: módulos de Erlang (= archivo) y Haskell (header), paquetes de Perl (de los
+        # símbolos), módulos de build.zig, remappings y herencia de Solidity
+        self.roots = {p["name"]: p["root"] for p in config["projects"]}
+        self.erl_mod_index = {}    # (project, módulo) -> [file_id .erl]
+        self.hs_mod_index = {}     # (project, módulo) -> [file_id .hs]
+        self.zig_modules = {}      # project -> {nombre: {ruta}}
+        self.sol_remaps = {}       # project -> [(prefijo, destino)]
+        self.sol_parents = {}      # (file_id, contrato) -> [padres]
+        self._sol_scopes = {}      # file_id -> [file_id visibles]  (perezoso)
+        self._perl_pkgs = None     # (project, paquete) -> [file_id]  (perezoso)
+        self._basenames = None     # (project, nombre_archivo) -> [relpath]  (perezoso)
         for proj in config["projects"]:
             name, root = proj["name"], proj["root"]
+            zig = _load_zig_modules(root, self.excludes)
+            if zig:
+                self.zig_modules[name] = zig
+            remaps = _load_sol_remappings(root)
+            if remaps:
+                self.sol_remaps[name] = remaps
             al = _load_ts_aliases(root)
             if al:
                 self.js_aliases[name] = al
@@ -794,6 +910,12 @@ class Indexer:
                     # `Alias.f` -> módulo completo vía `alias`; `f` libre -> los `import`.
                     count += self._link_pairs(caller, callee_name, self._ex_call_pairs(
                         project, via, callee_name, bindings, name_index, caller))
+                    continue
+                if generic and EXT_LANG.get(ext) in ts_generic._M15D:
+                    # M15d (Erlang/Haskell/Perl/Zig/Solidity): ver _m15d_pairs
+                    count += self._link_pairs(caller, callee_name, self._m15d_pairs(
+                        EXT_LANG[ext], project, file_id_, base_dir, caller, callee_name,
+                        via, bindings, name_index, short_index))
                     continue
                 if generic and EXT_LANG.get(ext) in ts_generic._SCOPED:
                     # M15a (Ruby/Swift/Dart): `Tipo.m` o `m` libre -> el símbolo con ese
@@ -1030,6 +1152,135 @@ class Indexer:
                 if (f, f"{m}.{callee}") in name_index
                 and name_index[(f, f"{m}.{callee}")] != caller]
 
+    def _m15d_pairs(self, g, project, file_id_, base_dir, caller, callee, via, bindings,
+                    name_index, short_index):
+        """Candidatos `(file_id, sym_id)` de una llamada cross-file M15d:
+          erlang:   `mod:f` (o `f` de un `-import`) -> `f` en `mod.erl`, si el módulo es
+                    único (el nombre de módulo es global en la VM y es el del archivo).
+          haskell:  `X.f` -> los módulos importados `as X` (o con ese nombre); `f` -> el de
+                    la lista explícita `import M (f)` o el de los imports abiertos.
+          perl:     `A::B::f` / `A::B->f` -> `sub f` del paquete; `f` -> el `use A::B
+                    qw(f)` explícito o, si no, una sub de `main` de lo que se `require`.
+          zig:      `u.f` / `S.m` / alias -> el archivo del `@import` ligado.
+          solidity: `U.f` / `B.f` -> el import con alias; `Lib.f` -> el contrato visible
+                    (imports transitivos); `f` -> la cadena `is A, B` y luego las funciones
+                    libres visibles."""
+        def at(files, qual):
+            return [(f, name_index[(f, qual)]) for f in files
+                    if (f, qual) in name_index and name_index[(f, qual)] != caller]
+
+        if g == "erlang":
+            mod = via or bindings[callee][0][4:]          # "mod:util" -> util
+            return at(self._erl_module_files(project, mod), callee)
+        if g == "haskell":
+            if via:
+                mods = [m for k, (m, _x) in bindings.items() if k.startswith(f"q:{via}:")]
+            else:
+                mods = [m for k, (m, _x) in bindings.items() if k.startswith(f"n:{callee}:")]
+                mods += [m for k, (m, hidden) in bindings.items() if k.startswith("open:")
+                         and callee not in (hidden or "").split(",")]
+            return [(f, sid) for m in dict.fromkeys(mods)
+                    for f in self._hs_module_files(project, m)
+                    for sid in short_index.get((f, callee), []) if sid != caller]
+        if g == "perl":
+            pkg = via or (bindings[callee][0] if callee in bindings else None)
+            if pkg:
+                return at(self._perl_package_files(project, pkg), f"{pkg}.{callee}")
+            if pkg == "":
+                return []                                 # dos `use` exportan el nombre
+            return at([e["target"] for e in self.store.neighbors(
+                file_id_, edge_types=[EDGE_IMPORTS], direction="out")], callee)
+        if g == "zig":
+            raw, member = bindings[via or callee]
+            f = self._resolve_generic(project, ".zig", base_dir, raw)
+            qual = (f"{member}.{callee}" if member else callee) if via else (member or callee)
+            return at([f], qual) if f else []
+        if g == "solidity":
+            if via and via in bindings:
+                raw, real = bindings[via]
+                f = self._resolve_generic(project, ".sol", base_dir, raw)
+                if not f:
+                    return []
+                if real is None:
+                    return at([f], callee)                # `U.f`: función libre de U
+                return at(self._sol_scope(project, f), f"{real}.{callee}")
+            scope = self._sol_scope(project, file_id_)
+            if via:
+                return at(scope, f"{via}.{callee}")
+            return (self._sol_inherited(project, file_id_, caller, callee, name_index, scope)
+                    or at(scope, callee))
+        return []
+
+    def _unique(self, files):
+        return list(files) if len(files) == 1 else []
+
+    def _erl_module_files(self, project, module):
+        return self._unique(self.erl_mod_index.get((project, module), []))
+
+    def _hs_module_files(self, project, module):
+        return self._unique(self.hs_mod_index.get((project, module), []))
+
+    def _perl_package_files(self, project, package):
+        """Archivos que declaran `package P` (símbolos `class` de Perl). Un paquete puede
+        repartirse entre archivos: las llamadas buscan `P.f` en todos."""
+        if self._perl_pkgs is None:
+            self._perl_pkgs = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                if (n.get("tags") or [])[:2] == ["perl", "class"]:
+                    self._perl_pkgs.setdefault((n.get("project"), n["name"]), []).append(n["path"])
+        return list(dict.fromkeys(self._perl_pkgs.get((project, package), [])))
+
+    def _sol_scope(self, project, file_id_):
+        """El archivo y lo que importa, transitivamente: en Solidity `import "x"` trae
+        también lo que x importó."""
+        if file_id_ not in self._sol_scopes:
+            seen, queue = [file_id_], [file_id_]
+            while queue:
+                for e in self.store.neighbors(queue.pop(), edge_types=[EDGE_IMPORTS],
+                                              direction="out"):
+                    t = e["target"]
+                    if t.endswith(".sol") and t not in seen:
+                        seen.append(t)
+                        queue.append(t)
+            self._sol_scopes[file_id_] = seen
+        return self._sol_scopes[file_id_]
+
+    def _sol_inherited(self, project, file_id_, caller, callee, name_index, scope):
+        """Llamada libre dentro de un contrato: la función que hereda por la cadena `is A,
+        B`. De los ancestros que la definen se descartan los tapados por otro que hereda
+        de ellos (`B is A` y ambos definen f -> B.f). Si quedan varios (dos ramas, que
+        Solidity obliga a resolver con `override` propio) no se elige ninguno. Un padre
+        solo cuenta si su nombre es único en el scope de quien lo hereda."""
+        cq = caller.split("::", 1)[1]
+        if "." not in cq:
+            return []
+        start = (file_id_, cq.split(".")[0])
+        parents_of, order, queue = {}, [], [start]
+        while queue:
+            node = queue.pop(0)
+            fscope = scope if node[0] == file_id_ else self._sol_scope(project, node[0])
+            parents_of[node] = []
+            for parent in self.sol_parents.get(node, ()):
+                where = [x for x in fscope if (x, parent) in name_index]
+                if len(where) == 1:
+                    parents_of[node].append((where[0], parent))
+                    if (where[0], parent) not in parents_of and (where[0], parent) not in queue:
+                        queue.append((where[0], parent))
+                        order.append((where[0], parent))
+
+        def above(node):
+            out, stack = set(), list(parents_of.get(node, ()))
+            while stack:
+                n = stack.pop()
+                if n not in out:
+                    out.add(n)
+                    stack.extend(parents_of.get(n, ()))
+            return out
+
+        defs = [n for n in order if (n[0], f"{n[1]}.{callee}") in name_index]
+        defs = [n for n in defs if not any(n in above(o) for o in defs if o != n)]
+        return [(f, name_index[(f, f"{c}.{callee}")]) for f, c in defs]
+
     def _jvm_scope_files(self, file_id_, project, bindings):
         """Archivos visibles sin import explícito en Java/Kotlin: los del paquete propio
         y los de cada `import a.b.*` (claves `*:a.b` de los bindings)."""
@@ -1188,7 +1439,70 @@ class Indexer:
         if g == "dart":
             own = self.dart_package.get(project)
             return ":" not in raw or bool(own and raw.startswith(f"package:{own}/"))
+        # M15d: un include/require/@import local sin destino, o un módulo/paquete que el
+        # proyecto define más de una vez (ambiguo), no es una dependencia externa
+        if g == "erlang":
+            kind, _, path = raw.partition(":")
+            if kind == "mod":
+                return bool(self.erl_mod_index.get((project, path)))
+            app = path.split("/")[0]                 # lib: de la propia app -> interno
+            return kind == "inc" or os.path.isfile(
+                os.path.join(self.roots.get(project, ""), "src", f"{app}.app.src"))
+        if g == "haskell":
+            head = raw.split(".")[0]
+            return (project, raw) in self.hs_mod_index or head not in _HS_STD_ROOTS and any(
+                p == project and m.split(".")[0] == head for p, m in self.hs_mod_index)
+        if g == "perl":
+            if not raw.startswith("pkg:"):
+                return True
+            head = raw[4:].split("::")[0]
+            self._perl_package_files(project, raw[4:])          # asegura el índice perezoso
+            return any(p == project and (m == raw[4:] or m.split("::")[0] == head)
+                       for p, m in self._perl_pkgs or {})
+        if g == "zig":
+            return (raw.endswith((".zig", ".zon")) or "/" in raw or raw == "root"
+                    or raw in self.zig_modules.get(project, {}))
+        if g == "solidity":
+            if raw.startswith(("./", "../")):
+                return True
+            dst = next((d for pre, d in self.sol_remaps.get(project, []) if raw.startswith(pre)),
+                       None)
+            return bool(dst) and os.path.isdir(os.path.join(self.roots.get(project, ""), dst))
         return False
+
+    def _resolve_erlang(self, project, base_dir, raw):
+        """`mod:m` -> m.erl (único); `inc:x.hrl` -> junto al archivo y si no, el
+        `include/` más cercano hacia arriba (el de la app); `lib:app/include/x.hrl` -> el
+        directorio de la app (`app/`, `app-1.2/`, `apps/app/`…), o la raíz si el proyecto
+        ES la app (`src/app.app.src`). Único o nada."""
+        kind, _, path = raw.partition(":")
+        if kind == "mod":
+            files = self._erl_module_files(project, path)
+            return files[0] if files else None
+        if kind == "inc":
+            cands, d = [os.path.join(base_dir, path)], base_dir
+            while True:
+                cands.append(os.path.join(d, "include", path))
+                if not d:
+                    break
+                d = os.path.dirname(d)
+            for c in cands:
+                hit = self.file_index.get((project, os.path.normpath(c).replace("\\", "/")))
+                if hit:
+                    return hit
+            return None
+        app, _, rest = path.partition("/")
+        if self._basenames is None:
+            self._basenames = {}
+            for (p, rel), fid in self.file_index.items():
+                self._basenames.setdefault((p, rel.rsplit("/", 1)[-1]), []).append((rel, fid))
+        pat = re.compile(rf"(?:.*/)?{re.escape(app)}(?:-[\w.]+)?/{re.escape(rest)}")
+        hits = {fid for rel, fid in self._basenames.get((project, path.rsplit("/", 1)[-1]), [])
+                if pat.fullmatch(rel)}
+        root = self.roots.get(project, "")
+        if not hits and os.path.isfile(os.path.join(root, "src", f"{app}.app.src")):
+            hits = {self.file_index.get((project, rest))} - {None}
+        return hits.pop() if len(hits) == 1 else None
 
     def _resolve_jvm(self, project, base_dir, raw):
         """`a.b.C` (o `a.b.C.Inner`, o `import static a.b.C.m`) -> archivo del paquete
@@ -1274,6 +1588,15 @@ class Indexer:
             self.tf_dir_index.setdefault((project, tfdir), []).append(rel_id)
             for mod, src in _RE_TF_MODULE.findall(source):
                 self.tf_module_src[(project, tfdir, mod)] = src
+        if ext == ".erl":
+            stem = os.path.basename(relpath)[:-4]
+            self.erl_mod_index.setdefault((project, stem), []).append(rel_id)
+        if ext == ".hs":
+            m = _RE_HS_MODULE.search(source)
+            self.hs_mod_index.setdefault((project, m.group(1) if m else "Main"), []).append(rel_id)
+        if ext == ".sol":
+            for contract, parents in _sol_parents(source).items():
+                self.sol_parents[(rel_id, contract)] = parents
         if ext == ".dart":
             exports, parts = _RE_DART_EXPORT.findall(source), _RE_DART_PART.findall(source)
             if exports:
@@ -1362,6 +1685,17 @@ class Indexer:
                         pkg = _tf_module_name(raw)               # registro / git
                     elif ext in (".ps1", ".psm1"):
                         pkg = raw                                # `Az.Accounts` es el nombre
+                    elif ext in (".erl", ".hrl"):
+                        pkg = raw.split(":", 1)[1].split("/")[0]   # mod:lists / lib:kernel/…
+                    elif ext == ".hs":
+                        pkg = ".".join(raw.split(".")[:2])       # Data.Map, Control.Monad
+                    elif ext in (".pm", ".pl", ".t"):
+                        pkg = raw[4:] if raw.startswith("pkg:") else ""   # List::Util
+                    elif ext == ".zig":
+                        pkg = raw                                # std, builtin, un paquete
+                    elif ext == ".sol":
+                        parts = raw.split("/")                   # @openzeppelin/contracts
+                        pkg = "/".join(parts[:2]) if raw.startswith("@") else parts[0]
                     else:
                         pkg = raw.lstrip(".").split("/")[0].split(".")[0]
                     if not pkg or raw.startswith("."):
@@ -1469,7 +1803,12 @@ class Indexer:
           scala: como Java/Kotlin (mismo índice de paquetes).
           lua:  `require("a.b")` -> a/b.lua o a/b/init.lua (raíz, lua/ o src/), si es único.
           elixir: `alias A.B` -> el archivo que hace `defmodule A.B` (nombre global).
-          bash: `source` relativo al script; literal (`cwd:`) solo si es único."""
+          bash: `source` relativo al script; literal (`cwd:`) solo si es único.
+          erlang: `mod:m` -> m.erl; `-include`/`-include_lib` (ver _resolve_erlang).
+          haskell: `import A.B` -> el archivo cuyo header es `module A.B`, si es único.
+          perl: `use A::B` -> el archivo que declara `package A::B`, si es único.
+          zig:  `@import("x.zig")` relativo; un nombre -> su módulo de build.zig.
+          solidity: relativo, remapping de foundry o ruta desde la raíz."""
         g = EXT_LANG.get(ext)
         if g in ts_generic._JVM:
             if raw.endswith(".*"):
@@ -1556,7 +1895,28 @@ class Indexer:
             mdir = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
             files = self.tf_dir_index.get((project, "" if mdir == "." else mdir))
             return sorted(files)[0] if files else None
-        if g in ("bash", "powershell", "sql"):
+        if g == "erlang":
+            return self._resolve_erlang(project, base_dir, raw)
+        if g == "haskell":
+            files = self._hs_module_files(project, raw)
+            return files[0] if files else None
+        if g == "perl" and raw.startswith("pkg:"):
+            files = self._unique(self._perl_package_files(project, raw[4:]))
+            return files[0] if files else None
+        if g == "zig":
+            if raw.endswith((".zig", ".zon")) or "/" in raw:
+                return self.file_index.get((project, os.path.normpath(
+                    os.path.join(base_dir, raw)).replace("\\", "/")))
+            paths = self.zig_modules.get(project, {}).get(raw, set())
+            return self.file_index.get((project, next(iter(paths)))) if len(paths) == 1 else None
+        if g == "solidity":
+            if raw.startswith(("./", "../")):
+                cand = os.path.join(base_dir, raw)
+            else:                       # remapping (foundry) o ruta desde la raíz (base path)
+                cand = next((dst + raw[len(pre):] for pre, dst in self.sol_remaps.get(project, [])
+                             if raw.startswith(pre)), raw)
+            return self.file_index.get((project, os.path.normpath(cand).replace("\\", "/")))
+        if g in ("bash", "powershell", "sql", "perl"):
             # "./x": relativo al script (inequívoco). "cwd:x": depende del directorio de
             # trabajo -> junto al script o desde la raíz, y solo si existe en UNO de ellos.
             rel = raw[4:] if raw.startswith("cwd:") else raw
