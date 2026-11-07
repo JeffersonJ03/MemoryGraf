@@ -548,7 +548,8 @@ archivo). Así el sistema es agnóstico del LLM también en la generación, no s
 La extracción estructural dejó de ser solo Python + JS/TS. Un extractor GENÉRICO dirigido por
 config sobre tree-sitter cubre **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic, Assembly**,
 (M15a) **Ruby, Kotlin, Swift, Dart**, (M15b) **Scala, Lua, Elixir, Bash**, (M15c)
-**Terraform/HCL y PowerShell** y (M15d) **Erlang, Haskell, Perl, Zig y Solidity** (SQL va
+**Terraform/HCL y PowerShell** y (M15d) **Erlang, Haskell, Perl, Zig, Solidity, Clojure y
+Objective-C** (SQL va
 aparte: extractor léxico propio, ver abajo):
 emite `symbol` (funciones, clases/tipos, métodos `Clase.m`) + aristas `defines` + `calls`
 INTRA-archivo (callee resuelto por nombre local), con extracción de nombre por-gramática
@@ -590,9 +591,14 @@ explícitas, imports abiertos con `hiding`; los nombres ligados localmente tapan
 importados); Perl por `package` (`A::B::f`, `A::B->m`, `use A::B qw(f)`, `require "x.pl"`);
 Zig por `@import` relativo o los módulos de build.zig (solo literales; `b.dependency` es
 externo); Solidity por imports relativos/remappings con scope transitivo, alias de import y
-herencia `is A, B` (gana el ancestro que tapa a los demás; dos ramas = sin arista). Las
-cláusulas/ecuaciones/sobrecargas de un nombre son un solo símbolo, y `.pl` de Prolog se
-detecta por contenido y queda como nodo `file`. Regla transversal: una llamada con receptor no resoluble
+herencia `is A, B` (gana el ancestro que tapa a los demás; dos ramas = sin arista); Clojure
+por `(ns …)` como Haskell (`u/f`, `:refer`, `:use`), prefiriendo la misma plataforma
+(`.clj`/`.cljs` + `.cljc`); Objective-C por selector completo (`Foo.greet:with:`), `[Foo m]`
+si Foo está declarada en lo importado (transitivo), `[self m]` a la propia clase y la regla de
+C para funciones, con el mapa de headers de Xcode (`#import "Foo.h"` por nombre, si es único)
+y `<Fw/X.h>` del framework propio. Las cláusulas/ecuaciones/sobrecargas de un nombre son un
+solo símbolo, y la extensión no basta en tres casos: `.pl` de Prolog y `.m` de MATLAB quedan
+como nodo `file`, y un `.h` es Objective-C solo con directivas propias fuera de comentarios. Regla transversal: una llamada con receptor no resoluble
 (`a.b().m()`) nunca se trata como llamada libre. Encima, una **capa LLM
 opcional y opt-in** (`resolver.llm` / `MEMORYGRAF_XLINK_LLM`) desempata los casos ambiguos que el
 resolutor estático deja sin enlazar (confidence baja + provenance `llm`, fallback determinista).
@@ -654,8 +660,8 @@ diffs y blobs leídos en lote (`git show` multi-commit + `git cat-file --batch`)
   degradación; espejo "en vivo" del instalador.
 - **Indexado multi-lenguaje (§18.7):** Python + JS/TS y C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly
   + (M15a) Ruby/Kotlin/Swift/Dart + (M15b) Scala/Lua/Elixir/Bash + (M15c) SQL/Terraform/
-  PowerShell + (M15d) Erlang/Haskell/Perl/Zig/Solidity (símbolos + `defines` + `calls`
-  intra); `calls`/`imports`/`references` **cross-file** en los 26 lenguajes genéricos donde
+  PowerShell + (M15d) Erlang/Haskell/Perl/Zig/Solidity/Clojure/Objective-C (símbolos +
+  `defines` + `calls` intra); `calls`/`imports`/`references` **cross-file** en los 28 lenguajes genéricos donde
   aplica (M9/M15), + capa LLM opcional
   de desambiguación.
 - **Suite:** 155 tests (`python -m unittest discover -s tests`), sin dependencias.

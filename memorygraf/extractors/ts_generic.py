@@ -3,8 +3,8 @@
 Un solo recorrido, parametrizado por gramática, que emite nodos `symbol` (funciones,
 clases/estructuras/tipos, métodos) y aristas `defines`. Cubre C, C++, Java, C#, Go, Rust,
 PHP, R, Visual Basic, Assembly, (M15a) Ruby, Kotlin, Swift, Dart, (M15b) Scala, Lua,
-Elixir, Bash, (M15c) Terraform/HCL y PowerShell, y (M15d) Erlang, Haskell, Perl, Zig y
-Solidity. (Python vive en
+Elixir, Bash, (M15c) Terraform/HCL y PowerShell, y (M15d) Erlang, Haskell, Perl, Zig,
+Solidity, Clojure y Objective-C. (Python vive en
 `python_ast`; JS/TS en `ts_treesitter`, que además resuelve `calls`/`imports`.)
 
 Alcance v1 (honesto): SÍMBOLOS + `defines` (lo uniforme y de mayor valor: `overview`,
@@ -52,11 +52,13 @@ _CALLS = {
               "method_call_expression"}, None),
     "zig": ({"SuffixExpr"}, None),
     "solidity": ({"call_expression", "modifier_invocation"}, None),
+    "clojure": ({"list_lit"}, None),
+    "objc": ({"message_expression", "call_expression"}, None),
 }
 
 # M15d: lenguajes con su propio casado de llamadas (_find_calls_m15d) e imports
 # (_imports_m15d). Sus cláusulas/ecuaciones/sobrecargas de un mismo nombre son UN símbolo.
-_M15D = {"erlang", "haskell", "perl", "zig", "solidity"}
+_M15D = {"erlang", "haskell", "perl", "zig", "solidity", "clojure", "objc"}
 
 # Lenguajes con nombres que NO distinguen mayúsculas (PowerShell: `invoke-deploy` llama a
 # `Invoke-Deploy`): el casado intra-archivo y cross-file compara en minúsculas.
@@ -129,6 +131,8 @@ _GRAMMAR_BY_EXT = {
     # M15d (`.pl` puede ser Prolog: ver _looks_like_prolog)
     "erl": "erlang", "hrl": "erlang", "hs": "haskell",
     "pm": "perl", "pl": "perl", "t": "perl", "zig": "zig", "sol": "solidity",
+    "clj": "clojure", "cljs": "clojure", "cljc": "clojure",
+    "m": "objc", "mm": "objc",           # `.h` es C salvo pistas de ObjC: ver _looks_like_objc
 }
 
 # Por gramática: tipos de nodo por categoría.
@@ -201,6 +205,10 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     grammar = _GRAMMAR_BY_EXT.get(ext)
     if ext == "pl" and _looks_like_prolog(source):
         grammar = None                   # Prolog: solo el nodo `file`, nunca como Perl
+    elif ext in ("h", "m") and _looks_like_objc(source):
+        grammar = "objc"
+    elif ext == "m":
+        grammar = None                   # MATLAB/Mercury: solo el nodo `file`
     fid = file_id(rel_path)
     nodes = [Node(id=fid, type=NODE_FILE, name=rel_path.split("/")[-1],
                   project=project, path=rel_path, tags=[grammar or "code"])]
@@ -1472,8 +1480,131 @@ def _extract_solidity(root, text, fid, add):
                 add(nm, "func" if _SOL_MEMBERS[ch.type] == "method" else "type", ch, fid)
 
 
+# Objective-C en `.h`/`.m`: una directiva propia a inicio de línea FUERA de comentarios.
+# Un header de C que menciona `@interface` en un comentario sigue siendo C.
+_RE_C_COMMENT = re.compile(r"//[^\n]*|/\*.*?(?:\*/|\Z)", re.S)
+_RE_OBJC = re.compile(r"^\s*(?:@(?:interface|protocol|class|implementation)\b|#import\b)",
+                      re.MULTILINE)
+
+
+def _looks_like_objc(source: str) -> bool:
+    return bool(_RE_OBJC.search(_RE_C_COMMENT.sub(" ", source[:8192])))
+
+
+def _objc_selector(n, text):
+    """Selector completo de un método (`greet:with:`) o de un mensaje: `[Foo greet:x
+    with:y]` -> `greet:with:`; `[Foo build]` -> `build` (unario, sin `:`)."""
+    if n.type == "message_expression":
+        keys = [text(c) for i, c in enumerate(n.children) if n.field_name_for_child(i) == "method"]
+        args = len(n.named_children) - len(keys) - 1          # menos el receptor
+        return "".join(k + ":" for k in keys) if args > 0 else (keys[0] if keys else None)
+    keys = [text(c) for c in n.children if c.type == "identifier"]
+    if any(c.type == "method_parameter" for c in n.children):
+        return "".join(k + ":" for k in keys)
+    return keys[0] if keys else None
+
+
+_OBJC_CONTAINERS = {"class_interface", "class_implementation", "protocol_declaration"}
+_OBJC_NESTING = {"preproc_ifdef", "preproc_if", "preproc_else", "preproc_elif",
+                 "linkage_specification", "declaration_list"}
+
+
+def _extract_objc(root, text, fid, add):
+    """Objective-C: funciones C, y `@interface`/`@implementation`/`@protocol` como clase.
+    Los métodos son los del `@implementation`, por SELECTOR completo (`Foo.greet:with:`);
+    los de una categoría (`@implementation Foo (X)`) cuelgan de `Foo`. Las declaraciones de
+    un `@interface` no son símbolos (la definición está en el `.m`)."""
+    def walk(node):
+        for ch in node.children:
+            if ch.type == "function_definition":
+                nm = _c_func_name(text, ch)
+                if nm:
+                    add(nm, "func", ch, fid)
+            elif ch.type in _OBJC_CONTAINERS:
+                idn = _first_child(ch, "identifier")
+                if idn is None:
+                    continue
+                cls = text(idn)
+                cid = add(cls, "class", ch, fid)
+                for impl in (c for c in ch.children if c.type == "implementation_definition"):
+                    for m in (c for c in impl.children if c.type == "method_definition"):
+                        sel = _objc_selector(m, text)
+                        if sel:
+                            add(f"{cls}.{sel}", "method", m, cid)
+            elif ch.type in _OBJC_NESTING:
+                walk(ch)
+
+    walk(root)
+
+
+def _clj_values(n):
+    """Hijos con valor de una forma Clojure (sin comentarios, metadatos ni `#_`)."""
+    return [c for c in n.named_children
+            if c.type not in ("comment", "meta_lit", "old_meta_lit", "dis_expr")]
+
+
+def _clj_sym(n, text):
+    """(namespace|None, nombre) de un `sym_lit` (`u/check` -> ("u", "check")); None si no."""
+    if n is None or n.type != "sym_lit":
+        return None
+    nm, ns = n.child_by_field_name("name"), n.child_by_field_name("namespace")
+    return (text(ns) if ns is not None else None), (text(nm) if nm is not None else "")
+
+
+def _clj_head(n, text):
+    """(nombre del primer símbolo sin namespace | None, valores) de una lista."""
+    vals = _clj_values(n) if n.type == "list_lit" else []
+    s = _clj_sym(vals[0], text) if vals else None
+    return (s[1] if s and s[0] is None else None), vals
+
+
+_CLJ_FUNCS = {"defn", "defn-", "defmacro", "defmulti", "def", "defonce"}
+_CLJ_TYPES = {"defrecord", "deftype", "definterface", "defstruct"}
+# Formas cuyas listas internas son DEFINICIONES de métodos, no llamadas
+_CLJ_IMPL = {"defprotocol", "defrecord", "deftype", "definterface", "reify", "extend-type",
+             "extend-protocol", "proxy"}
+_CLJ_SPECIAL = _CLJ_FUNCS | _CLJ_TYPES | _CLJ_IMPL | {
+    "ns", "defmethod", "fn", "fn*", "let", "letfn", "loop", "recur", "if", "do", "quote",
+    "var", "throw", "try", "catch", "finally", "new", "set!", "comment"}
+
+
+def _extract_clojure(root, text, fid, add):
+    """Clojure: todo es `list_lit` y la semántica sale del primer símbolo. `defn`/`defn-`/
+    `def`/`defmacro`/`defmulti`/`defonce` son funciones; `defrecord`/`deftype` tipos;
+    `defprotocol P` una clase con sus firmas `P.m` (se llaman sin prefijo, como las clases de
+    Haskell). Entra en `(do ...)` y en los condicionales de lector (`#?(:clj ...)`)."""
+    def walk(node):
+        for ch in node.named_children:
+            if ch.type == "read_cond_lit":
+                walk(ch)
+                continue
+            if ch.type != "list_lit":
+                continue
+            head, vals = _clj_head(ch, text)
+            if head == "do":
+                walk(ch)
+                continue
+            nm = _clj_sym(vals[1], text) if len(vals) > 1 else None
+            if not nm or nm[0] is not None or not nm[1]:
+                continue
+            if head in _CLJ_FUNCS:
+                add(nm[1], "func", ch, fid)
+            elif head in _CLJ_TYPES:
+                add(nm[1], "type", ch, fid)
+            elif head == "defprotocol":
+                pid = add(nm[1], "class", ch, fid)
+                for sig in (v for v in vals[2:] if v.type == "list_lit"):
+                    inner = _clj_values(sig)
+                    s = _clj_sym(inner[0], text) if inner else None
+                    if s and s[0] is None:
+                        add(f"{nm[1]}.{s[1]}", "method", sig, pid)
+
+    walk(root)
+
+
 _M15D_DEFS = {"erlang": _extract_erlang, "haskell": _extract_haskell,
-              "perl": _extract_perl, "zig": _extract_zig, "solidity": _extract_solidity}
+              "perl": _extract_perl, "zig": _extract_zig, "solidity": _extract_solidity,
+              "clojure": _extract_clojure, "objc": _extract_objc}
 
 
 def _call_parts_m15d(n, grammar, text):
@@ -1532,6 +1663,25 @@ def _call_parts_m15d(n, grammar, text):
         if fc is not None:
             return head, text(fc)                               # x.f(...)
         return None, None                                       # a.b.f(...): opaco
+    if grammar == "clojure":
+        par = n.parent
+        if par is not None and par.type == "list_lit" and _clj_head(par, text)[0] in _CLJ_IMPL:
+            return None, None                                   # firma / método de un tipo
+        vals = _clj_values(n)
+        s = _clj_sym(vals[0], text) if vals else None
+        if not s or not s[1] or s[1][0] == "." or s[1][-1] == "." \
+                or (s[0] is None and s[1] in _CLJ_SPECIAL):
+            return None, None                                   # interop `.m` / `Clase.`
+        return s[0], s[1]                                       # `u/f` -> ("u", "f")
+    if grammar == "objc":
+        if n.type == "message_expression":
+            rc = n.child_by_field_name("receiver")
+            return (text(rc) if rc is not None and rc.type == "identifier" else _OPAQUE), \
+                _objc_selector(n, text)
+        fn = n.child_by_field_name("function")
+        if fn is not None and fn.type == "identifier":
+            return None, text(fn)                               # función C
+        return (_OPAQUE if fn is not None else None), None
     if grammar == "solidity":
         if n.type == "modifier_invocation":
             idn = _first_child(n, "identifier")
@@ -1759,8 +1909,90 @@ def _sol_imports(root, text, _module):
     return list(dict.fromkeys(raws)), b
 
 
+def _clj_imports(root, text, _module):
+    """Clojure: los `:require`/`:use` del `(ns ...)`, con las mismas claves que Haskell:
+    "q:<alias|ns>:<ns>" (`u/f`), "n:<f>:<ns>" (`:refer [f]`) y "open:<ns>" (`:refer
+    :all` o `:use` sin `:only`). Admite listas de prefijo `(a.b c [d :as e])`."""
+    raws, b = [], {}
+
+    def names(v):
+        return [s[1] for c in _clj_values(v) for s in [_clj_sym(c, text)] if s and s[0] is None]
+
+    def spec(v, prefix, use):
+        if v.type == "list_lit":                         # (prefijo c [d :as e])
+            vals = _clj_values(v)
+            p = _clj_sym(vals[0], text) if vals else None
+            if p and p[0] is None:
+                for rest in vals[1:]:
+                    spec(rest, f"{prefix}.{p[1]}" if prefix else p[1], use)
+            return
+        vals = _clj_values(v) if v.type == "vec_lit" else [v]
+        s = _clj_sym(vals[0], text) if vals else None
+        if not s or s[0] is not None:
+            return
+        ns = f"{prefix}.{s[1]}" if prefix else s[1]
+        raws.append(ns)
+        b[f"q:{ns}:{ns}"] = (ns, None)
+        opts, only = vals[1:], False
+        for k, val in zip(opts, opts[1:]):
+            key = text(k).lstrip(":") if k.type == "kwd_lit" else None
+            alias = _clj_sym(val, text) if key == "as" else None
+            if alias:
+                b[f"q:{alias[1]}:{ns}"] = (ns, None)
+            elif key in ("refer", "only"):
+                only = True
+                if val.type == "kwd_lit" and text(val) == ":all":
+                    b[f"open:{ns}"] = (ns, None)
+                elif val.type in ("vec_lit", "list_lit"):
+                    for r in names(val):
+                        b[f"n:{r}:{ns}"] = (ns, r)
+        if use and not only:
+            b[f"open:{ns}"] = (ns, None)
+
+    for form in (c for c in root.named_children if c.type == "list_lit"):
+        head, vals = _clj_head(form, text)
+        if head != "ns":
+            continue
+        for clause in (v for v in vals[2:] if v.type == "list_lit"):
+            cv = _clj_values(clause)
+            kind = text(cv[0]) if cv and cv[0].type == "kwd_lit" else ""
+            if kind in (":require", ":require-macros", ":use"):
+                for v in cv[1:]:
+                    spec(v, None, kind == ":use")
+        break
+    return list(dict.fromkeys(raws)), b
+
+
+def _objc_imports(root, text, _module):
+    """Objective-C: `#import "x.h"` -> "x.h" (como C); `#import <UIKit/UIView.h>` ->
+    "fw:UIKit/UIView.h" y `@import UIKit;` -> "fw:UIKit" (framework: puede ser el del propio
+    proyecto, ver el indexer). `<stdio.h>` se omite, como en C."""
+    raws = []
+
+    def walk(n):
+        if n.type == "preproc_include":
+            p = n.child_by_field_name("path")
+            if p is not None and p.type == "string_literal":
+                c = _first_child(p, "string_content")
+                raws.append(text(c) if c is not None else text(p).strip('"'))
+            elif p is not None and p.type == "system_lib_string" and "/" in text(p):
+                raws.append("fw:" + text(p).strip("<>"))
+            return
+        if n.type == "module_import":
+            p = n.child_by_field_name("path")
+            if p is not None:
+                raws.append("fw:" + text(p).split(".")[0])
+            return
+        for c in n.children:
+            walk(c)
+
+    walk(root)
+    return list(dict.fromkeys(raws)), {}
+
+
 _M15D_IMPORTS = {"erlang": _erl_imports, "haskell": _hs_imports, "perl": _perl_imports,
-                 "zig": _zig_imports, "solidity": _sol_imports}
+                 "zig": _zig_imports, "solidity": _sol_imports, "clojure": _clj_imports,
+                 "objc": _objc_imports}
 
 
 def _imports_m15d(root, grammar, text, module):
@@ -1798,6 +2030,69 @@ def _hs_bound_names(root, text) -> set:
     return out
 
 
+_CLJ_FN_FORMS = {"fn", "fn*", "defn", "defn-", "defmacro", "defmethod"}
+_CLJ_LET_FORMS = {"let", "loop", "binding", "for", "doseq", "when-let", "if-let", "when-some",
+                  "if-some", "with-open", "dotimes", "when-first", "with-redefs",
+                  "with-local-vars"}
+
+
+def _clj_bound_names(root, text) -> set:
+    """Nombres ligados LOCALMENTE en un archivo Clojure: parámetros (también de cada
+    aridad), destinos de `let`/`loop`/`for`/`doseq`… (con desestructuración y `:let`), las
+    funciones de `letfn` y la excepción de `catch`. Tapan a cualquier `:refer`."""
+    out: set = set()
+
+    def syms(n):
+        s = _clj_sym(n, text)
+        if s and s[0] is None:
+            out.add(s[1])
+        for c in n.named_children:
+            syms(c)
+
+    def bindings(vec):
+        items = _clj_values(vec)
+        i = 0
+        while i < len(items):
+            it = items[i]
+            if it.type == "kwd_lit" and text(it) == ":let" and i + 1 < len(items):
+                bindings(items[i + 1])               # `for`/`doseq`: `:let [y ...]`
+            elif it.type != "kwd_lit":
+                syms(it)
+            i += 2
+
+    def walk(n):
+        if n.type == "list_lit":
+            head, vals = _clj_head(n, text)
+            if head in _CLJ_FN_FORMS:
+                if head in ("fn", "fn*") and len(vals) > 1:
+                    s = _clj_sym(vals[1], text)
+                    if s and s[0] is None:
+                        out.add(s[1])                # `(fn nombre [x] ...)`
+                for v in vals[1:]:
+                    if v.type == "vec_lit":
+                        syms(v)
+                        break
+                    inner = _clj_values(v) if v.type == "list_lit" else []
+                    if inner and inner[0].type == "vec_lit":
+                        syms(inner[0])               # multi-aridad: ([x] ...) ([x y] ...)
+            elif head in _CLJ_LET_FORMS:
+                vec = next((v for v in vals[1:] if v.type == "vec_lit"), None)
+                if vec is not None:
+                    bindings(vec)
+            elif head == "letfn" and len(vals) > 1 and vals[1].type == "vec_lit":
+                for f in _clj_values(vals[1]):
+                    h, _v = _clj_head(f, text)
+                    if h:
+                        out.add(h)
+            elif head == "catch" and len(vals) > 2:
+                syms(vals[2])
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return out
+
+
 def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls_out,
                      module):
     """Llamadas M15d: `calls` intra-archivo por ámbito léxico (el contenedor del llamante
@@ -1813,7 +2108,8 @@ def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls
     shorts: dict = {}
     for q, sid in by_qual.items():
         shorts.setdefault(q.rsplit(".", 1)[-1], []).append(sid)
-    bound = _hs_bound_names(root, text) if grammar == "haskell" else set()
+    bound = (_hs_bound_names(root, text) if grammar == "haskell"
+             else _clj_bound_names(root, text) if grammar == "clojure" else set())
 
     def enclosing(byte):
         for a, b_, sid in ordered:
@@ -1844,14 +2140,26 @@ def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls
                     calls_out.append((caller, method, None))        # -import(m, [f/1])
             else:
                 calls_out.append((caller, method, recv))            # mod:f(...)
-        elif grammar == "haskell":
+        elif grammar in ("haskell", "clojure"):
             if recv:
-                calls_out.append((caller, method, recv))            # X.f: alias o módulo
+                calls_out.append((caller, method, recv))            # X.f / u/f: alias o módulo
             elif method not in bound:
                 local = shorts.get(method, [])
                 callee = local[0] if len(local) == 1 else None
                 if not local:
                     calls_out.append((caller, method, None))
+        elif grammar == "objc":
+            own = cq.split(".")[0] if "." in cq else (cq if cq in containers else "")
+            if recv == "self" and own:
+                recv = own                                          # [self m]: su clase
+            if recv and recv != "super" and _is_type(recv):
+                callee = by_qual.get(f"{recv}.{method}")
+                if callee is None:
+                    calls_out.append((caller, method, recv))        # [Foo m]
+            elif not recv:
+                callee = by_qual.get(method)
+                if callee is None:
+                    calls_out.append((caller, method, None))        # función C
         elif grammar == "perl":
             own = cq.rsplit(".", 1)[0] if "." in cq else (cq if cq in containers else "")
             want = f"{recv}.{method}" if recv else (f"{own}.{method}" if own else method)

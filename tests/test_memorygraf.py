@@ -936,7 +936,7 @@ class TestM15c(Base):
 
 
 class TestM15d(Base):
-    """M15d-1 (parte 1): Erlang, Haskell, Perl, Zig y Solidity. Fixtures en
+    """M15d-1: Erlang, Haskell, Perl, Zig, Solidity, Clojure y Objective-C. Fixtures en
     tests/fixtures/crossfile/<lenguaje>/; los casos que NO deben enlazar, con un
     proyecto propio por test (precisión primero, como TestPrecisionM15a/b)."""
 
@@ -958,7 +958,7 @@ class TestM15d(Base):
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_fixture_imports_and_calls(self):
         e, h, p = "erlang/src/billing.erl", "haskell/src/App", "perl/lib/App"
-        z, s = "zig/src", "solidity/contracts"
+        z, s, c = "zig/src", "solidity/contracts", "clojure/src/my_app"
         cases = {
             "erlang": ({(f"{e}::run", "erlang/src/util.erl::check"),          # util:check(X)
                         (f"{e}::run", "erlang/src/fmt.erl::pretty")},        # -import(fmt, …)
@@ -991,6 +991,19 @@ class TestM15d(Base):
                            "solidity/lib/oz/contracts/access/Ownable.sol::Ownable.onlyOwner")},
                          {(f"{s}/Vault.sol", "solidity/lib/oz/contracts/access/Ownable.sol"),
                           (f"{s}/Vault.sol", "external:forge-std")}),
+            "clojure": ({(f"{c}/billing.clj::run", f"{c}/util.clj::check"),         # u/check
+                         (f"{c}/billing.clj::run", f"{c}/util.clj::Shape.area"),    # protocolo
+                         (f"{c}/billing.clj::run", f"{c}/fmt.cljc::pretty"),        # :refer
+                         (f"{c}/billing.clj::run", f"{c}/plat.clj::go")},           # .clj, no .cljs
+                        {(f"{c}/billing.clj", f"{c}/plat.clj"),
+                         (f"{c}/billing.clj", "external:clojure")}),
+            "objc": ({("objc/App/UI/Bar.m::Bar.run", "objc/App/Foo.m::Foo.greet:with:"),
+                      ("objc/App/UI/Bar.m::Bar.run", "objc/App/Foo+Extra.m::Foo.build"),  # categoría
+                      ("objc/App/UI/Bar.m::Bar.run", "objc/App/util.c::helper")},          # función C
+                     # `#import "Foo.h"` desde UI/: el mapa de headers de Xcode (por nombre)
+                     {("objc/App/UI/Bar.m", "objc/App/Foo.h"),
+                      ("objc/App/UI/Bar.m", "external:UIKit"),
+                      ("objc/App/Foo.h", "external:Foundation")}),              # .h de ObjC
         }
         for lang, (calls, deps) in cases.items():
             xcalls, got_deps, _intra, _syms = self._graph(lang)
@@ -1068,6 +1081,62 @@ class TestM15d(Base):
                    "contract C is B, X {\n  function run() public { f(); g(); }\n}\n")
         xcalls, _deps, _intra, _syms = self._graph()
         self.assertEqual(xcalls, {("proj/C.sol::C.run", "proj/B.sol::B.f")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_clojure_platform_ambiguity_and_local_bindings(self):
+        # Desde un .cljc, `my-app.plat` existe en .clj Y .cljs -> ambiguo. `fmt` está en
+        # `:refer`, pero el `let` lo liga localmente y lo tapa.
+        self.write("src/a.cljc", "(ns a (:require [my-app.plat :as p] [b :refer [fmt]]))\n"
+                   "(defn run [x] (p/go) (let [fmt identity] (fmt x)))\n")
+        self.write("src/plat.clj", "(ns my-app.plat)\n(defn go [] 1)\n")
+        self.write("src/plat.cljs", "(ns my-app.plat)\n(defn go [] 2)\n")
+        self.write("src/b.clj", "(ns b)\n(defn fmt [x] x)\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_objc_instance_receiver_and_class_not_imported(self):
+        # `[obj greet]`: receptor instancia (v1, sin arista). `[Hidden go]`: Hidden existe
+        # pero no está en nada de lo que A.m importa.
+        self.write("A.m", '#import "Foo.h"\n@implementation A\n'
+                   "- (void)run { Foo *obj = nil; [obj greet]; [Hidden go]; }\n@end\n")
+        self.write("Foo.h", "@interface Foo\n- (void)greet;\n@end\n")
+        self.write("Foo.m", '#import "Foo.h"\n@implementation Foo\n- (void)greet {}\n@end\n')
+        self.write("Hidden.m", "@implementation Hidden\n+ (void)go {}\n@end\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+        # el receptor instancia ni siquiera sale del extractor (no depende del indexer)
+        from memorygraf.extractors import ts_generic
+        with open(os.path.join(self.proj, "A.m"), encoding="utf-8") as f:
+            _n, _e, _i, calls_out, _b = ts_generic.extract("A.m", "p", f.read())
+        self.assertEqual({(m, v) for _c, m, v in calls_out}, {("go", "Hidden")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_objc_own_framework_import_is_internal(self):
+        # `<MyKit/Foo.h>` con Foo.h en el proyecto (una vez) es el framework propio;
+        # `<UIKit/UIView.h>` no está -> externo. `<MyKit/Dup.h>` está dos veces -> ninguno.
+        self.write("App/A.m", "#import <MyKit/Foo.h>\n#import <UIKit/UIView.h>\n"
+                   "#import <MyKit/Dup.h>\n@implementation A\n@end\n")
+        self.write("MyKit/Foo.h", "@interface Foo\n@end\n")
+        self.write("MyKit/Dup.h", "@interface Dup\n@end\n")
+        self.write("Other/Dup.h", "@interface Dup\n@end\n")
+        _x, deps, _intra, _syms = self._graph()
+        self.assertEqual({t for s, t in deps if s == "proj/App/A.m"},
+                         {"proj/MyKit/Foo.h", "external:UIKit"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_h_and_m_content_sniff(self):
+        # Un `.h` de C que menciona `@interface` en un comentario sigue siendo C; un `.h`
+        # con `@interface` real es ObjC; un `.m` de MATLAB queda como nodo `file`.
+        self.write("c.h", "/* wraps @interface Foo\n#import x */\nint add(int a, int b);\n")
+        self.write("o.h", "// header\n@interface Foo\n@end\n")
+        self.write("m.m", "function y = f(x)\n  y = x;\nend\n")
+        store, _ = self.index()
+        tags = {n["path"]: n["tags"] for n in store.all_nodes(types=["file"])}
+        syms = [n["name"] for n in store.all_nodes(types=["symbol"]) if n["path"] == "proj/m.m"]
+        store.close()
+        self.assertEqual((tags["proj/c.h"], tags["proj/o.h"], tags["proj/m.m"], syms),
+                         (["c"], ["objc"], ["code"], []))
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_prolog_pl_is_not_parsed_as_perl(self):

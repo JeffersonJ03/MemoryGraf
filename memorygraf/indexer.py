@@ -24,7 +24,7 @@ from .extractors import python_ast, js_ts, ts_treesitter, ts_generic, sql_lex
 # Python (ast) y JS/TS (tree-sitter, con calls/imports) tienen extractor propio.
 _TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 # El resto (C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly/Ruby/Kotlin/Swift/Dart/Scala/Lua/
-# Elixir/Bash/Terraform/PowerShell/Erlang/Haskell/Perl/Zig/Solidity) usa el extractor genérico (símbolos + defines) cuando
+# Elixir/Bash/Terraform/PowerShell/Erlang/Haskell/Perl/Zig/Solidity/Clojure/ObjC) usa el extractor genérico (símbolos + defines) cuando
 # tree-sitter está. SQL va por `sql_lex` (léxico, sin tree-sitter).
 _GENERIC_EXTS = {"." + e for e in ts_generic._GRAMMAR_BY_EXT}
 # SQL (M15c): extractor LÉXICO propio (stdlib, todos los dialectos, incluido PL/SQL)
@@ -308,6 +308,11 @@ _RE_DART_PART = re.compile(r'''^\s*part\s+['"]([^'"]+)['"]''', re.MULTILINE)
 # M15d. Haskell: el módulo lo da el header (`module A.B where`), no la ruta; sin header
 # es `Main`. Solidity: la cadena `contract C is A, B(x) {`, sin comentarios.
 _RE_HS_MODULE = re.compile(r"^module\s+([A-Z][\w']*(?:\.[A-Z][\w']*)*)", re.MULTILINE)
+# Clojure: `(ns a.b ...)`, con metadatos opcionales (`(ns ^:no-doc a.b)`)
+_RE_CLJ_NS = re.compile(r"^\(ns\s+(?:\^(?:\{[^}]*\}|[^\s]+)\s+)*([^\s()\[\]{}^;]+)", re.MULTILINE)
+# Plataformas que puede ver cada extensión de Clojure (un ns puede existir en ambas)
+_CLJ_PLATFORM = {".clj": (".clj", ".cljc"), ".cljs": (".cljs", ".cljc"),
+                 ".cljc": (".clj", ".cljs", ".cljc")}
 _RE_SOL_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 _RE_SOL_IS = re.compile(r"\b(?:contract|interface)\s+(\w+)\s+is\s+([^{;]+)\{")
 # Raíces jerárquicas de la base de Haskell: compartirlas no hace interno un import
@@ -738,9 +743,12 @@ class Indexer:
         self.zig_modules = {}      # project -> {nombre: {ruta}}
         self.sol_remaps = {}       # project -> [(prefijo, destino)]
         self.sol_parents = {}      # (file_id, contrato) -> [padres]
-        self._sol_scopes = {}      # file_id -> [file_id visibles]  (perezoso)
+        self._sol_scopes = {}      # (file_id, sufijo) -> [file_id visibles]  (perezoso)
         self._perl_pkgs = None     # (project, paquete) -> [file_id]  (perezoso)
         self._basenames = None     # (project, nombre_archivo) -> [relpath]  (perezoso)
+        self.clj_ns_index = {}     # (project, ns) -> [file_id .clj/.cljs/.cljc]
+        self._objc_classes = None  # (project, clase) -> [file_id]  (perezoso)
+        self.ext_override = {}     # file_id -> ext efectiva (`.h` con Objective-C -> `.m`)
         for proj in config["projects"]:
             name, root = proj["name"], proj["root"]
             zig = _load_zig_modules(root, self.excludes)
@@ -802,6 +810,8 @@ class Indexer:
                 nodes, edges, raw_imports, calls_out, bindings = self._extract(
                     rel_id, name, source, abspath)
                 ext = os.path.splitext(abspath)[1].lower()
+                if ext == ".h" and nodes and nodes[0].tags[:1] == ["objc"]:
+                    ext = self.ext_override[rel_id] = ".m"   # header de Objective-C
                 self.pending_calls.append(
                     (rel_id, name, ext, os.path.dirname(relpath), calls_out, bindings))
                 now = _now()
@@ -915,7 +925,7 @@ class Indexer:
                     # M15d (Erlang/Haskell/Perl/Zig/Solidity): ver _m15d_pairs
                     count += self._link_pairs(caller, callee_name, self._m15d_pairs(
                         EXT_LANG[ext], project, file_id_, base_dir, caller, callee_name,
-                        via, bindings, name_index, short_index))
+                        via, bindings, name_index, short_index, short_all))
                     continue
                 if generic and EXT_LANG.get(ext) in ts_generic._SCOPED:
                     # M15a (Ruby/Swift/Dart): `Tipo.m` o `m` libre -> el símbolo con ese
@@ -1153,7 +1163,7 @@ class Indexer:
                 and name_index[(f, f"{m}.{callee}")] != caller]
 
     def _m15d_pairs(self, g, project, file_id_, base_dir, caller, callee, via, bindings,
-                    name_index, short_index):
+                    name_index, short_index, short_all):
         """Candidatos `(file_id, sym_id)` de una llamada cross-file M15d:
           erlang:   `mod:f` (o `f` de un `-import`) -> `f` en `mod.erl`, si el módulo es
                     único (el nombre de módulo es global en la VM y es el del archivo).
@@ -1164,7 +1174,12 @@ class Indexer:
           zig:      `u.f` / `S.m` / alias -> el archivo del `@import` ligado.
           solidity: `U.f` / `B.f` -> el import con alias; `Lib.f` -> el contrato visible
                     (imports transitivos); `f` -> la cadena `is A, B` y luego las funciones
-                    libres visibles."""
+                    libres visibles.
+          clojure:  como Haskell (`u/f`, `:refer`, `:refer :all`), con el ns de la misma
+                    plataforma (`.clj`/`.cljs` + `.cljc`).
+          objc:     `[Foo sel]` -> `Foo.sel` en cualquier `@implementation` (o categoría) de
+                    Foo, si Foo está declarada en lo que el archivo importa (transitivo:
+                    `#import` es textual); función C -> la regla de C (stem del include)."""
         def at(files, qual):
             return [(f, name_index[(f, qual)]) for f in files
                     if (f, qual) in name_index and name_index[(f, qual)] != caller]
@@ -1172,16 +1187,26 @@ class Indexer:
         if g == "erlang":
             mod = via or bindings[callee][0][4:]          # "mod:util" -> util
             return at(self._erl_module_files(project, mod), callee)
-        if g == "haskell":
+        if g in ("haskell", "clojure"):
             if via:
                 mods = [m for k, (m, _x) in bindings.items() if k.startswith(f"q:{via}:")]
             else:
                 mods = [m for k, (m, _x) in bindings.items() if k.startswith(f"n:{callee}:")]
                 mods += [m for k, (m, hidden) in bindings.items() if k.startswith("open:")
                          and callee not in (hidden or "").split(",")]
+            ext = os.path.splitext(file_id_)[1].lower()
             return [(f, sid) for m in dict.fromkeys(mods)
-                    for f in self._hs_module_files(project, m)
+                    for f in (self._hs_module_files(project, m) if g == "haskell"
+                              else self._clj_ns_files(project, m, ext))
                     for sid in short_index.get((f, callee), []) if sid != caller]
+        if g == "objc":
+            if via is None:
+                return [(sid.split("::", 1)[0], sid) for sid in
+                        self._c_call_candidates(file_id_, callee, short_all, caller)]
+            visible = self._import_closure(file_id_, None)
+            if not any((f, via) in name_index for f in visible):
+                return []                             # la clase no se ve desde aquí
+            return at(self._objc_class_files(project, via), f"{via}.{callee}")
         if g == "perl":
             pkg = via or (bindings[callee][0] if callee in bindings else None)
             if pkg:
@@ -1230,20 +1255,43 @@ class Indexer:
                     self._perl_pkgs.setdefault((n.get("project"), n["name"]), []).append(n["path"])
         return list(dict.fromkeys(self._perl_pkgs.get((project, package), [])))
 
+    def _clj_ns_files(self, project, ns, from_ext):
+        """El archivo del ns `ns` que ve un archivo `from_ext`: un ns puede existir en
+        `.clj` y `.cljs` a la vez; desde `.clj` se ve el `.clj`/`.cljc`, desde `.cljs` el
+        `.cljs`/`.cljc`. Único o nada."""
+        ok = _CLJ_PLATFORM.get(from_ext, tuple(_CLJ_PLATFORM))
+        return self._unique([f for f in self.clj_ns_index.get((project, ns), [])
+                             if f.endswith(ok)])
+
+    def _objc_class_files(self, project, cls):
+        """Archivos que definen métodos o declaran la clase Objective-C `cls`."""
+        if self._objc_classes is None:
+            self._objc_classes = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                if (n.get("tags") or [])[:1] == ["objc"]:
+                    owner = n["name"].split(".")[0]
+                    self._objc_classes.setdefault((n.get("project"), owner), []).append(n["path"])
+        return list(dict.fromkeys(self._objc_classes.get((project, cls), [])))
+
     def _sol_scope(self, project, file_id_):
         """El archivo y lo que importa, transitivamente: en Solidity `import "x"` trae
         también lo que x importó."""
-        if file_id_ not in self._sol_scopes:
+        return self._import_closure(file_id_, ".sol")
+
+    def _import_closure(self, file_id_, suffix):
+        """El archivo y lo que importa, transitivamente (solo destinos `suffix`, o todos)."""
+        key = (file_id_, suffix)
+        if key not in self._sol_scopes:
             seen, queue = [file_id_], [file_id_]
             while queue:
                 for e in self.store.neighbors(queue.pop(), edge_types=[EDGE_IMPORTS],
                                               direction="out"):
                     t = e["target"]
-                    if t.endswith(".sol") and t not in seen:
+                    if (suffix is None or t.endswith(suffix)) and t not in seen:
                         seen.append(t)
                         queue.append(t)
-            self._sol_scopes[file_id_] = seen
-        return self._sol_scopes[file_id_]
+            self._sol_scopes[key] = seen
+        return self._sol_scopes[key]
 
     def _sol_inherited(self, project, file_id_, caller, callee, name_index, scope):
         """Llamada libre dentro de un contrato: la función que hereda por la cadena `is A,
@@ -1459,6 +1507,15 @@ class Indexer:
             self._perl_package_files(project, raw[4:])          # asegura el índice perezoso
             return any(p == project and (m == raw[4:] or m.split("::")[0] == head)
                        for p, m in self._perl_pkgs or {})
+        if g == "clojure":
+            head = raw.split(".")[0]
+            return head != "clojure" and any(
+                p == project and (n == raw or n.split(".")[0] == head)
+                for p, n in self.clj_ns_index)
+        if g == "objc":
+            if raw.startswith("fw:"):                 # header propio repetido: ambiguo
+                return "/" in raw and len(self._by_basename(project, raw[3:])) > 1
+            return True                               # un `#import "x.h"` es siempre propio
         if g == "zig":
             return (raw.endswith((".zig", ".zon")) or "/" in raw or raw == "root"
                     or raw in self.zig_modules.get(project, {}))
@@ -1492,17 +1549,20 @@ class Indexer:
                     return hit
             return None
         app, _, rest = path.partition("/")
-        if self._basenames is None:
-            self._basenames = {}
-            for (p, rel), fid in self.file_index.items():
-                self._basenames.setdefault((p, rel.rsplit("/", 1)[-1]), []).append((rel, fid))
         pat = re.compile(rf"(?:.*/)?{re.escape(app)}(?:-[\w.]+)?/{re.escape(rest)}")
-        hits = {fid for rel, fid in self._basenames.get((project, path.rsplit("/", 1)[-1]), [])
-                if pat.fullmatch(rel)}
+        hits = {fid for rel, fid in self._by_basename(project, path) if pat.fullmatch(rel)}
         root = self.roots.get(project, "")
         if not hits and os.path.isfile(os.path.join(root, "src", f"{app}.app.src")):
             hits = {self.file_index.get((project, rest))} - {None}
         return hits.pop() if len(hits) == 1 else None
+
+    def _by_basename(self, project, path):
+        """[(relpath, file_id)] de los archivos del proyecto con el nombre de `path`."""
+        if self._basenames is None:
+            self._basenames = {}
+            for (p, rel), fid in self.file_index.items():
+                self._basenames.setdefault((p, rel.rsplit("/", 1)[-1]), []).append((rel, fid))
+        return self._basenames.get((project, path.rsplit("/", 1)[-1]), [])
 
     def _resolve_jvm(self, project, base_dir, raw):
         """`a.b.C` (o `a.b.C.Inner`, o `import static a.b.C.m`) -> archivo del paquete
@@ -1594,6 +1654,10 @@ class Indexer:
         if ext == ".hs":
             m = _RE_HS_MODULE.search(source)
             self.hs_mod_index.setdefault((project, m.group(1) if m else "Main"), []).append(rel_id)
+        if ext in _CLJ_PLATFORM:
+            m = _RE_CLJ_NS.search(source)
+            if m:
+                self.clj_ns_index.setdefault((project, m.group(1)), []).append(rel_id)
         if ext == ".sol":
             for contract, parents in _sol_parents(source).items():
                 self.sol_parents[(rel_id, contract)] = parents
@@ -1645,7 +1709,7 @@ class Indexer:
         self._import_edge_count = 0
         external_seen = set()
         for file_id_, project, raws in self.pending_imports:
-            ext = os.path.splitext(file_id_)[1].lower()
+            ext = self.ext_override.get(file_id_) or os.path.splitext(file_id_)[1].lower()
             base_dir = os.path.dirname(file_id_[len(project) + 1:])  # relpath dir
             done = set()   # un mismo destino por archivo cuenta una vez (raws redundantes)
             prior = {}     # Scala: nombre importado antes -> su ruta (imports encadenados)
@@ -1693,6 +1757,10 @@ class Indexer:
                         pkg = raw[4:] if raw.startswith("pkg:") else ""   # List::Util
                     elif ext == ".zig":
                         pkg = raw                                # std, builtin, un paquete
+                    elif ext in (".clj", ".cljs", ".cljc"):
+                        pkg = raw.split(".")[0]                  # clojure, cheshire…
+                    elif ext in (".m", ".mm"):
+                        pkg = raw[3:].split("/")[0]              # fw:UIKit/X.h -> UIKit
                     elif ext == ".sol":
                         parts = raw.split("/")                   # @openzeppelin/contracts
                         pkg = "/".join(parts[:2]) if raw.startswith("@") else parts[0]
@@ -1808,7 +1876,9 @@ class Indexer:
           haskell: `import A.B` -> el archivo cuyo header es `module A.B`, si es único.
           perl: `use A::B` -> el archivo que declara `package A::B`, si es único.
           zig:  `@import("x.zig")` relativo; un nombre -> su módulo de build.zig.
-          solidity: relativo, remapping de foundry o ruta desde la raíz."""
+          solidity: relativo, remapping de foundry o ruta desde la raíz.
+          clojure: `(:require [a.b ...])` -> el archivo con `(ns a.b)` de la plataforma.
+          objc: como C y, si no, el header por nombre (mapa de headers de Xcode)."""
         g = EXT_LANG.get(ext)
         if g in ts_generic._JVM:
             if raw.endswith(".*"):
@@ -1900,6 +1970,26 @@ class Indexer:
         if g == "haskell":
             files = self._hs_module_files(project, raw)
             return files[0] if files else None
+        if g == "clojure":
+            files = self._clj_ns_files(project, raw, ext)
+            return files[0] if files else None
+        if g == "objc":
+            if raw.startswith("fw:"):
+                # `<Fw/X.h>`: el framework del PROPIO proyecto si X.h existe una sola vez en
+                # él (SDWebImage importa <SDWebImage/SDImageCache.h>); si no, externo
+                path = raw[3:]
+                hits = [fid for rel, fid in self._by_basename(project, path)] if "/" in path else []
+                return hits[0] if len(hits) == 1 else None
+            # como C (ruta exacta, si no stem) y, si no, el mapa de headers de Xcode: el
+            # `#import "Foo.h"` se encuentra por nombre en todo el proyecto, si es único
+            norm = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
+            hit = (self.file_index.get((project, norm))
+                   or self.path_index.get((project, os.path.splitext(norm)[0])))
+            if hit:
+                return hit
+            hits = [fid for rel, fid in self._by_basename(project, raw)
+                    if rel == raw or rel.endswith("/" + raw)]
+            return hits[0] if len(hits) == 1 else None
         if g == "perl" and raw.startswith("pkg:"):
             files = self._unique(self._perl_package_files(project, raw[4:]))
             return files[0] if files else None
