@@ -86,7 +86,7 @@ hay **degradación elegante** al modo portable.
 | Capacidad | Portable (sin extra) | Potencia (con extra) | Extra |
 |---|---|---|---|
 | Símbolos JS/TS (`calls`/`implements`) | regex (aprox.) | **tree-sitter** (exacto) | `parsers` |
-| Símbolos C/C++/Java/C#/Go/Rust/PHP/R/VB/asm/Ruby/Kotlin/Swift/Dart/Scala/Lua/Elixir/Bash/Terraform/PowerShell/Erlang/Haskell/Perl/Zig/Solidity/Clojure/Objective-C/OCaml/F#/Julia/Protobuf/GraphQL | — (se omite) | **tree-sitter** (símbolos + `defines` + `calls` intra-archivo) | `parsers` |
+| Símbolos C/C++/Java/C#/Go/Rust/PHP/R/VB/asm/Ruby/Kotlin/Swift/Dart/Scala/Lua/Elixir/Bash/Terraform/PowerShell/Erlang/Haskell/Perl/Zig/Solidity/Clojure/Objective-C/OCaml/F#/Julia/Protobuf/GraphQL/COBOL | — (se omite) | **tree-sitter** (símbolos + `defines` + `calls` intra-archivo) | `parsers` |
 | SQL (tablas, vistas, rutinas, paquetes PL/SQL; `references`/`calls`) | **léxico propio** (stdlib, todos los dialectos) | — (no usa tree-sitter) | — |
 | Búsqueda semántica | TF-IDF | **model2vec** neural (cross-idioma) | `neural` |
 | `watch` | polling | **watchdog** (eventos nativos) | `watch` |
@@ -134,7 +134,7 @@ dependencia, y todas dejan **procedencia** (`archivo:línea`) y respetan un pres
    **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic, Assembly, Ruby, Kotlin, Swift, Dart,
    Scala, Lua, Elixir, Bash, SQL (todos los dialectos, incluido PL/SQL), Terraform,
    PowerShell, Erlang, Haskell, Perl, Zig, Solidity, Clojure, Objective-C, OCaml, F#, Julia,
-   Protobuf y GraphQL** con símbolos + `defines` + `calls` intra-archivo **y `calls`/`imports`/
+   Protobuf, GraphQL y COBOL** con símbolos + `defines` + `calls` intra-archivo **y `calls`/`imports`/
    `references` cross-file** (M9/M15,
    determinista y precisión-primero: paquete/ruta/`#include`/`source`/`mod`/`go.mod`/PSR-4/
    namespaces/`require`+Zeitwerk/módulo SwiftPM o target de Xcode/`pubspec.yaml`/
@@ -142,8 +142,8 @@ dependencia, y todas dejan **procedencia** (`archivo:línea`) y respetan un pres
    módulo Terraform por directorio/módulo Erlang = archivo/header `module` de Haskell/
    `package` de Perl/`@import` y build.zig/imports, remappings y herencia de Solidity/`(ns …)` de Clojure/
    `#import` + `@interface` de Objective-C/módulo-archivo y dune de OCaml/orden del `.fsproj`
-   de F#/`include` y `using` de Julia/paquete e imports de Protobuf/esquema global de GraphQL
-   según el
+   de F#/`include` y `using` de Julia/paquete e imports de Protobuf/esquema global de GraphQL/
+   `PERFORM`, `CALL`, `COPY` y `EXEC SQL` de COBOL según el
    lenguaje; capa LLM opcional para desempatar ambiguos). Incremental por hash, con reconciliación de símbolos
    movidos y enlace cross-project por endpoints HTTP.
 2. **Conocimiento de dominio.** Decisiones y convenciones desde markdown (`governs`);

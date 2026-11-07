@@ -4,7 +4,7 @@ Un solo recorrido, parametrizado por gramática, que emite nodos `symbol` (funci
 clases/estructuras/tipos, métodos) y aristas `defines`. Cubre C, C++, Java, C#, Go, Rust,
 PHP, R, Visual Basic, Assembly, (M15a) Ruby, Kotlin, Swift, Dart, (M15b) Scala, Lua,
 Elixir, Bash, (M15c) Terraform/HCL y PowerShell, y (M15d) Erlang, Haskell, Perl, Zig,
-Solidity, Clojure, Objective-C, OCaml, F#, Julia, Protobuf y GraphQL. (Python vive en
+Solidity, Clojure, Objective-C, OCaml, F#, Julia, Protobuf, GraphQL y COBOL. (Python vive en
 `python_ast`; JS/TS en `ts_treesitter`, que además resuelve `calls`/`imports`.)
 
 Alcance v1 (honesto): SÍMBOLOS + `defines` (lo uniforme y de mayor valor: `overview`,
@@ -148,6 +148,8 @@ _GRAMMAR_BY_EXT = {
     "jl": "julia",
     # M15d-3: contratos de servicio (aristas `references`, no `calls`)
     "proto": "proto", "graphql": "graphql", "gql": "graphql",
+    # M15d-4: COBOL (formato fijo; el libre y los EXEC se normalizan antes de parsear)
+    "cbl": "cobol", "cob": "cobol", "cobol": "cobol", "cpy": "cobol",
     "m": "objc", "mm": "objc",           # `.h` es C salvo pistas de ObjC: ver _looks_like_objc
 }
 
@@ -232,6 +234,9 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     if grammar is None or not available():
         return nodes, edges, [], [], {}
 
+    exec_blocks: list = []
+    if grammar == "cobol":
+        source, exec_blocks = _cobol_normalize(source)
     src = source.encode("utf-8", "replace")
     try:
         root = _parser(grammar).parse(src).root_node
@@ -246,7 +251,7 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     by_qual: dict = {}        # nombre cualificado -> sid (`Tipo.metodo` intra-archivo)
 
     def add(qual, kind, node, parent_id):
-        if grammar in _M15D and qual in by_qual:
+        if (grammar in _M15D or grammar == "cobol") and qual in by_qual:
             # Cláusulas de Erlang, ecuaciones de Haskell, sobrecargas de Solidity: un
             # solo símbolo cuyo span cubre todas (se llaman por nombre, no por aridad).
             sid = by_qual[qual]
@@ -281,6 +286,11 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
         # Terraform: refs `var.x`/`aws_x.y`/`module.m.out`… (resueltas por el indexer
         # dentro del directorio = módulo) y `source` de los `module` como imports.
         calls_out, raw_imports = _extract_hcl(root, text, fid, add, spans)
+        return nodes, edges, raw_imports, calls_out, {}
+    elif grammar == "cobol":
+        calls_out = []
+        raw_imports = _extract_cobol(root, text, source, fid, add, by_qual, edges, calls_out,
+                                     exec_blocks)
         return nodes, edges, raw_imports, calls_out, {}
     elif grammar in _CONTRACTS:
         calls_out = []
@@ -2749,3 +2759,369 @@ def _extract_graphql(root, text, fid, add, by_qual, edges, calls_out):
 
 
 _CONTRACTS = {"proto": _extract_proto, "graphql": _extract_graphql}
+
+
+# --------------------------------------------------------------------------- #
+# M15d-4 · COBOL
+# --------------------------------------------------------------------------- #
+# La gramática solo entiende FORMATO FIJO (área A desde la columna 8) y da ERROR en
+# `EXEC CICS`. _cobol_normalize lo arregla antes de parsear SIN mover ninguna línea: cada
+# `EXEC ... END-EXEC` se extrae y se cambia por espacios, y el formato libre se pasa a fijo
+# con 7 espacios delante.
+_RE_COBOL_FREE = re.compile(r"^\s*>>\s*SOURCE\s+(?:FORMAT\s+(?:IS\s+)?)?FREE\b", re.I | re.M)
+_RE_COBOL_DIV = re.compile(r"\b(?:IDENTIFICATION|ID)\s+DIVISION\b|\bPROGRAM-ID\b", re.I)
+# Solo un EXEC de verdad: `EXEC PGM=` dentro de un literal con JCL no abre un bloque
+_RE_EXEC = re.compile(r"\bEXEC\s+(?:SQL|CICS|DLI|SQLIMS|HTML|XML|ADABAS)\b", re.I)
+_RE_END_EXEC = re.compile(r"\bEND-EXEC\b", re.I)
+_RE_PROC_DIV = re.compile(r"\bPROCEDURE\s+DIVISION\b", re.I)
+_RE_COPY = re.compile(r"(?<![\w-])COPY\s+(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z0-9][\w#@$-]*))", re.I)
+_RE_NOT_OP = re.compile(r"\bNOT([=<>]) ", re.I)             # `NOT= X` -> `NOT =X` (mismo largo)
+
+
+def _cobol_is_free(source: str) -> bool:
+    """¿Formato libre? La directiva `>>SOURCE FORMAT FREE`, o la cabecera de división /
+    `PROGRAM-ID` empezando antes de la columna 8 (no hay números de secuencia ni área A)."""
+    if _RE_COBOL_FREE.search(source):
+        return True
+    for line in source.splitlines():
+        m = _RE_COBOL_DIV.search(line)
+        if m:
+            return m.start() < 7
+    return False
+
+
+def _cobol_normalize(source: str):
+    """(fuente en formato fijo sin bloques EXEC ni COPY, [(fila_0, texto_del_bloque)]). Las
+    filas no cambian, así que los números de línea de los símbolos son los del original.
+      - `EXEC ... END-EXEC`: fuera (la gramática no entiende `EXEC CICS`). Fuera de la
+        PROCEDURE DIVISION se quita también su punto: suelto en la DATA DIVISION da ERROR.
+      - `COPY x [REPLACING ...].` de la PROCEDURE DIVISION: fuera (ahí la gramática pierde
+        el resto del programa); sale como bloque `COPY x` para el import. Los de la DATA
+        DIVISION se quedan: los parsea bien y quitarlos dejaría un `FD` sin registro.
+      - `NOT= X` -> `NOT =X`: la gramática exige el espacio; mismo largo, mismo sentido.
+      - Formato libre -> fijo, con 7 espacios delante."""
+    source, copies = _strip_cobol_copies(source)
+    free = _cobol_is_free(source)
+    lines = source.split("\n")
+    blocks, cur, cur_row, in_proc = [(row, f"COPY {name}") for row, name in copies], None, 0, False
+    for i, line in enumerate(lines):
+        if free:
+            if _RE_COBOL_FREE.match(line):
+                lines[i] = ""
+                continue
+            lo, hi = 0, len(line)
+            cut = line.find("*>")
+            if cut != -1:
+                hi = cut
+        else:
+            if len(line) > 6 and line[6] in "*/":
+                continue                                   # línea de comentario
+            lo, hi = 7, min(len(line), 72)
+        pos = lo
+        chars = list(line)
+        while pos < hi:
+            if cur is None:
+                m = _RE_EXEC.search(line, pos, hi)
+                while m and (line.count("'", lo, m.start()) % 2 or line.count('"', lo, m.start()) % 2):
+                    m = _RE_EXEC.search(line, m.end(), hi)      # dentro de un literal
+                if not m:
+                    break
+                cur, cur_row, pos = [], i, m.start()
+            e = _RE_END_EXEC.search(line, pos, hi)
+            end = e.end() if e else hi
+            if e and not in_proc:
+                dot = re.match(r"\s*\.", line[end:hi])
+                end += dot.end() if dot else 0
+            cur.append(line[pos:end])
+            chars[pos:end] = " " * (end - pos)
+            pos = end
+            if e:
+                blocks.append((cur_row, " ".join(cur)))
+                cur = None
+        if _RE_PROC_DIV.search(line, lo, hi):
+            in_proc = True
+        lines[i] = _RE_NOT_OP.sub(lambda m: f"NOT {m.group(1)}", "".join(chars))
+    if free:
+        lines = [("       " + ln) if ln.strip() else ln for ln in lines]
+    return "\n".join(lines), blocks
+
+
+def _strip_cobol_copies(source: str):
+    """(fuente con cada `COPY ... .` de la PROCEDURE DIVISION cambiada por espacios,
+    [(fila_0, COPYBOOK)]). No toca saltos de línea ni comentarios. El fin es el primer
+    punto seguido de blanco que no está dentro de un pseudotexto `==...==`."""
+    free = _cobol_is_free(source)
+    lines = source.split("\n")
+    copies = []
+    i = next((k for k, ln in enumerate(lines)
+              if not (not free and len(ln) > 6 and ln[6] in "*/") and _RE_PROC_DIV.search(ln)),
+             len(lines))
+    while i < len(lines):
+        line = lines[i]
+        lo, hi = (0, len(line)) if free else (7, min(len(line), 72))
+        if (not free and len(line) > 6 and line[6] in "*/") or lo >= hi:
+            i += 1
+            continue
+        m = _RE_COPY.search(line, lo, hi)
+        if not m:
+            i += 1
+            continue
+        copies.append((i, (m.group(1) or m.group(2) or m.group(3)).upper()))
+        # buscar el punto final, quizá varias líneas después
+        row, pos, pseudo = i, m.end(), False
+        while row < len(lines):
+            ln = lines[row]
+            rlo, rhi = (0, len(ln)) if free else (7, min(len(ln), 72))
+            if not free and len(ln) > 6 and ln[6] in "*/":
+                row, pos = row + 1, None
+                continue
+            j = max(pos if pos is not None else rlo, rlo)
+            end = None
+            while j < rhi:
+                if ln.startswith("==", j):
+                    pseudo, j = not pseudo, j + 2
+                    continue
+                if ln[j] == "." and not pseudo and (j + 1 >= rhi or ln[j + 1] in " \r"):
+                    end = j + 1
+                    break
+                j += 1
+            start = m.start() if row == i else rlo
+            stop = end if end is not None else rhi
+            lines[row] = ln[:start] + " " * (stop - start) + ln[stop:]
+            if end is not None:
+                break
+            row, pos = row + 1, None
+        i += 1
+    return "\n".join(lines), copies
+
+
+_RE_CICS_PGM = re.compile(r"\b(?:LINK|XCTL)\b.*?\bPROGRAM\s*\(\s*['\"]([\w#@$-]+)['\"]\s*\)",
+                          re.I | re.S)
+_RE_SQL_INCLUDE = re.compile(r"^\s*EXEC\s+SQL\s+INCLUDE\s+([\w#@$-]+)", re.I)
+_RE_COPY_RECORD = re.compile(r"^\s*(01|77)\s+([A-Za-z0-9][\w-]*)", re.M)
+_SQL_STD_INCLUDES = {"SQLCA", "SQLDA"}
+
+
+def _extract_cobol(root, text, source, fid, add, by_qual, edges, calls_out, blocks):
+    """COBOL: el programa (`PROGRAM-ID`), sus secciones y párrafos (`PROG.PARA`) y los
+    registros de nivel 01/77 (`PROG.REG`). Los programas anidados (`END PROGRAM`) cuelgan
+    de su padre (`PADRE.HIJO`). Los nombres no distinguen mayúsculas: van en mayúsculas.
+      `PERFORM X` / `PERFORM A THRU B` / `GO TO X` -> `calls` dentro del programa.
+      `CALL 'PGM'` y `EXEC CICS LINK/XCTL PROGRAM('X')` -> calls_out al programa (solo
+      con literal: `CALL WS-PGM` es dinámico, sin arista).
+      `COPY X` (los de la PROCEDURE DIVISION los recoge _cobol_normalize) y `EXEC SQL
+      INCLUDE X` -> imports del copybook ("copy:X").
+      `EXEC SQL ...` -> `sql_lex`: sus `references`/`calls` caen en el DDL del proyecto.
+    Un copybook suelto (sin programa) no lo parsea la gramática: sus 01/77 por regex."""
+    raws: list = []
+    seen: set = set()
+    programs = [p for p in _descendants(root, "program_definition")]
+    if not programs and not _RE_PROGRAM_ID.search(source):   # copybook: solo registros
+        for row, line in enumerate(source.split("\n")):
+            fixed = len(line) > 6 and (line[:6].strip() == "" or line[:6].isdigit())
+            if fixed and line[6] in "*/":
+                continue
+            m = _RE_COPY_RECORD.match(line[7:72] if fixed else line)
+            if m:
+                add(m.group(2).upper(), "type", _RowSpan(row, row), fid)
+        return raws
+
+    # anidamiento por el orden de PROGRAM-ID / END PROGRAM (la gramática los deja hermanos)
+    events = []
+    for p in programs:
+        nm = next(_descendants(p, "program_name"), None)
+        if nm is not None:
+            events.append((p.start_byte, "start", text(nm).upper(), p))
+        for e in _descendants(p, "end_program"):
+            en = _first_child(e, "program_name")
+            if en is not None:
+                events.append((e.start_byte, "end", text(en).upper(), e))
+    nested = any(kind == "end" for _b, kind, _n, _x in events)
+    stack, owner_of, rows_of = [], {}, []
+    for _b, kind, name, node in sorted(events, key=lambda ev: ev[0]):
+        if kind == "start":
+            if not nested:
+                stack = []
+            qual = f"{stack[-1]}.{name}" if stack else name
+            add(qual, "class", node, by_qual.get(stack[-1], fid) if stack else fid)
+            owner_of[node.start_byte] = qual
+            stack.append(qual)
+        else:
+            while stack and stack.pop().split(".")[-1] != name:
+                pass
+
+    labels: dict = {}                                   # (programa, ETIQUETA) -> sid
+    for p in programs:
+        prog = owner_of.get(p.start_byte)
+        if prog is None:
+            continue
+        rows_of.append((p.start_point[0], p.end_point[0], by_qual[prog]))
+        for dd in _descendants(p, "data_description"):
+            lvl, nm = _first_child(dd, "level_number"), _first_child(dd, "entry_name")
+            if lvl is not None and nm is not None and text(lvl).lstrip("0") in ("1", "77"):
+                add(f"{prog}.{text(nm).upper()}", "type", dd, by_qual[prog])
+        proc = _first_child(p, "procedure_division")
+        if proc is None:
+            continue
+        kids = [c for c in proc.named_children]
+        heads = [i for i, c in enumerate(kids) if c.type in ("section_header", "paragraph_header")]
+        section = None
+        for k, i in enumerate(heads):
+            h = kids[i]
+            nxt = heads[k + 1] if k + 1 < len(heads) else len(kids)
+            if h.type == "section_header":                 # hasta la siguiente sección
+                nxt = next((j for j in heads[k + 1:] if kids[j].type == "section_header"), len(kids))
+            last = kids[nxt - 1] if nxt - 1 >= i else h
+            name = text(h).split()[0].rstrip(".").upper()
+            span = _Span(h, last)
+            if h.type == "section_header":
+                section = add(f"{prog}.{name}", "class", span, by_qual[prog])
+                sid = section
+            else:
+                sid = add(f"{prog}.{name}", "method", span, section or by_qual[prog])
+            labels[(prog, name)] = sid
+            rows_of.append((h.start_point[0], last.end_point[0], sid))
+
+        def caller_at(row):
+            best = None
+            for a, b, sid in rows_of:
+                if a <= row <= b and (best is None or b - a < best[1] - best[0]):
+                    best = (a, b, sid)
+            return best[2] if best else None
+
+        local_programs = {q.split(".")[-1]: by_qual[q] for q in owner_of.values()}
+        for st in _descendants(proc, "perform_procedure"):
+            for lab in (c for c in st.named_children if c.type == "label"):
+                w = next(_descendants(lab, "WORD"), None)
+                callee = labels.get((prog, text(w).upper())) if w is not None else None
+                caller = caller_at(st.start_point[0])
+                if caller and callee and callee != caller and (caller, callee) not in seen:
+                    seen.add((caller, callee))
+                    edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))
+        for st in _descendants(proc, "goto_statement"):
+            to = st.child_by_field_name("to")
+            w = next(_descendants(to, "WORD"), None) if to is not None else None
+            callee = labels.get((prog, text(w).upper())) if w is not None else None
+            caller = caller_at(st.start_point[0])
+            if caller and callee and callee != caller and (caller, callee) not in seen:
+                seen.add((caller, callee))
+                edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))
+        for st in _descendants(proc, "call_statement"):
+            x = st.child_by_field_name("x")
+            if x is None or x.type != "string":
+                continue                                   # CALL WS-PGM: dinámico
+            pgm = text(x).strip("'\"").upper()
+            caller = caller_at(st.start_point[0])
+            if caller is None:
+                continue
+            if pgm in local_programs and local_programs[pgm] != caller:
+                edges.append(Edge(caller, local_programs[pgm], EDGE_CALLS, 1.0, "tree-sitter"))
+            else:
+                calls_out.append((caller, pgm, "program"))
+                raws.append("pgm:" + pgm)
+
+    if root.has_error:
+        _cobol_lexical_fallback(source, fid, add, by_qual, edges, calls_out, raws, seen,
+                                rows_of, labels, owner_of)
+
+    for cp in _descendants(root, "copy_statement"):     # los COPY de la DATA DIVISION
+        book = cp.child_by_field_name("book")
+        if book is not None:
+            raws.append("copy:" + text(book).strip("'\"").upper())
+
+    from . import sql_lex                               # EXEC SQL -> el lexer de M15c
+    for row, block in blocks:
+        caller = None
+        for a, b, sid in rows_of:
+            if a <= row <= b and (caller is None or b - a < caller[1] - caller[0]):
+                caller = (a, b, sid)
+        if block.startswith("COPY "):                     # de _strip_cobol_copies
+            raws.append("copy:" + block[5:])
+            continue
+        head = block.split(None, 2)
+        kind = head[1].upper() if len(head) > 1 else ""
+        if kind == "SQL":
+            inc = _RE_SQL_INCLUDE.match(block)
+            if inc:
+                if inc.group(1).upper() not in _SQL_STD_INCLUDES:
+                    raws.append("copy:" + inc.group(1).upper())
+                continue
+            if caller is None:
+                continue
+            body = _RE_END_EXEC.sub("", block.split(None, 2)[2] if len(head) > 2 else "")
+            try:
+                refs = sql_lex._references(sql_lex._string_mode(body), [], caller[2])
+            except Exception:
+                refs = []
+            calls_out.extend((caller[2], name, k) for _c, name, k in refs)
+        elif kind == "CICS" and caller is not None:
+            for pgm in _RE_CICS_PGM.findall(block):
+                calls_out.append((caller[2], pgm.upper(), "program"))
+                raws.append("pgm:" + pgm.upper())
+    return list(dict.fromkeys(raws))
+
+
+_RE_PROGRAM_ID = re.compile(r"\bPROGRAM-ID\s*\.\s*['\"]?([A-Za-z0-9][\w#@$-]*)", re.I)
+_RE_AREA_A_LABEL = re.compile(r"([A-Za-z0-9][\w-]*)(\s+SECTION)?\s*\.\s*$", re.I)
+_RE_PERFORM = re.compile(r"\b(?:PERFORM|GO\s+TO)\s+([A-Za-z0-9][\w-]*)"
+                         r"(?:\s+(?:THRU|THROUGH)\s+([A-Za-z0-9][\w-]*))?", re.I)
+_RE_CALL_LIT = re.compile(r"\bCALL\s+['\"]([\w#@$-]+)['\"]", re.I)
+
+
+def _cobol_lexical_fallback(source, fid, add, by_qual, edges, calls_out, raws, seen,
+                            rows_of, labels, owner_of):
+    """Red de seguridad cuando la gramática da ERROR (DL/I, literales partidos, cabeceras
+    raras): los párrafos que el AST no dio se sacan del área A de la PROCEDURE DIVISION
+    (en COBOL, un nombre en el área A seguido de punto ES una cabecera), con sus
+    `PERFORM`/`GO TO` a etiquetas conocidas y sus `CALL 'X'`. Solo si hay un único
+    programa en el archivo (sin anidados no se sabe de quién es cada párrafo)."""
+    names = {m.group(1).upper() for m in _RE_PROGRAM_ID.finditer(source)}
+    if len(names) != 1:
+        return
+    prog = names.pop()
+    lines = source.split("\n")
+    if prog not in by_qual:
+        add(prog, "class", _RowSpan(0, len(lines) - 1), fid)
+        rows_of.append((0, len(lines) - 1, by_qual[prog]))
+    start = next((i for i, ln in enumerate(lines) if len(ln) > 7 and ln[6] not in "*/"
+                  and _RE_PROC_DIV.search(ln[7:72])), None)
+    if start is None:
+        return
+    heads = []
+    for i in range(start + 1, len(lines)):
+        ln = lines[i]
+        if len(ln) > 7 and ln[6] not in "*/" and ln[7] != " ":
+            m = _RE_AREA_A_LABEL.match(ln[7:72].rstrip())
+            if m and m.group(1).upper() not in ("END", "EXIT"):
+                heads.append((i, m.group(1).upper(), bool(m.group(2))))
+    new = []
+    for k, (row, name, is_section) in enumerate(heads):
+        if (prog, name) in labels:
+            continue
+        last = (heads[k + 1][0] - 1) if k + 1 < len(heads) else len(lines) - 1
+        sid = add(f"{prog}.{name}", "class" if is_section else "method", _RowSpan(row, last),
+                  by_qual[prog])
+        labels[(prog, name)] = sid
+        rows_of.append((row, last, sid))
+        new.append((row, last, sid))
+    for row, last, sid in new:                        # llamadas solo de lo recuperado
+        body = "\n".join(ln[7:72] for ln in lines[row:last + 1]
+                         if not (len(ln) > 6 and ln[6] in "*/"))
+        for m in _RE_PERFORM.finditer(body):
+            for target in (m.group(1), m.group(2)):
+                callee = labels.get((prog, target.upper())) if target else None
+                if callee and callee != sid and (sid, callee) not in seen:
+                    seen.add((sid, callee))
+                    edges.append(Edge(sid, callee, EDGE_CALLS, 1.0, "tree-sitter"))
+        for m in _RE_CALL_LIT.finditer(body):
+            calls_out.append((sid, m.group(1).upper(), "program"))
+            raws.append("pgm:" + m.group(1).upper())
+
+
+class _RowSpan:
+    """Span de una sola fila (registros de un copybook encontrados por regex)."""
+    __slots__ = ("start_point", "end_point", "start_byte", "end_byte")
+
+    def __init__(self, first, last):
+        self.start_point, self.end_point = (first, 0), (last, 0)
+        self.start_byte = self.end_byte = 0

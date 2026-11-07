@@ -25,7 +25,7 @@ from .extractors import python_ast, js_ts, ts_treesitter, ts_generic, sql_lex
 _TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 # El resto (C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly/Ruby/Kotlin/Swift/Dart/Scala/Lua/
 # Elixir/Bash/Terraform/PowerShell/Erlang/Haskell/Perl/Zig/Solidity/Clojure/ObjC/OCaml/
-# F#/Julia/Protobuf/GraphQL) usa el extractor genérico (símbolos + defines) cuando
+# F#/Julia/Protobuf/GraphQL/COBOL) usa el extractor genérico (símbolos + defines) cuando
 # tree-sitter está. SQL va por `sql_lex` (léxico, sin tree-sitter).
 _GENERIC_EXTS = {"." + e for e in ts_generic._GRAMMAR_BY_EXT}
 # SQL (M15c): extractor LÉXICO propio (stdlib, todos los dialectos, incluido PL/SQL)
@@ -856,6 +856,9 @@ class Indexer:
         self.proto_pkg = {}        # file_id -> paquete
         self.proto_roots = {}      # project -> [raíces de import]
         self._contracts = None     # (project, lenguaje, nombre_completo) -> [(file, sid)]
+        # M15d-4: COBOL (copybooks por nombre, programas por PROGRAM-ID)
+        self.cobol_stems = {}      # (project, NOMBRE) -> [file_id .cbl/.cob/.cobol/.cpy]
+        self._cobol_pgms = None    # (project, PROGRAMA) -> [(file, sid)]  (perezoso)
         for proj in config["projects"]:
             name, root = proj["name"], proj["root"]
             zig = _load_zig_modules(root, self.excludes)
@@ -1036,6 +1039,14 @@ class Indexer:
                     # `Alias.f` -> módulo completo vía `alias`; `f` libre -> los `import`.
                     count += self._link_pairs(caller, callee_name, self._ex_call_pairs(
                         project, via, callee_name, bindings, name_index, caller))
+                    continue
+                if generic and EXT_LANG.get(ext) == "cobol":
+                    # M15d-4: CALL/LINK/XCTL -> el programa; EXEC SQL -> el DDL (como SQL)
+                    if via in ("ref", "call"):
+                        count += self._link_sql(caller, callee_name, via, project)
+                    else:
+                        count += self._link_pairs(caller, callee_name, [
+                            p for p in self._cobol_programs(project, callee_name) if p[1] != caller])
                     continue
                 if generic and EXT_LANG.get(ext) in ts_generic._CONTRACTS:
                     # M15d-3: `references` (e `implements`) de un contrato, ver _contract_pairs
@@ -1586,6 +1597,19 @@ class Indexer:
                 return hits
         return []
 
+    # --- M15d-4: COBOL --------------------------------------------------------------
+    def _cobol_programs(self, project, name):
+        """[(file, sid)] de los programas COBOL con ese PROGRAM-ID (también anidados). El
+        nombre de programa es global en la librería de carga, como el módulo en Erlang."""
+        if self._cobol_pgms is None:
+            self._cobol_pgms = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                if (n.get("tags") or [])[:2] == ["cobol", "class"] and n.get("path") \
+                        and n["path"].lower().endswith((".cbl", ".cob", ".cobol")):
+                    self._cobol_pgms.setdefault((n.get("project"), n["name"].split(".")[-1]),
+                                                []).append((n["path"], n["id"]))
+        return self._cobol_pgms.get((project, name.upper()), [])
+
     def _unique(self, files):
         return list(files) if len(files) == 1 else []
 
@@ -1857,6 +1881,8 @@ class Indexer:
             self._perl_package_files(project, raw[4:])          # asegura el índice perezoso
             return any(p == project and (m == raw[4:] or m.split("::")[0] == head)
                        for p, m in self._perl_pkgs or {})
+        if g == "cobol":
+            return True                               # copybooks y programas: siempre propios
         if g == "proto":                              # ruta repetida: ambigua, no externa
             return len([1 for rel, _f in self._by_basename(project, raw)
                         if rel == raw or rel.endswith("/" + raw)]) > 1
@@ -2028,6 +2054,9 @@ class Indexer:
             lib = self.dune_libs.get(project, {}).get(os.path.dirname(relpath))
             if lib:
                 self.ml_mod_index.setdefault((project, f"{_cap(lib)}.{mod}"), []).append(rel_id)
+        if ext in (".cbl", ".cob", ".cobol", ".cpy"):
+            stem = os.path.basename(relpath).rsplit(".", 1)[0].upper()
+            self.cobol_stems.setdefault((project, stem), []).append(rel_id)
         if ext == ".proto":
             m = _RE_PROTO_PKG.search(source)
             self.proto_pkg[rel_id] = m.group(1) if m else ""
@@ -2288,7 +2317,8 @@ class Indexer:
           ocaml: `mod:A.B` -> el archivo del prefijo más largo que es módulo; `.mli` -> `.ml`.
           fsharp: `#load "x.fsx"` relativo (`open` es un namespace: sin arista).
           julia: `include("x.jl")` relativo; `using` -> ver _jl_use_target.
-          proto: raíces de buf.yaml o del repo y, si no, la única ruta con ese final."""
+          proto: raíces de buf.yaml o del repo y, si no, la única ruta con ese final.
+          cobol: `copy:X` -> el copybook X (`.cpy` primero), `pgm:X` -> su PROGRAM-ID."""
         g = EXT_LANG.get(ext)
         if g in ts_generic._JVM:
             if raw.endswith(".*"):
@@ -2383,6 +2413,15 @@ class Indexer:
         if g == "clojure":
             files = self._clj_ns_files(project, raw, ext)
             return files[0] if files else None
+        if g == "cobol":
+            kind, _, name = raw.partition(":")
+            if kind == "copy":                        # el copybook: `.cpy` primero, único
+                files = self.cobol_stems.get((project, name.upper()), [])
+                cpy = [f for f in files if f.lower().endswith(".cpy")]
+                files = cpy or files
+                return files[0] if len(files) == 1 else None
+            files = {f for f, _sid in self._cobol_programs(project, name)}
+            return files.pop() if len(files) == 1 else None
         if g == "proto":
             # raíces de buf.yaml o la raíz del repo; si no, el único archivo con esa ruta
             # al final (el -I de protoc es desconocido)

@@ -4,8 +4,8 @@
 > M13–M20 ya entraron **M14 (`path A B`)**, **M15a–c**: M15a (Ruby, Kotlin, Swift,
 > Dart), M15b (Scala, Lua, Elixir, Bash) y M15c (SQL, Terraform/HCL, PowerShell), y
 > **M15d-1** (Erlang, Haskell, Perl, Zig, Solidity, Clojure y Objective-C: **30 lenguajes,
-> la meta de M15**), **M15d-2** (OCaml, F#, Julia) y **M15d-3** (Protobuf, GraphQL): 35
-> (M15d-4, COBOL, lleva a 36); y la deuda registrada (§2 coste incremental de M1, deuda de
+> la meta de M15**), **M15d-2** (OCaml, F#, Julia), **M15d-3** (Protobuf, GraphQL) y
+> **M15d-4** (COBOL): **36 lenguajes, M15 cerrado**; y la deuda registrada (§2 coste incremental de M1, deuda de
 > M15a incluidos sus dos últimos límites, Java Maven/Gradle, LSP con TS 7) está **saldada**. Desde julio, además: **CI** en cada PR (Linux +
 > Windows nativo, modos portable y potencia; PR #13–#16 corrigieron los bugs que destapó)
 > e **imagen Docker** (`Dockerfile`). La fuente de verdad es el **código + los tests
@@ -18,8 +18,8 @@
 > Complementa `DESIGN.md` (principios §3, vinculantes).
 
 > **▶ Siguiente paso (actualizar al cerrar cada hito).**
-> 0. **M15d**: M15d-1 a M15d-3 hechos (23 → 35; la meta de M15, 30, cumplida). Sigue
->    M15d-4 (COBOL), hasta 36. Sin dependencias nuevas.
+> 0. **M15d** hecho (23 → 36, M15 cerrado), pendiente de la auditoría de las ramas
+>    `feat/m15d-1` … `feat/m15d-4` antes del PR.
 > 1. **M16** (instaladores multi-host): cierra el paquete de mayor retorno por esfuerzo
 >    junto con M14 y M15.
 > 2. Luego **M13** (comunidades) y **M17** (always-on). §9 sigue abierto en paralelo.
@@ -52,6 +52,7 @@
 | M15d-1 | **Erlang, Haskell, Perl, Zig, Solidity, Clojure, Objective-C**: símbolos + `calls` intra + `imports`/`calls` cross-file; sniff de `.pl` (Prolog), `.h` y `.m` | `ts_generic` + `indexer`. Ver §M15d. |
 | M15d-2 | **OCaml, F#, Julia**: ídem, por nombre completo y solo donde es inequívoco | `ts_generic` + `indexer`. Ver §M15d. |
 | M15d-3 | **Protobuf, GraphQL**: `references`/`implements` `ast-ref` (EXTRACTED) entre contratos | `ts_generic` + `indexer`. Ver §M15d. |
+| M15d-4 | **COBOL**: normalización previa, PERFORM/CALL/LINK/XCTL/COPY y EXEC SQL contra el DDL | `ts_generic` + `sql_lex` + `indexer`. Ver §M15d. |
 
 Cada mejora entró con **test de regresión** y verificación en vivo (regla DESIGN §11).
 
@@ -281,7 +282,7 @@ CLI o enriqueciendo tools existentes, no como tool nueva. Lo que no cumple está
 |---|---|---|---|:--:|
 | **M13** | Comunidades / subsistemas | La única capacidad **analítica** que Graphify tiene y MemoryGraf no | Medio | **Alto** |
 | **M14** ✅ | `path A B` — cómo se conectan dos nodos | Consulta que hoy no existe (hay `neighbors`, no camino) | **Bajo** | **Alto** |
-| **M15** (a–c ✅, d en curso) | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; con M15a–c, 23; con M15d-1, 30; con M15d-2, 33; con M15d-3, 35; M15d lleva a 36 | **Bajo** | **Alto** |
+| **M15** ✅ | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; con M15a–c, 23; con M15d-1, 30; con M15d-2, 33; con M15d-3, 35; con M15d-4, 36 | **Bajo** | **Alto** |
 | **M16** | Instaladores multi-host | `install claude` es el único; el resto es copiar JSON a mano | **Bajo** | **Alto** |
 | **M17** | Always-on: hooks de git + instrucciones de agente | El grafo se queda obsoleto y el asistente no lo usa por su cuenta | Bajo-medio | **Alto** |
 | **M18** | Exportadores (GraphML / Cypher / Obsidian / wiki) | Hoy solo JSON + HTML | Bajo | Medio |
@@ -395,7 +396,7 @@ trivial, datos ya en memoria, cero dependencias.
 
 ---
 
-### M15 · Ampliar la matriz de gramáticas (~12 → ~30 lenguajes)  (M15a–c ✅: M15a 2026-10-26, M15b y M15c 2026-10-27 · M15d EN CURSO: 23 → 35 → 36)
+### M15 · Ampliar la matriz de gramáticas (~12 → ~30 lenguajes)  (M15a–c ✅: M15a 2026-10-26, M15b y M15c 2026-10-27 · M15d ✅ 2026-11-07: 23 → 36)
 
 **Hecho — M15a (2026-10-26).** Ruby (`.rb`), Kotlin (`.kt`/`.kts`), Swift (`.swift`) y Dart
 (`.dart`) entran con **símbolos + `defines` + `calls` intra-archivo + `imports`/`calls`
@@ -589,7 +590,7 @@ que NO debe generar arista). Skip limpio si la gramática no está instalada.
 grupo, no por lenguaje. Riesgo acotado — si una gramática falla, ese lenguaje se omite y el
 resto del `sync` sigue (degradación ya implementada).
 
-### M15d · Cerrar y superar la meta de M15: de 23 a 36 lenguajes  (PROPUESTA 2026-10-28 · M15d-1 a M15d-3 ✅ 2026-11-07)
+### M15d · Cerrar y superar la meta de M15: de 23 a 36 lenguajes  (PROPUESTA 2026-10-28 · ✅ 2026-11-07)
 
 **Hecho — M15d-1 (2026-11-07).** Erlang, Haskell, Perl, Zig, Solidity, Clojure y
 Objective-C entran con
@@ -771,7 +772,29 @@ procedencia `ast-ref` → EXTRACTED:
   del tipo, campos → `references` al tipo. Sin enlazar operaciones de cliente con el
   esquema (eso es otra cosa).
 
-**M15d-4 — COBOL (mainframe).** No lo tenemos hoy: ni extensión ni regla. Es donde vive la
+**Hecho — M15d-4 (2026-11-07).** COBOL (`.cbl`/`.cob`/`.cobol`/`.cpy`) como estaba
+propuesto, más lo que destapó CardDemo:
+- **Normalización** (sin mover líneas): bloques `EXEC SQL/CICS/DLI…` fuera (solo un EXEC de
+  verdad y fuera de comillas: CardDemo lleva JCL con `EXEC PGM=` dentro de literales, que se
+  tragaba el resto del programa); fuera de la PROCEDURE DIVISION se quita también el punto de
+  `END-EXEC.` (suelto en la DATA DIVISION da ERROR); los `COPY ... [REPLACING ...].` de la
+  PROCEDURE DIVISION fuera (ahí la gramática pierde el resto); `NOT= X` → `NOT =X` (mismo
+  largo); formato libre → fijo.
+- **Red léxica**: si aun así hay ERROR (DL/I con `ENTRY`, literales partidos, cabeceras
+  raras), los párrafos del área A de la PROCEDURE DIVISION que el AST no dio, con sus
+  PERFORM/GO TO/CALL, salen por léxico (solo si el archivo tiene un único PROGRAM-ID).
+- Símbolos: programa, secciones, párrafos y registros 01/77 (`PROG.X`), anidados por el orden
+  de `END PROGRAM` (`PADRE.HIJO`); un copybook suelto da sus 01/77 por léxico. Aristas:
+  `PERFORM`/`PERFORM A THRU B`/`GO TO` (`calls` dentro del programa), `CALL 'X'` y `EXEC CICS
+  LINK/XCTL PROGRAM('X')` (solo literales) al PROGRAM-ID único, `COPY X` y `EXEC SQL INCLUDE X`
+  (imports, `.cpy` primero; nunca `external:`) y `EXEC SQL` vía `sql_lex` contra el DDL (se
+  añadió `.ddl` a las extensiones de SQL).
+- Validación: CardDemo (59cc6c2), 129 archivos en 1,4 s: 1 479 símbolos COBOL, 1 284 `calls`
+  intra, 16 xfile, 252 imports, 13 `references` a las tablas DB2 y ningún externo. Párrafos y
+  secciones: 869/869 (sin las correcciones de arriba, 702/868). Hay pocas `calls` xfile porque
+  sus programas CICS hacen `XCTL PROGRAM(WS-PGM)` con el nombre en una variable (dinámico).
+
+**M15d-4 — COBOL (mainframe), propuesta original.** No lo tenemos hoy: ni extensión ni regla. Es donde vive la
 lógica de banca, seguros y telecomunicaciones, y un grafo vale más justo en esos sistemas,
 porque son grandes y nadie los recuerda enteros.
 - **Extensiones:** `.cbl`, `.cob`, `.cobol` y `.cpy` (copybooks).

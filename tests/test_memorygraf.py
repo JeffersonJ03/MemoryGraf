@@ -1304,6 +1304,118 @@ class TestM15d3(_M15dGraph):
         self.assertEqual(rows, set())
 
 
+class TestM15d4(_M15dGraph):
+    """M15d-4: COBOL. Normalización previa (EXEC fuera, formato libre -> fijo, sin mover
+    líneas), PERFORM/GO TO dentro del programa, CALL/LINK/XCTL con literal entre
+    programas, COPY a copybooks y EXEC SQL contra el DDL del repo."""
+
+    def _all(self, lang=None):
+        if lang:
+            root = os.path.join(CROSSFILE_DIR, lang)
+            store = Store(os.path.join(self.tmp, f"{lang}.db"))
+            Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        else:
+            store, _ = self.index()
+        rows = {(e["type"], e["source"], e["target"]) for e in store.all_edges()
+                if e["type"] in ("calls", "imports", "references", "depends_on")}
+        syms = {n["name"]: (n["span_start"], n["span_end"]) for n in store.all_nodes(types=["symbol"])}
+        store.close()
+        return rows, syms
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_fixture(self):
+        b, c = "cobol/app/cbl/BILLING.cbl", "cobol/app/cbl"
+        rows, syms = self._all("cobol")
+        expected = {
+            ("calls", f"{b}::BILLING.MAIN-PARA", f"{b}::BILLING.CALC-PARA"),        # PERFORM
+            ("calls", f"{b}::BILLING.MAIN-PARA", f"{b}::BILLING.CALC-EXIT"),        # ... THRU
+            ("calls", f"{b}::BILLING.MAIN-PARA", f"{c}/UTILPGM.cbl::UTILPGM"),      # CALL 'X'
+            ("calls", f"{b}::BILLING.MAIN-PARA", f"{c}/ACCTUPD.cbl::ACCTUPD"),      # CICS LINK
+            ("imports", b, "cobol/app/cpy/EMPREC.cpy"),                              # COPY
+            ("references", f"{b}::BILLING.MAIN-PARA", "cobol/app/ddl/accounts.sql::ACCOUNTS"),
+        }
+        self.assertEqual(expected - rows, set())
+        # sin aristas de más: CALL WS-PGM es dinámico y nada es `external:`
+        self.assertEqual({r for r in rows if r[1].startswith(b) and r[0] != "imports"},
+                         {r for r in expected if r[0] != "imports"})
+        # números de línea del ORIGINAL (secuencia, comentario en col. 7, bloques EXEC)
+        self.assertEqual((syms["BILLING.MAIN-PARA"], syms["BILLING.CALC-PARA"],
+                          syms["BILLING.WS-PGM"], syms["ACCTUPD.UPD-PARA"], syms["EMP-REC"]),
+                         ((10, 18), (19, 20), (6, 6), (5, 6), (1, 1)))
+        # `CALL WS-PGM` ni siquiera sale del extractor (no depende de que no exista WS-PGM)
+        from memorygraf.extractors import ts_generic
+        with open(os.path.join(CROSSFILE_DIR, b), encoding="utf-8") as f:
+            _n, _e, _i, calls_out, _b = ts_generic.extract("BILLING.cbl", "p", f.read())
+        self.assertEqual({(n, k) for _c, n, k in calls_out},
+                         {("UTILPGM", "program"), ("ACCTUPD", "program"), ("accounts", "ref")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_duplicate_program_id_and_copybook(self):
+        # Dos programas con el mismo PROGRAM-ID y dos copybooks EMPREC.cpy: ambiguos
+        prog = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. {}.\n" \
+               "       PROCEDURE DIVISION.\n       P.\n           {}\n           GOBACK.\n"
+        self.write("a/MAIN.cbl", "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. MAIN.\n"
+                   "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n           COPY EMPREC.\n"
+                   "       PROCEDURE DIVISION.\n       P.\n           CALL 'DUP'.\n")
+        self.write("a/DUP.cbl", prog.format("DUP", "CONTINUE"))
+        self.write("b/DUP2.cbl", prog.format("DUP", "CONTINUE"))
+        self.write("a/EMPREC.cpy", "       01  EMP-REC.\n")
+        self.write("b/EMPREC.cpy", "       01  EMP-REC.\n")
+        rows, _syms = self._all()
+        self.assertEqual({r for r in rows if r[1].startswith("proj/a/MAIN.cbl")}, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_normalization_keeps_lines_and_parses(self):
+        from memorygraf.extractors import ts_generic
+        fixed = ("000100 IDENTIFICATION DIVISION.\n000200 PROGRAM-ID. P.\n000300 DATA DIVISION.\n"
+                 "000400 WORKING-STORAGE SECTION.\n000500     EXEC SQL INCLUDE SQLCA END-EXEC.\n"
+                 "000600 01  R PIC X.\n000700 PROCEDURE DIVISION.\n000800* EXEC CICS EN UN COMENTARIO\n"
+                 "000900 A.\n001000     EXEC CICS RETURN\n001100     END-EXEC\n001200     GOBACK.\n")
+        free = (">>SOURCE FORMAT FREE\nIDENTIFICATION DIVISION.\nPROGRAM-ID. Q.\n"
+                "PROCEDURE DIVISION.\nB.\n    EXEC SQL SELECT 1 FROM T END-EXEC\n    GOBACK.\n")
+        for src, n_blocks in ((fixed, 2), (free, 1)):
+            norm, blocks = ts_generic._cobol_normalize(src)
+            self.assertEqual(norm.count("\n"), src.count("\n"))           # no mueve líneas
+            self.assertEqual(len(blocks), n_blocks)                         # el comentario no
+            self.assertFalse(ts_generic._parser("cobol").parse(norm.encode()).root_node.has_error)
+        # el `EXEC CICS` del comentario no se traga el párrafo A
+        names = {n.name for n in ts_generic.extract("p.cbl", "p", fixed)[0]}
+        self.assertIn("P.A", names)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_grammar_limits_are_worked_around(self):
+        # Construcciones reales (CardDemo) con las que la gramática pierde el resto del
+        # programa: `COPY ... REPLACING` en la PROCEDURE DIVISION, `NOT=` sin espacio y JCL
+        # con `EXEC PGM=` dentro de un literal. Y una cabecera que no entiende (`ENTRY`
+        # de DL/I): la red léxica recupera párrafos y PERFORM.
+        from memorygraf.extractors import ts_generic
+        head = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. P.\n"
+        cases = {
+            "copy": head + "       PROCEDURE DIVISION.\n       A.\n           COPY X REPLACING\n"
+                    "               ==:T:== BY ==WS==.\n           PERFORM B.\n       B.\n           GOBACK.\n",
+            "not=": head + "       PROCEDURE DIVISION.\n       A.\n           IF X NOT= Y\n"
+                    "              PERFORM B\n           END-IF.\n       B.\n           GOBACK.\n",
+            # JCL partido en varias líneas (como CORPT00C): la línea del EXEC no tiene comillas
+            "jcl": head + "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+                   "       01 J PIC X(80) VALUE\n         \"//STEP10\n         EXEC PGM=SORT\".\n"
+                   "       PROCEDURE DIVISION.\n       A.\n           PERFORM B.\n       B.\n           GOBACK.\n",
+            # `EXEC SQL` dentro de un literal de una línea
+            "literal": head + "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+                       "       01 K PIC X(20) VALUE 'EXEC SQL X'.\n"
+                       "       PROCEDURE DIVISION.\n       A.\n           PERFORM B.\n       B.\n           GOBACK.\n",
+            "dli": head + "       PROCEDURE DIVISION.\n           ENTRY 'DLITCBL' USING PCB-1 PCB-2 *.\n"
+                   "       A.\n           PERFORM B.\n       B.\n           GOBACK.\n",
+        }
+        for label, src in cases.items():
+            nodes, edges, raws, _o, _b = ts_generic.extract("p.cbl", "p", src)
+            names = {n.name for n in nodes}
+            calls = {(e.source.split("::")[1], e.target.split("::")[1]) for e in edges if e.type == "calls"}
+            self.assertTrue({"P.A", "P.B"} <= names, label)
+            self.assertIn(("P.A", "P.B"), calls, label)
+            if label == "copy":
+                self.assertEqual(raws, ["copy:X"])
+
+
 class TestAuditM15(Base):
     """Regresiones de la auditoría de M15 (SQL léxico, Xcode, LSP). Cada test reproduce
     un fallo concreto: aristas falsas, símbolos perdidos o una excepción que tumbaba el sync."""
