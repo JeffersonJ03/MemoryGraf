@@ -1247,6 +1247,63 @@ class TestM15d2(_M15dGraph):
         self.assertEqual(xcalls, set())
 
 
+class TestM15d3(_M15dGraph):
+    """M15d-3: contratos de servicio. Protobuf y GraphQL dan `references` (e `implements`)
+    con procedencia `ast-ref` (EXTRACTED), solo hacia destinos inequívocos."""
+
+    def _refs(self, lang=None):
+        if lang:
+            root = os.path.join(CROSSFILE_DIR, lang)
+            store = Store(os.path.join(self.tmp, f"{lang}.db"))
+            Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        else:
+            store, _ = self.index()
+        rows = {(e["type"], e["source"], e["target"]) for e in store.all_edges()
+                if e["type"] in ("references", "implements") and e["provenance"] == "ast-ref"}
+        deps = {(e["source"], e["target"]) for e in store.all_edges()
+                if e["type"] in ("imports", "depends_on")}
+        store.close()
+        return rows, deps
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_fixture_references(self):
+        b, m = "protobuf/proto/billing/v1/billing.proto", "protobuf/proto/common/money.proto"
+        rows, deps = self._refs("protobuf")
+        self.assertEqual({("references", f"{b}::Invoice", f"{m}::Money"),        # otro paquete
+                          ("references", f"{b}::Invoice", f"{b}::Invoice.Line"),  # anidado
+                          ("references", f"{b}::Billing.Create", f"{b}::CreateRequest"),
+                          ("references", f"{b}::Billing.Create", f"{b}::Invoice")} - rows, set())
+        self.assertEqual({(b, m), (b, "external:google/protobuf")} - deps, set())
+        u, p = "graphql/schema/user.graphql", "graphql/schema/post.graphql"
+        rows, _deps = self._refs("graphql")
+        self.assertEqual({("implements", f"{p}::Post", f"{u}::Node"),
+                          ("references", f"{u}::User.posts", f"{p}::Post"),
+                          ("references", f"{u}::User.posts", f"{u}::PostFilter"),   # argumento
+                          ("references", f"{p}::User.favorite", f"{u}::User"),      # extend type
+                          ("references", f"{p}::Query.me", f"{u}::User")} - rows, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_proto_unqualified_name_in_two_packages_and_not_imported(self):
+        # `Money` existe en los paquetes a y b, ambos importados: sin calificar es ambiguo.
+        # `Hidden` existe en un archivo que no se importa: no se ve.
+        self.write("a.proto", 'syntax = "proto3";\npackage a;\nmessage Money {}\n')
+        self.write("b.proto", 'syntax = "proto3";\npackage b;\nmessage Money {}\n')
+        self.write("h.proto", 'syntax = "proto3";\npackage c;\nmessage Hidden {}\n')
+        self.write("c.proto", 'syntax = "proto3";\npackage c;\nimport "a.proto";\n'
+                   'import "b.proto";\nmessage X {\n  Money m = 1;\n  Hidden h = 2;\n}\n')
+        rows, _deps = self._refs()
+        self.assertEqual(rows, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_graphql_type_defined_twice(self):
+        # Dos esquemas del monorepo definen `User`: sin arista (no se adivina cuál)
+        self.write("a/schema.graphql", "type User { id: ID! }\n")
+        self.write("b/schema.graphql", "type User { id: ID! }\n")
+        self.write("c/query.graphql", "type Query { me: User }\n")
+        rows, _deps = self._refs()
+        self.assertEqual(rows, set())
+
+
 class TestAuditM15(Base):
     """Regresiones de la auditoría de M15 (SQL léxico, Xcode, LSP). Cada test reproduce
     un fallo concreto: aristas falsas, símbolos perdidos o una excepción que tumbaba el sync."""

@@ -1,0 +1,19 @@
+syntax = "proto3";
+package billing.v1;
+
+import "common/money.proto";
+import "google/protobuf/timestamp.proto";
+
+message Invoice {
+  string id = 1;
+  common.Money total = 2;
+  google.protobuf.Timestamp at = 3;
+  repeated Line lines = 4;
+  message Line { int32 qty = 1; }
+}
+
+message CreateRequest { Invoice invoice = 1; }
+
+service Billing {
+  rpc Create(CreateRequest) returns (Invoice);
+}

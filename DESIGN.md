@@ -549,7 +549,7 @@ La extracción estructural dejó de ser solo Python + JS/TS. Un extractor GENÉR
 config sobre tree-sitter cubre **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic, Assembly**,
 (M15a) **Ruby, Kotlin, Swift, Dart**, (M15b) **Scala, Lua, Elixir, Bash**, (M15c)
 **Terraform/HCL y PowerShell** y (M15d) **Erlang, Haskell, Perl, Zig, Solidity, Clojure,
-Objective-C, OCaml, F# y Julia** (SQL va
+Objective-C, OCaml, F#, Julia, Protobuf y GraphQL** (SQL va
 aparte: extractor léxico propio, ver abajo):
 emite `symbol` (funciones, clases/tipos, métodos `Clase.m`) + aristas `defines` + `calls`
 INTRA-archivo (callee resuelto por nombre local), con extracción de nombre por-gramática
@@ -602,7 +602,12 @@ librería; gana la librería propia), alias `module M = A.B` y `open`; F# con su
 `module A.B` de cabecera, los `open` y solo los archivos que el `.fsproj` compila antes (nunca
 el `.fsi`); Julia con el módulo heredado por `include` (inclusión textual), `using .A`/`..A` y
 `import A: f`, contando los métodos de una función como una sola. Los nombres ligados
-localmente tapan a lo importado. Las cláusulas/ecuaciones/sobrecargas de un nombre son un
+localmente tapan a lo importado. **M15d-3** (contratos): Protobuf y GraphQL dan
+`references` (y `implements` en GraphQL) con procedencia `ast-ref` (EXTRACTED): un campo, un
+argumento o un `rpc` apuntan al tipo que usan. Protobuf busca como protoc (del mensaje más
+interno hacia fuera, luego el paquete; `.a.B` absoluto) en el archivo y lo que importa
+(raíces de `buf.yaml`); GraphQL trata el esquema como global y solo enlaza nombres únicos,
+sin enlazar operaciones de cliente. Las cláusulas/ecuaciones/sobrecargas de un nombre son un
 solo símbolo, y la extensión no basta en tres casos: `.pl` de Prolog y `.m` de MATLAB quedan
 como nodo `file`, y un `.h` es Objective-C solo con directivas propias fuera de comentarios. Regla transversal: una llamada con receptor no resoluble
 (`a.b().m()`) nunca se trata como llamada libre. Encima, una **capa LLM
@@ -666,9 +671,9 @@ diffs y blobs leídos en lote (`git show` multi-commit + `git cat-file --batch`)
   degradación; espejo "en vivo" del instalador.
 - **Indexado multi-lenguaje (§18.7):** Python + JS/TS y C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly
   + (M15a) Ruby/Kotlin/Swift/Dart + (M15b) Scala/Lua/Elixir/Bash + (M15c) SQL/Terraform/
-  PowerShell + (M15d) Erlang/Haskell/Perl/Zig/Solidity/Clojure/Objective-C/OCaml/F#/Julia
-  (símbolos + `defines` + `calls` intra); `calls`/`imports`/`references` **cross-file** en
-  los 31 lenguajes genéricos donde
+  PowerShell + (M15d) Erlang/Haskell/Perl/Zig/Solidity/Clojure/Objective-C/OCaml/F#/Julia/
+  Protobuf/GraphQL (símbolos + `defines` + `calls` intra); `calls`/`imports`/`references`
+  **cross-file** en los 33 lenguajes genéricos donde
   aplica (M9/M15), + capa LLM opcional
   de desambiguación.
 - **Suite:** 155 tests (`python -m unittest discover -s tests`), sin dependencias.

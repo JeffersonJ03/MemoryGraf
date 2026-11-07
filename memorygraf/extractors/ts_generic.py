@@ -4,7 +4,7 @@ Un solo recorrido, parametrizado por gramática, que emite nodos `symbol` (funci
 clases/estructuras/tipos, métodos) y aristas `defines`. Cubre C, C++, Java, C#, Go, Rust,
 PHP, R, Visual Basic, Assembly, (M15a) Ruby, Kotlin, Swift, Dart, (M15b) Scala, Lua,
 Elixir, Bash, (M15c) Terraform/HCL y PowerShell, y (M15d) Erlang, Haskell, Perl, Zig,
-Solidity, Clojure, Objective-C, OCaml, F# y Julia. (Python vive en
+Solidity, Clojure, Objective-C, OCaml, F#, Julia, Protobuf y GraphQL. (Python vive en
 `python_ast`; JS/TS en `ts_treesitter`, que además resuelve `calls`/`imports`.)
 
 Alcance v1 (honesto): SÍMBOLOS + `defines` (lo uniforme y de mayor valor: `overview`,
@@ -17,7 +17,8 @@ import re
 from typing import Tuple
 
 from ..model import (
-    Node, Edge, NODE_FILE, NODE_SYMBOL, EDGE_DEFINES, EDGE_CALLS, symbol_id, file_id,
+    Node, Edge, NODE_FILE, NODE_SYMBOL, EDGE_DEFINES, EDGE_CALLS, EDGE_REFERENCES,
+    EDGE_IMPLEMENTS, symbol_id, file_id,
 )
 from .ts_treesitter import available, _parser  # reutiliza detección + get_parser
 
@@ -145,6 +146,8 @@ _GRAMMAR_BY_EXT = {
     "ml": "ocaml", "mli": "ocaml_interface", "fs": "fsharp", "fsi": "fsharp_signature",
     "fsx": "fsharp",
     "jl": "julia",
+    # M15d-3: contratos de servicio (aristas `references`, no `calls`)
+    "proto": "proto", "graphql": "graphql", "gql": "graphql",
     "m": "objc", "mm": "objc",           # `.h` es C salvo pistas de ObjC: ver _looks_like_objc
 }
 
@@ -278,6 +281,10 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
         # Terraform: refs `var.x`/`aws_x.y`/`module.m.out`… (resueltas por el indexer
         # dentro del directorio = módulo) y `source` de los `module` como imports.
         calls_out, raw_imports = _extract_hcl(root, text, fid, add, spans)
+        return nodes, edges, raw_imports, calls_out, {}
+    elif grammar in _CONTRACTS:
+        calls_out = []
+        raw_imports = _CONTRACTS[grammar](root, text, fid, add, by_qual, edges, calls_out)
         return nodes, edges, raw_imports, calls_out, {}
     elif grammar in _M15D:
         _M15D_DEFS[grammar](root, text, fid, add)
@@ -2600,3 +2607,145 @@ def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls
         if callee and callee != caller and (caller, callee) not in seen:
             seen.add((caller, callee))
             edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))
+
+
+# --------------------------------------------------------------------------- #
+# M15d-3 · Contratos de servicio: Protobuf y GraphQL
+# --------------------------------------------------------------------------- #
+# Sus aristas son `references` (y `implements` en GraphQL) con procedencia `ast-ref`: el
+# tipo está escrito en el contrato, no deducido (EXTRACTED). Las que no se resuelven dentro
+# del archivo salen como calls_out (origen, nombre, contexto) y las resuelve el indexer.
+def _ast_ref(edges, seen, src, dst, etype=EDGE_REFERENCES):
+    if dst and dst != src and (src, dst, etype) not in seen:
+        seen.add((src, dst, etype))
+        edges.append(Edge(src, dst, etype, 1.0, "ast-ref"))
+
+
+def _extract_proto(root, text, fid, add, by_qual, edges, calls_out):
+    """Protobuf: `message` (anidados `A.B`), `enum`, `service` y sus `rpc` (`S.Rpc`). Cada
+    tipo de campo (también `map<>` y `oneof`) referencia desde su mensaje, y cada request /
+    response desde su rpc. Un nombre se busca como protoc: desde el mensaje más interno hacia
+    fuera, luego el paquete; `.a.b.C` es absoluto. Devuelve las rutas de `import`."""
+    pk = _first_child(root, "package")
+    fi = _first_child(pk, "full_ident") if pk is not None else None
+    pkg = re.sub(r"\s+", "", text(fi)) if fi is not None else ""
+    refs = []                                               # (origen, ámbito, nombre)
+
+    def name_of(n, field):
+        holder = _first_child(n, field)
+        idn = _first_child(holder, "identifier") if holder is not None else None
+        return text(idn) if idn is not None else None
+
+    def walk(node, prefix, parent_id):
+        for ch in node.named_children:
+            t = ch.type
+            if t in ("message", "enum", "service"):
+                nm = name_of(ch, f"{t}_name")
+                if not nm:
+                    continue
+                q = f"{prefix}.{nm}" if prefix else nm
+                sid = add(q, "type" if t == "enum" else "class", ch, parent_id)
+                body = _first_child(ch, "message_body")
+                if body is not None:
+                    walk(body, q, sid)
+                for rpc in (c for c in ch.named_children if c.type == "rpc"):
+                    rn = name_of(rpc, "rpc_name")
+                    if rn:
+                        rsid = add(f"{q}.{rn}", "method", rpc, sid)
+                        refs.extend((rsid, q, re.sub(r"\s+", "", text(ty)))
+                                    for ty in rpc.named_children if ty.type == "message_or_enum_type")
+            elif prefix and t in ("field", "map_field", "oneof"):
+                refs.extend((parent_id, prefix, re.sub(r"\s+", "", text(ty)))
+                            for ty in _descendants(ch, "message_or_enum_type"))
+
+    walk(root, None, fid)
+    seen: set = set()
+    for src, scope, name in refs:
+        if name.startswith("."):                            # absoluto
+            full = name[1:]
+            local = full[len(pkg) + 1:] if pkg and full.startswith(pkg + ".") else (None if pkg else full)
+            hit = by_qual.get(local) if local else None
+        else:
+            hit, s = None, scope
+            while hit is None:
+                hit = by_qual.get(f"{s}.{name}" if s else name)
+                if not s:
+                    break
+                s = s.rsplit(".", 1)[0] if "." in s else ""
+            if hit is None and pkg and name.startswith(pkg + "."):
+                hit = by_qual.get(name[len(pkg) + 1:])
+        if hit:
+            _ast_ref(edges, seen, src, hit)
+        else:
+            calls_out.append((src, name, f"{pkg}.{scope}" if pkg else scope))
+    return [text(p).strip("\"'") for imp in root.named_children if imp.type == "import"
+            for p in [imp.child_by_field_name("path")] if p is not None]
+
+
+_GQL_BUILTIN = {"ID", "String", "Int", "Float", "Boolean"}
+_GQL_DEFS = {"object_type_definition": "class", "interface_type_definition": "class",
+             "input_object_type_definition": "class", "enum_type_definition": "type",
+             "union_type_definition": "type", "scalar_type_definition": "type"}
+_GQL_EXTS = {"object_type_extension", "interface_type_extension",
+             "input_object_type_extension"}
+
+
+def _extract_graphql(root, text, fid, add, by_qual, edges, calls_out):
+    """GraphQL (esquema): tipos (`type`/`interface`/`input`/`enum`/`union`/`scalar`) y sus
+    campos `Tipo.campo`. Cada campo referencia su tipo y los de sus argumentos; `implements`
+    es `implements`; un `union` referencia a sus miembros. `extend type T` cuelga sus campos
+    de T. Las operaciones de cliente (`query`, `mutation`) no se enlazan con el esquema.
+    Sin imports: el esquema es global al proyecto."""
+    refs = []                                               # (origen, nombre, "ref"|"impl")
+    defs = [d for d in _descendants(root, "type_definition")]
+    defs = [c for d in defs for c in d.named_children if c.type in _GQL_DEFS]
+    exts = [c for e in _descendants(root, "type_extension") for c in e.named_children
+            if c.type in _GQL_EXTS]
+
+    def named(n):
+        return [text(nm) for nt in _descendants(n, "named_type")
+                for nm in [_first_child(nt, "name")] if nm is not None]
+
+    def fields(d, owner, owner_sid):
+        for fd in (*_descendants(d, "field_definition"), *(
+                iv for fs in _descendants(d, "input_fields_definition")
+                for iv in fs.named_children if iv.type == "input_value_definition")):
+            fn = _first_child(fd, "name")
+            if fn is None:
+                continue
+            fsid = add(f"{owner}.{text(fn)}", "field", fd, owner_sid)
+            refs.extend((fsid, t, "ref") for c in fd.named_children
+                        if c.type in ("type", "arguments_definition") for t in named(c))
+            yield fsid
+
+    for d in defs:
+        nm = _first_child(d, "name")
+        if nm is None:
+            continue
+        sid = add(text(nm), _GQL_DEFS[d.type], d, fid)
+        list(fields(d, text(nm), sid))
+        impl = _first_child(d, "implements_interfaces")
+        refs.extend((sid, t, "impl") for t in (named(impl) if impl is not None else []))
+        members = _first_child(d, "union_member_types")
+        refs.extend((sid, t, "ref") for t in (named(members) if members is not None else []))
+    for e in exts:
+        nm = _first_child(e, "name")
+        if nm is None:
+            continue
+        owner = by_qual.get(text(nm))
+        for fsid in fields(e, text(nm), owner or fid):
+            if owner is None:
+                refs.append((fsid, text(nm), "ref"))       # cuelga de un tipo de otro archivo
+    seen: set = set()
+    for src, name, kind in refs:
+        if name in _GQL_BUILTIN:
+            continue
+        hit = by_qual.get(name)
+        if hit:
+            _ast_ref(edges, seen, src, hit, EDGE_IMPLEMENTS if kind == "impl" else EDGE_REFERENCES)
+        else:
+            calls_out.append((src, name, kind))
+    return []
+
+
+_CONTRACTS = {"proto": _extract_proto, "graphql": _extract_graphql}

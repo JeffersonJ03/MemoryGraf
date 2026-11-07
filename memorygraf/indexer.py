@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from .model import (
     Node, Edge, content_hash, NODE_EXTERNAL, NODE_FILE, EDGE_IMPORTS, EDGE_DEPENDS_ON,
-    EDGE_CALLS, EDGE_REFERENCES,
+    EDGE_CALLS, EDGE_REFERENCES, EDGE_IMPLEMENTS,
 )
 from .store import Store
 from .extractors import python_ast, js_ts, ts_treesitter, ts_generic, sql_lex
@@ -25,7 +25,7 @@ from .extractors import python_ast, js_ts, ts_treesitter, ts_generic, sql_lex
 _TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 # El resto (C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly/Ruby/Kotlin/Swift/Dart/Scala/Lua/
 # Elixir/Bash/Terraform/PowerShell/Erlang/Haskell/Perl/Zig/Solidity/Clojure/ObjC/OCaml/
-# F#/Julia) usa el extractor genérico (símbolos + defines) cuando
+# F#/Julia/Protobuf/GraphQL) usa el extractor genérico (símbolos + defines) cuando
 # tree-sitter está. SQL va por `sql_lex` (léxico, sin tree-sitter).
 _GENERIC_EXTS = {"." + e for e in ts_generic._GRAMMAR_BY_EXT}
 # SQL (M15c): extractor LÉXICO propio (stdlib, todos los dialectos, incluido PL/SQL)
@@ -618,6 +618,26 @@ def _fs_namespace(source: str) -> str:
     return m.group(1).rsplit(".", 1)[0] if m and "." in m.group(1) else ""
 
 
+_RE_PROTO_PKG = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+_RE_BUF_ITEM = re.compile(r"^\s*-\s*(?:path:\s*)?['\"]?([\w./-]+)['\"]?\s*$", re.MULTILINE)
+
+
+def _load_proto_roots(root: str) -> list:
+    """Raíces de import de Protobuf (M15d-3): los directorios de buf.yaml (`roots:` v1,
+    `modules: - path:` v2) y de buf.work.yaml (`directories:`) que existen en el repo."""
+    out = []
+    for name in ("buf.yaml", "buf.work.yaml"):
+        try:
+            with open(os.path.join(root, name), "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        for item in _RE_BUF_ITEM.findall(text):
+            if os.path.isdir(os.path.join(root, item)) and item.strip("./"):
+                out.append(item.strip("/"))
+    return list(dict.fromkeys(out))
+
+
 def _load_xcode_targets(root: str, excludes: set) -> list:
     """Targets de los `.xcodeproj` del proyecto: [(dir_relativo, {carpeta: target},
     {archivo: target|""})]. Ver _xcode_membership."""
@@ -832,6 +852,10 @@ class Indexer:
         self._jl_prefix = None     # file_id -> módulo de su código top-level  (perezoso)
         self._fullnames = None     # (project, lenguaje, nombre_completo) -> [(file, sid)]
         self._ml_nested = None     # project -> {nombres de módulos anidados de OCaml}
+        # M15d-3: Protobuf (paquete + raíces de buf) y GraphQL (esquema global)
+        self.proto_pkg = {}        # file_id -> paquete
+        self.proto_roots = {}      # project -> [raíces de import]
+        self._contracts = None     # (project, lenguaje, nombre_completo) -> [(file, sid)]
         for proj in config["projects"]:
             name, root = proj["name"], proj["root"]
             zig = _load_zig_modules(root, self.excludes)
@@ -843,6 +867,9 @@ class Indexer:
             dune = _load_dune_libraries(root, self.excludes)
             if dune:
                 self.dune_libs[name] = dune
+            proots = _load_proto_roots(root)
+            if proots:
+                self.proto_roots[name] = proots
             order = _load_fsproj_order(root, self.excludes)
             if order:
                 self.fs_order[name] = order
@@ -1009,6 +1036,13 @@ class Indexer:
                     # `Alias.f` -> módulo completo vía `alias`; `f` libre -> los `import`.
                     count += self._link_pairs(caller, callee_name, self._ex_call_pairs(
                         project, via, callee_name, bindings, name_index, caller))
+                    continue
+                if generic and EXT_LANG.get(ext) in ts_generic._CONTRACTS:
+                    # M15d-3: `references` (e `implements`) de un contrato, ver _contract_pairs
+                    etype = EDGE_IMPLEMENTS if via == "impl" else EDGE_REFERENCES
+                    count += self._link_pairs(caller, callee_name, self._contract_pairs(
+                        EXT_LANG[ext], project, file_id_, caller, callee_name, via),
+                        etype=etype, prov="ast-ref")
                     continue
                 if generic and EXT_LANG.get(ext) in ts_generic._M15D:
                     # M15d (Erlang/Haskell/Perl/Zig/Solidity): ver _m15d_pairs
@@ -1512,6 +1546,46 @@ class Indexer:
         files = {f for f, _sid in self._fullname_index(project, "julia")(full or "") if f != file_id_}
         return files.pop() if len(files) == 1 else None
 
+    # --- M15d-3: Protobuf y GraphQL ---------------------------------------------
+    def _contract_index(self, project, lang):
+        """{nombre_completo: [(file, sid)]}: Protobuf `paquete.Mensaje.Anidado`; GraphQL
+        el nombre del tipo (el esquema es global)."""
+        if self._contracts is None:
+            self._contracts = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                g = (n.get("tags") or [""])[0]
+                path = n.get("path")
+                if g == "proto" and path:
+                    pkg = self.proto_pkg.get(path, "")
+                    full = f"{pkg}.{n['name']}" if pkg else n["name"]
+                elif g == "graphql" and path and "." not in n["name"]:
+                    full = n["name"]
+                else:
+                    continue
+                self._contracts.setdefault((n.get("project"), g, full), []).append((path, n["id"]))
+        return lambda full: self._contracts.get((project, lang, full), [])  # type: ignore[union-attr]
+
+    def _contract_pairs(self, g, project, file_id_, caller, name, via):
+        """Protobuf: como protoc, desde el ámbito del origen (`via` = su nombre completo)
+        hacia fuera, en el archivo y lo que importa directamente; `.a.B` es absoluto.
+        GraphQL: el tipo con ese nombre en el proyecto (único, o nada)."""
+        lookup = self._contract_index(project, g)
+        if g == "graphql":
+            return [p for p in lookup(name) if p[1] != caller]
+        visible = {file_id_} | {e["target"] for e in self.store.neighbors(
+            file_id_, edge_types=[EDGE_IMPORTS], direction="out")}
+        if name.startswith("."):
+            scopes, name = [""], name[1:]
+        else:
+            parts = via.split(".") if via else []
+            scopes = [".".join(parts[:i]) for i in range(len(parts), -1, -1)]
+        for s in scopes:
+            hits = [p for p in lookup(f"{s}.{name}" if s else name)
+                    if p[0] in visible and p[1] != caller]
+            if hits:
+                return hits
+        return []
+
     def _unique(self, files):
         return list(files) if len(files) == 1 else []
 
@@ -1783,6 +1857,9 @@ class Indexer:
             self._perl_package_files(project, raw[4:])          # asegura el índice perezoso
             return any(p == project and (m == raw[4:] or m.split("::")[0] == head)
                        for p, m in self._perl_pkgs or {})
+        if g == "proto":                              # ruta repetida: ambigua, no externa
+            return len([1 for rel, _f in self._by_basename(project, raw)
+                        if rel == raw or rel.endswith("/" + raw)]) > 1
         if g == "clojure":
             head = raw.split(".")[0]
             return head != "clojure" and any(
@@ -1951,6 +2028,9 @@ class Indexer:
             lib = self.dune_libs.get(project, {}).get(os.path.dirname(relpath))
             if lib:
                 self.ml_mod_index.setdefault((project, f"{_cap(lib)}.{mod}"), []).append(rel_id)
+        if ext == ".proto":
+            m = _RE_PROTO_PKG.search(source)
+            self.proto_pkg[rel_id] = m.group(1) if m else ""
         if ext in (".fs", ".fsi", ".fsx"):
             self.fs_ns[rel_id] = _fs_namespace(source)
             # namespace, `module A.B` de cabecera y el módulo implícito (el nombre del archivo)
@@ -2082,6 +2162,9 @@ class Indexer:
                         pkg = raw[5:].split(".")[0] if raw.startswith("open:") else ""
                     elif ext == ".jl":
                         pkg = raw.split(":", 2)[2].split(".")[0]   # LinearAlgebra
+                    elif ext == ".proto":                         # google/protobuf, validate
+                        parts = raw.split("/")
+                        pkg = "/".join(parts[:2]) if parts[0] == "google" and len(parts) > 2 else parts[0]
                     elif ext in (".m", ".mm"):
                         pkg = raw[3:].split("/")[0]              # fw:UIKit/X.h -> UIKit
                     elif ext == ".sol":
@@ -2204,7 +2287,8 @@ class Indexer:
           objc: como C y, si no, el header por nombre (mapa de headers de Xcode).
           ocaml: `mod:A.B` -> el archivo del prefijo más largo que es módulo; `.mli` -> `.ml`.
           fsharp: `#load "x.fsx"` relativo (`open` es un namespace: sin arista).
-          julia: `include("x.jl")` relativo; `using` -> ver _jl_use_target."""
+          julia: `include("x.jl")` relativo; `using` -> ver _jl_use_target.
+          proto: raíces de buf.yaml o del repo y, si no, la única ruta con ese final."""
         g = EXT_LANG.get(ext)
         if g in ts_generic._JVM:
             if raw.endswith(".*"):
@@ -2299,6 +2383,15 @@ class Indexer:
         if g == "clojure":
             files = self._clj_ns_files(project, raw, ext)
             return files[0] if files else None
+        if g == "proto":
+            # raíces de buf.yaml o la raíz del repo; si no, el único archivo con esa ruta
+            # al final (el -I de protoc es desconocido)
+            hits = {self.file_index.get((project, "/".join(x for x in (r, raw) if x)))
+                    for r in self.proto_roots.get(project, []) + [""]} - {None}
+            if not hits:
+                hits = {fid for rel, fid in self._by_basename(project, raw)
+                        if rel == raw or rel.endswith("/" + raw)}
+            return hits.pop() if len(hits) == 1 else None
         if g in ("ocaml", "ocaml_interface"):
             if raw.startswith("impl:"):               # .mli -> su .ml (mismo directorio)
                 return self.file_index.get((project, "/".join(

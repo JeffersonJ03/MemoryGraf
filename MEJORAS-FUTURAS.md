@@ -4,8 +4,8 @@
 > M13–M20 ya entraron **M14 (`path A B`)**, **M15a–c**: M15a (Ruby, Kotlin, Swift,
 > Dart), M15b (Scala, Lua, Elixir, Bash) y M15c (SQL, Terraform/HCL, PowerShell), y
 > **M15d-1** (Erlang, Haskell, Perl, Zig, Solidity, Clojure y Objective-C: **30 lenguajes,
-> la meta de M15**) y **M15d-2** (OCaml, F#, Julia): 33 (M15d-3 y -4 llevan a 36); y la deuda
-> registrada (§2 coste incremental de M1, deuda de
+> la meta de M15**), **M15d-2** (OCaml, F#, Julia) y **M15d-3** (Protobuf, GraphQL): 35
+> (M15d-4, COBOL, lleva a 36); y la deuda registrada (§2 coste incremental de M1, deuda de
 > M15a incluidos sus dos últimos límites, Java Maven/Gradle, LSP con TS 7) está **saldada**. Desde julio, además: **CI** en cada PR (Linux +
 > Windows nativo, modos portable y potencia; PR #13–#16 corrigieron los bugs que destapó)
 > e **imagen Docker** (`Dockerfile`). La fuente de verdad es el **código + los tests
@@ -18,8 +18,8 @@
 > Complementa `DESIGN.md` (principios §3, vinculantes).
 
 > **▶ Siguiente paso (actualizar al cerrar cada hito).**
-> 0. **M15d**: M15d-1 y M15d-2 hechos (23 → 33; la meta de M15, 30, cumplida). Siguen
->    M15d-3 (Protobuf, GraphQL) y M15d-4 (COBOL), hasta 36. Sin dependencias nuevas.
+> 0. **M15d**: M15d-1 a M15d-3 hechos (23 → 35; la meta de M15, 30, cumplida). Sigue
+>    M15d-4 (COBOL), hasta 36. Sin dependencias nuevas.
 > 1. **M16** (instaladores multi-host): cierra el paquete de mayor retorno por esfuerzo
 >    junto con M14 y M15.
 > 2. Luego **M13** (comunidades) y **M17** (always-on). §9 sigue abierto en paralelo.
@@ -51,6 +51,7 @@
 | M15c | **SQL** (extractor léxico propio, todos los dialectos, incluido PL/SQL), **Terraform/HCL**, **PowerShell** | `sql_lex` + `ts_generic` + `indexer`. Ver §M15. |
 | M15d-1 | **Erlang, Haskell, Perl, Zig, Solidity, Clojure, Objective-C**: símbolos + `calls` intra + `imports`/`calls` cross-file; sniff de `.pl` (Prolog), `.h` y `.m` | `ts_generic` + `indexer`. Ver §M15d. |
 | M15d-2 | **OCaml, F#, Julia**: ídem, por nombre completo y solo donde es inequívoco | `ts_generic` + `indexer`. Ver §M15d. |
+| M15d-3 | **Protobuf, GraphQL**: `references`/`implements` `ast-ref` (EXTRACTED) entre contratos | `ts_generic` + `indexer`. Ver §M15d. |
 
 Cada mejora entró con **test de regresión** y verificación en vivo (regla DESIGN §11).
 
@@ -280,7 +281,7 @@ CLI o enriqueciendo tools existentes, no como tool nueva. Lo que no cumple está
 |---|---|---|---|:--:|
 | **M13** | Comunidades / subsistemas | La única capacidad **analítica** que Graphify tiene y MemoryGraf no | Medio | **Alto** |
 | **M14** ✅ | `path A B` — cómo se conectan dos nodos | Consulta que hoy no existe (hay `neighbors`, no camino) | **Bajo** | **Alto** |
-| **M15** (a–c ✅, d en curso) | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; con M15a–c, 23; con M15d-1, 30; con M15d-2, 33; M15d lleva a 36 | **Bajo** | **Alto** |
+| **M15** (a–c ✅, d en curso) | Ampliar matriz de gramáticas (~12 → ~30) | 36 gramáticas vs ~12; con M15a–c, 23; con M15d-1, 30; con M15d-2, 33; con M15d-3, 35; M15d lleva a 36 | **Bajo** | **Alto** |
 | **M16** | Instaladores multi-host | `install claude` es el único; el resto es copiar JSON a mano | **Bajo** | **Alto** |
 | **M17** | Always-on: hooks de git + instrucciones de agente | El grafo se queda obsoleto y el asistente no lo usa por su cuenta | Bajo-medio | **Alto** |
 | **M18** | Exportadores (GraphML / Cypher / Obsidian / wiki) | Hoy solo JSON + HTML | Bajo | Medio |
@@ -394,7 +395,7 @@ trivial, datos ya en memoria, cero dependencias.
 
 ---
 
-### M15 · Ampliar la matriz de gramáticas (~12 → ~30 lenguajes)  (M15a–c ✅: M15a 2026-10-26, M15b y M15c 2026-10-27 · M15d EN CURSO: 23 → 33 → 36)
+### M15 · Ampliar la matriz de gramáticas (~12 → ~30 lenguajes)  (M15a–c ✅: M15a 2026-10-26, M15b y M15c 2026-10-27 · M15d EN CURSO: 23 → 35 → 36)
 
 **Hecho — M15a (2026-10-26).** Ruby (`.rb`), Kotlin (`.kt`/`.kts`), Swift (`.swift`) y Dart
 (`.dart`) entran con **símbolos + `defines` + `calls` intra-archivo + `imports`/`calls`
@@ -588,7 +589,7 @@ que NO debe generar arista). Skip limpio si la gramática no está instalada.
 grupo, no por lenguaje. Riesgo acotado — si una gramática falla, ese lenguaje se omite y el
 resto del `sync` sigue (degradación ya implementada).
 
-### M15d · Cerrar y superar la meta de M15: de 23 a 36 lenguajes  (PROPUESTA 2026-10-28 · M15d-1 y M15d-2 ✅ 2026-11-07)
+### M15d · Cerrar y superar la meta de M15: de 23 a 36 lenguajes  (PROPUESTA 2026-10-28 · M15d-1 a M15d-3 ✅ 2026-11-07)
 
 **Hecho — M15d-1 (2026-11-07).** Erlang, Haskell, Perl, Zig, Solidity, Clojure y
 Objective-C entran con
@@ -708,6 +709,22 @@ patrones, `let ... in`, asignaciones locales de Julia) tapan a lo importado.
   métodos de una función en archivos distintos son UNA función (se enlaza su primera
   definición); el mismo nombre en dos módulos `using` a la vez, ambiguo.
 
+Validación en vivo de M15d-2 (clon superficial, 2026-11-07):
+
+| Repo (commit) | Archivos | Símbolos | `calls` xfile | `imports` | Externos |
+|---|---:|---:|---:|---:|---|
+| dune (bcdd565) | 5 296 | 34 101 ocaml/mli | 17 567 | 11 667 | 147 (stdlib, vendorizados, generados) |
+| Fantomas (2136021) | 6 175 | 9 095 fs/fsi | 748 | 17 | 43 (muchos de los ejemplos de formateo) |
+| DataFrames.jl (e867c34) | 75 | 395 | 580 | 74 | 37 (`DataAPI`, `PooledArrays`…) |
+
+Fallos que destapó y ya tienen test: los `open`/`include` de un functor o un `struct` en
+línea salían como `external:(…)` en dune; las rutas F# de 3+ tramos (`App.C.f`) no se
+resolvían (el parser las parte en `dot_expression`); `str.capitalize()` bajaba el resto del
+nombre (`BuildCommon` → `Buildcommon`) y hacía externos los módulos propios; y una llamada F#
+podía enlazar con el `.fsi` en vez de con el `.fs`. Rendimiento: dune tarda ~6,5 min y el
+grueso es la escritura de nodos en SQLite (`upsert_node`, ~1,2 ms por nodo, previo a M15d),
+no la resolución de M15d-2 (~10 %).
+
 **M15d-2 — cross-file ambiguo (regla de M15b), propuesta original.** Entran con símbolos y
 `calls` intra-archivo; el cross-file **solo si sale inequívoco** y, si no, se declaran
 symbols-only en `doctor`:
@@ -726,7 +743,25 @@ symbols-only en `doctor`:
   se elige método. Nodos: `module_definition`, `function_definition`, `struct_definition`,
   `using_statement`, `call_expression`, `field_expression`.
 
-**M15d-3 — contratos de servicio (como M15c).** Aristas `references` con
+**Hecho — M15d-3 (2026-11-07).** `references` con procedencia `ast-ref` (EXTRACTED):
+- **Protobuf:** `message` (anidados `Invoice.Line`), `enum`, `service` y `rpc`
+  (`Billing.Create`). Cada tipo de campo (`map<>` y `oneof` incluidos) referencia desde su
+  mensaje; request y response, desde su rpc. Se busca como protoc: del mensaje más interno
+  hacia fuera, luego el paquete (`.a.B` es absoluto), en el archivo y lo que importa
+  DIRECTAMENTE. `import` contra las raíces de `buf.yaml`/`buf.work.yaml` y la raíz del repo
+  y, si no, la única ruta del repo con ese final (el `-I` de protoc no se conoce). Externo:
+  `google/protobuf`, `google/api`… (dos tramos para `google/`), si no el primero.
+- **GraphQL:** tipos y campos `Tipo.campo`; cada campo referencia su tipo y los de sus
+  argumentos; `implements` es arista `implements`; un `union` referencia sus miembros;
+  `extend type T` cuelga sus campos de T (o los referencia, si T está en otro archivo). El
+  esquema es global: solo se enlaza un nombre único en el proyecto. Sin operaciones.
+- Validación: googleapis (bf54c10, subconjunto `api`/`type`/`rpc`/`longrunning`/
+  `cloud/tasks`/`pubsub`): 111 archivos, 923 símbolos, 932 `references`, 189 `imports`; los
+  externos (`google/iam`, `google/logging`) son justo lo que el checkout parcial dejó fuera.
+  Esquema público de GitHub (octokit/graphql-schema, 82ff2d4): 9 271 símbolos, 5 098
+  `references` y 606 `implements`.
+
+**M15d-3 — contratos de servicio (como M15c), propuesta original.** Aristas `references` con
 procedencia `ast-ref` → EXTRACTED:
 - **Protobuf** (`.proto`): `import "a/b.proto"` contra las raíces de `buf.yaml` o, si no
   hay, relativo; `common.Money` → `message Money` del `package common`; `rpc` → nodos
