@@ -615,7 +615,12 @@ con el span de todas. Decisiones tomadas al implementar, además de la tabla de 
   resuelve por los símbolos `package` (AST), no por regex, así que el POD con ejemplos no
   confunde. Pragmas en minúscula no son dependencias; `use parent`/`use base` sí importan sus
   paquetes. Externo = el módulo completo (`external:List::Util`). `.pl` de Prolog: sniff ✅.
-- **Zig:** `const S = u.S` y `const f = u.f` se siguen como alias. Un nombre de build.zig
+- **Zig:** `const S = u.S` y `const f = u.f` se siguen como alias. Hay DOS gramáticas según la
+  versión de `tree-sitter-language-pack` (≤1.13: estilo PEG, `Decl`/`SuffixExpr`; después, la
+  de tree-sitter-grammars: `function_declaration`/`call_expression`) y se aceptan las dos (el
+  CI instala la última, 1.25.0 el 2026-11-08). En zls dan los mismos 267 imports y llamadas
+  parecidas (409 / 391): la vieja toma la anotación `var w: ast.Walker` como alias (y acierta
+  `w.next()`), la nueva ve `ast.fullIf(...).?`. Un nombre de build.zig
   cuyo módulo no sale de `b.dependency`/`b.lazyDependency` (opciones de `addOptions`, código
   generado) es propio aunque no tenga ruta: sin arista y sin `external:`.
 - **Solidity:** el scope es transitivo (`import "x"` trae lo que x importó). Una llamada

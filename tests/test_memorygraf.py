@@ -1155,6 +1155,16 @@ class TestM15d(_M15dGraph):
         self.assertEqual(xcalls, set())
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_zig_comptime_only_file(self):
+        # Un archivo que solo tiene un bloque `comptime` con @import (el tests.zig de zls):
+        # sus imports salen con las dos gramáticas de Zig (tree-sitter-language-pack ≤1.13 y
+        # posteriores tienen gramáticas distintas)
+        self.write("tests.zig", 'comptime {\n    _ = @import("helper.zig");\n}\n')
+        self.write("helper.zig", "pub fn h() void {}\n")
+        _x, deps, _intra, _syms = self._graph()
+        self.assertIn(("proj/tests.zig", "proj/helper.zig"), deps)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_zig_non_literal_build_module(self):
         # `m` se declara en build.zig con una ruta NO literal y `opts` sale de addOptions:
         # son propios pero sin destino -> ni arista ni `external:`. `kf` viene de un

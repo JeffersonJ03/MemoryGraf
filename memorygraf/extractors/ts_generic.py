@@ -51,7 +51,7 @@ _CALLS = {
     "haskell": ({"apply"}, None),
     "perl": ({"function_call_expression", "ambiguous_function_call_expression",
               "method_call_expression"}, None),
-    "zig": ({"SuffixExpr"}, None),
+    "zig": ({"SuffixExpr", "call_expression"}, None),          # las dos gramáticas
     "solidity": ({"call_expression", "modifier_invocation"}, None),
     "clojure": ({"list_lit"}, None),
     "objc": ({"message_expression", "call_expression"}, None),
@@ -1457,10 +1457,41 @@ def _extract_perl(root, text, fid, add):
     walk(root, None)
 
 
+# Dos gramáticas de Zig según la versión de tree-sitter-language-pack: la de estilo PEG
+# (≤1.13: `Decl`/`FnProto`/`VarDecl`/`SuffixExpr`) y la de tree-sitter-grammars (después:
+# `function_declaration`/`variable_declaration`/`call_expression`). Se aceptan las dos.
+_ZIG_CONTAINERS = {"struct_declaration", "enum_declaration", "union_declaration",
+                   "opaque_declaration"}
+
+
+def _zig_new(root) -> bool:
+    """¿Gramática nueva? La vieja nombra sus nodos en CamelCase (`Decl`, `TestDecl`,
+    `TopLevelComptime`…) y la nueva en snake_case (también un archivo que solo tiene un
+    bloque `comptime`, como el tests.zig de zls)."""
+    return not any(c.type[:1].isupper() for c in root.named_children)
+
+
 def _extract_zig(root, text, fid, add):
     """Zig: un archivo es un struct. `fn f` top-level es una función y `const S = struct
     {...}` (o enum/union/opaque) un contenedor cuyas `fn` son `S.m`; los anidados se
     cualifican (`S.Inner.m`), igual que se nombran desde fuera."""
+    if _zig_new(root):
+        def walk_new(node, prefix, parent_id):
+            for d in node.named_children:
+                if d.type == "function_declaration":
+                    nm = d.child_by_field_name("name")
+                    if nm is not None:
+                        add(f"{prefix}.{text(nm)}" if prefix else text(nm),
+                            "method" if prefix else "func", d, parent_id)
+                elif d.type == "variable_declaration":
+                    nm = _first_child(d, "identifier")
+                    cd = next((c for c in d.named_children if c.type in _ZIG_CONTAINERS), None)
+                    if nm is not None and cd is not None:
+                        qual = f"{prefix}.{text(nm)}" if prefix else text(nm)
+                        walk_new(cd, qual, add(qual, "class", d, parent_id))
+        walk_new(root, None, fid)
+        return
+
     def container(vd):
         e = _first_child(vd, "ErrorUnionExpr")
         s = _first_child(e, "SuffixExpr") if e is not None else None
@@ -1909,6 +1940,15 @@ def _call_parts_m15d(n, grammar, text):
         # una builtin sin `&` (`push(...)`, `split(...)`) es la de CORE aunque el paquete
         # tenga una sub con ese nombre: la marca `&` la conserva _find_calls_m15d
         return None, ("&" + name if raw.startswith("&") else name)
+    if grammar == "zig" and n.type == "call_expression":       # gramática nueva
+        fn = n.child_by_field_name("function")
+        if fn is not None and fn.type == "identifier":
+            return None, text(fn)                               # f(...)
+        if fn is not None and fn.type == "field_expression":
+            obj, mem = fn.child_by_field_name("object"), fn.child_by_field_name("member")
+            if obj is not None and obj.type == "identifier" and mem is not None:
+                return text(obj), text(mem)                     # x.f(...)
+        return None, None                                       # a.b.f(...): opaco
     if grammar == "zig":
         kids = n.named_children
         if len(kids) < 2 or kids[0].type != "IDENTIFIER":
@@ -2149,51 +2189,73 @@ def _perl_imports(root, text, _module):
 def _zig_imports(root, text, _module):
     """Zig: cada `@import("x")` es un raw ("x.zig" relativo al archivo, o un módulo:
     `std`, uno de build.zig…). `const u = @import("x.zig")` liga u al archivo;
-    `const S = @import("x.zig").S` y `const f = u.f` ligan el miembro (u.f -> (x, "f"))."""
-    raws, b = [], {}
-    decls = []
+    `const S = @import("x.zig").S` y `const f = u.f` ligan el miembro (u.f -> (x, "f")).
+    Vale para las dos gramáticas (ver _ZIG_CONTAINERS)."""
+    raws, decls = [], []
+    new = _zig_new(root)
 
-    def import_of(sfx):
-        kids = sfx.named_children
+    def import_raw(n):
+        """La ruta de un `@import("x")`, o None."""
+        if new and n.type == "builtin_function":
+            bi, args = _first_child(n, "builtin_identifier"), _first_child(n, "arguments")
+            m = re.fullmatch(r'\(\s*"([^"]+)"\s*\)', text(args)) if args is not None else None
+            return m.group(1) if bi is not None and text(bi) == "@import" and m else None
+        kids = n.named_children if n.type == "SuffixExpr" else []
         if len(kids) >= 2 and kids[0].type == "BUILTINIDENTIFIER" \
                 and text(kids[0]) == "@import" and kids[1].type == "FnCallArguments":
             m = re.fullmatch(r'\(\s*"([^"]+)"\s*\)', text(kids[1]))
-            return (m.group(1) if m else None), kids[2:]
-        return None, []
+            return m.group(1) if m else None
+        return None
 
-    def member(rest):
-        """`.a.b` (solo accesos a campo) -> "a.b"; nada -> ""; otra cosa -> None."""
-        out = []
+    def chain(n):
+        """("import", ruta, [campos]) | ("ident", nombre, [campos]) de un valor que es
+        `@import(..)` o un nombre seguidos SOLO de accesos a campo; si no, None."""
+        members = []
+        if new:
+            while n is not None and n.type == "field_expression":
+                mem = n.child_by_field_name("member")
+                if mem is None:
+                    return None
+                members.insert(0, text(mem))
+                n = n.child_by_field_name("object")
+            if n is None:
+                return None
+            raw = import_raw(n)
+            if raw:
+                return "import", raw, members
+            return ("ident", text(n), members) if n.type == "identifier" else None
+        kids = n.named_children
+        raw = import_raw(n)
+        rest = kids[2:] if raw else kids[1:]
+        if not raw and (not kids or kids[0].type != "IDENTIFIER"):
+            return None
         for k in rest:
             fa = k.child_by_field_name("field_access") if k.type == "FieldOrFnCall" else None
             if fa is None or k.child_by_field_name("function_call") is not None:
                 return None
-            out.append(text(fa))
-        return ".".join(out)
+            members.append(text(fa))
+        return ("import", raw, members) if raw else ("ident", text(kids[0]), members)
 
-    def walk(n):
-        if n.type == "SuffixExpr":
-            raw, _rest = import_of(n)
-            if raw:
-                raws.append(raw)
+    for n in _descendants_all(root):
+        raw = import_raw(n)
+        if raw:
+            raws.append(raw)
+        if new and n.type == "variable_declaration":
+            nm, kids = _first_child(n, "identifier"), n.named_children
+            if nm is not None and len(kids) >= 2:
+                decls.append((text(nm), kids[-1]))              # `const x: T = valor`
         elif n.type == "VarDecl":
             nm = n.child_by_field_name("variable_type_function")
             e = _first_child(n, "ErrorUnionExpr")
-            s = _first_child(e, "SuffixExpr") if e is not None else None
-            if nm is not None and s is not None:
-                decls.append((text(nm), s))
-        for c in n.children:
-            walk(c)
-
-    walk(root)
+            sx = _first_child(e, "SuffixExpr") if e is not None else None
+            if nm is not None and sx is not None:
+                decls.append((text(nm), sx))
     # Un valor por DECLARACIÓN: Zig permite el mismo nombre local en funciones distintas
     # (`const T = a.S;` en una, `const T = b.S;` en otra). Un nombre con declaraciones de
     # valor distinto (o alguna que no es un import/alias) queda ambiguo y no se liga.
-    values = []
-    for _name, s in decls:                                  # 1º los @import directos
-        raw, rest = import_of(s)
-        mem = member(rest) if raw else None
-        values.append((raw, mem or None) if raw and mem is not None else None)
+    chains = [chain(v) for _name, v in decls]
+    values = [(c[1], ".".join(c[2]) or None) if c and c[0] == "import" else None
+              for c in chains]                              # 1º los @import directos
 
     def unique():
         per: dict = {}
@@ -2203,15 +2265,12 @@ def _zig_imports(root, text, _module):
 
     for _ in range(3):                                      # luego los alias encadenados
         b = unique()
-        for i, (_name, s) in enumerate(decls):
-            kids = s.named_children
-            if values[i] is not None or not kids or kids[0].type != "IDENTIFIER" \
-                    or text(kids[0]) not in b:
+        for i, c in enumerate(chains):
+            if values[i] is not None or not c or c[0] != "ident" or c[1] not in b or not c[2]:
                 continue
-            mem = member(kids[1:])
-            if mem:
-                raw, base = b[text(kids[0])]
-                values[i] = (raw, f"{base}.{mem}" if base else mem)
+            raw, base = b[c[1]]
+            mem = ".".join(c[2])
+            values[i] = (raw, f"{base}.{mem}" if base else mem)
     return list(dict.fromkeys(raws)), unique()
 
 
