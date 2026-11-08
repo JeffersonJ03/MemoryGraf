@@ -1437,6 +1437,79 @@ class TestM15d4(_M15dGraph):
             self.assertEqual(p.exitcode, 0, f"excepción con {name}: {src[-12:]!r}")
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_audit_comments_literals_sections_and_programs(self):
+        # Hallazgos de la auditoría de M15d-4, cada uno con su caso.
+        from memorygraf.extractors import ts_generic
+        head = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. P.\n"
+
+        def ex(src, name="p.cbl"):
+            nodes, edges, raws, out, _b = ts_generic.extract(name, "p", src)
+            return ({n.name: (n.span_start, n.span_end) for n in nodes if n.type == "symbol"},
+                    {(e.source.split("::")[1], e.target.split("::")[1]) for e in edges
+                     if e.type == "calls"}, raws, {(m, k) for _c, m, k in out})
+        # COPY y EXEC SQL dentro de un literal o de un comentario `*>`: ni import, ni
+        # referencia, ni código tragado; PERFORM/CALL de un DISPLAY tampoco (red léxica)
+        syms, calls, raws, out = ex(
+            head + "       PROCEDURE DIVISION.\n           ENTRY 'DLITCBL' USING PCB-1 *.\n"
+            "       A.\n           DISPLAY 'PLEASE COPY CUSTREC. NOW'\n"
+            "           DISPLAY \"PERFORM B THEN CALL 'OLDPGM'\"\n"
+            "           PERFORM C. *> EXEC SQL DELETE FROM OLD_AUDIT END-EXEC\n"
+            "       B.\n           GOBACK.\n       C.\n           GOBACK.\n")
+        self.assertEqual(raws, [])
+        self.assertEqual(out, set())
+        self.assertEqual(calls, {("P.A", "P.C")})
+        self.assertTrue({"P.A", "P.B", "P.C"} <= set(syms))
+        # párrafos homónimos en dos secciones: uno por sección, y PERFORM a la propia
+        syms, calls, _r, _o = ex(
+            head + "       PROCEDURE DIVISION.\n       S1 SECTION.\n       GO1.\n"
+            "           PERFORM CHK.\n       CHK.\n           EXIT.\n       S2 SECTION.\n"
+            "       GO2.\n           PERFORM CHK.\n       CHK.\n           EXIT.\n")
+        self.assertEqual(calls, {("P.GO1", "P.S1.CHK"), ("P.GO2", "P.S2.CHK")})
+        self.assertEqual((syms["P.S1.CHK"], syms["P.S2.CHK"]), ((7, 8), (12, 13)))
+        # PROGRAM-ID con literal: el nombre sin comillas
+        syms, _c, _r, _o = ex("       IDENTIFICATION DIVISION.\n       PROGRAM-ID. 'A-B'.\n"
+                              "       PROCEDURE DIVISION.\n       X.\n           GOBACK.\n")
+        self.assertIn("A-B.X", syms)
+        # formato libre: lo que pasa de la columna 65 del original no se pierde
+        long_line = "    PERFORM B-PARA" + " " * 60 + "CALL 'FARPGM'\n"
+        _s, calls, raws, out = ex(">>SOURCE FORMAT FREE\nIDENTIFICATION DIVISION.\nPROGRAM-ID. F.\n"
+                                  "PROCEDURE DIVISION.\nA-PARA.\n" + long_line + "    GOBACK.\n"
+                                  "B-PARA.\n    GOBACK.\n")
+        self.assertIn(("F.A-PARA", "F.B-PARA"), calls)
+        self.assertIn(("FARPGM", "program"), out)
+        # un copybook con BOM no pierde su primer registro
+        syms, *_ = ex("\ufeff       01  FIRST-REC.\n       01  SECOND-REC.\n", "c.cpy")
+        self.assertEqual(set(syms), {"FIRST-REC", "SECOND-REC"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_audit_calls_only_reach_top_level_programs(self):
+        # CALL 'X' externo: ni a la sección X de otro programa ni a un programa anidado X
+        # (no es visible fuera de su padre). Y con dos programas en un archivo, los COPY de
+        # la DATA DIVISION del segundo se quedan (sus 01 no se pierden).
+        self.write("A.cbl", "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. A.\n"
+                   "       PROCEDURE DIVISION.\n       M.\n           CALL 'X'\n"
+                   "           CALL 'INNER'\n           GOBACK.\n")
+        self.write("B.cbl", "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. B.\n"
+                   "       PROCEDURE DIVISION.\n       X SECTION.\n       P.\n           GOBACK.\n"
+                   "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. INNER.\n"
+                   "       PROCEDURE DIVISION.\n       Q.\n           GOBACK.\n"
+                   "       END PROGRAM INNER.\n       END PROGRAM B.\n")
+        self.write("C.cbl", "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. C1.\n"
+                   "       PROCEDURE DIVISION.\n       P1.\n           GOBACK.\n"
+                   "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. C2.\n"
+                   "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+                   "           COPY RECF.\n       01  WS-X PIC X.\n"
+                   "       PROCEDURE DIVISION.\n       P2.\n           GOBACK.\n")
+        self.write("RECF.cpy", "       01  REC-F PIC X.\n")
+        rows, syms = self._all()
+        self.assertEqual({r for r in rows if r[1].startswith("proj/A.cbl")}, set())
+        self.assertIn("C2.WS-X", syms)
+        from memorygraf.extractors import ts_generic       # el COPY de C2 sigue en su sitio
+        with open(os.path.join(self.proj, "C.cbl"), encoding="utf-8") as f:
+            self.assertIn("COPY RECF.", ts_generic._cobol_normalize(f.read())[0])
+        self.assertIn(("imports", "proj/C.cbl", "proj/RECF.cpy"), rows)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_grammar_limits_are_worked_around(self):
         # Construcciones reales (CardDemo) con las que la gramática pierde el resto del
         # programa: `COPY ... REPLACING` en la PROCEDURE DIVISION, `NOT=` sin espacio y JCL

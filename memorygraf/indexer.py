@@ -1605,13 +1605,15 @@ class Indexer:
 
     # --- M15d-4: COBOL --------------------------------------------------------------
     def _cobol_programs(self, project, name):
-        """[(file, sid)] de los programas COBOL con ese PROGRAM-ID (también anidados). El
-        nombre de programa es global en la librería de carga, como el módulo en Erlang."""
+        """[(file, sid)] de los programas COBOL con ese PROGRAM-ID. El nombre de programa
+        es global en la librería de carga, como el módulo en Erlang."""
         if self._cobol_pgms is None:
             self._cobol_pgms = {}
             for n in self.store.all_nodes(types=["symbol"]):
-                if (n.get("tags") or [])[:2] == ["cobol", "class"] and n.get("path") \
-                        and n["path"].lower().endswith((".cbl", ".cob", ".cobol")):
+                # solo programas de PRIMER nivel: un anidado no se ve fuera de su padre, y
+                # una sección (`PROG.SECT`) no es un programa
+                if (n.get("tags") or [])[:2] == ["cobol", "class"] and "." not in n["name"] \
+                        and (n.get("path") or "").lower().endswith((".cbl", ".cob", ".cobol")):
                     self._cobol_pgms.setdefault((n.get("project"), n["name"].split(".")[-1]),
                                                 []).append((n["path"], n["id"]))
         return self._cobol_pgms.get((project, name.upper()), [])
