@@ -1680,14 +1680,22 @@ def _extract_fsharp(root, text, fid, add):
     prefijo de nombre completo); `module A.B.C` de cabecera y `module M =` son contenedores;
     `let f`/`let x` son funciones; los tipos son clases con sus `member` (`T.M`). Un
     `module V = A.B` es un alias, no un contenedor."""
-    def defn_name(d):
-        left = _first_child(d, "function_declaration_left") or _first_child(d, "value_declaration_left")
-        if left is None:
-            return None
-        first = left.named_children[0] if left.named_children else None
-        while first is not None and first.type in ("identifier_pattern", "long_identifier_or_op"):
-            first = first.named_children[0] if first.named_children else None
-        return text(first) if first is not None and first.type == "identifier" else None
+    def bindings(d):
+        """[(nombre, span)] de cada ligado de un defn: `let rec f ... and g ...` es UN
+        nodo con varias partes izquierdas; `let private f` lleva un access_modifier."""
+        out, kids = [], d.named_children
+        for i, left in enumerate(kids):
+            if left.type not in ("function_declaration_left", "value_declaration_left"):
+                continue
+            first = next((c for c in left.named_children
+                          if c.type not in ("access_modifier", "attributes")), None)
+            while first is not None and first.type in ("identifier_pattern", "long_identifier_or_op"):
+                first = first.named_children[0] if first.named_children else None
+            if first is not None and first.type == "identifier":
+                body = next((k for k in kids[i + 1:i + 2]
+                             if k.type not in ("function_declaration_left", "value_declaration_left")), left)
+                out.append((text(first), _Span(left, body)))
+        return out
 
     def walk(node, prefix, parent_id):
         def q(name):
@@ -1695,9 +1703,8 @@ def _extract_fsharp(root, text, fid, add):
         for ch in node.children:
             t = ch.type
             if t in ("function_or_value_defn", "value_definition"):
-                nm = defn_name(ch)
-                if nm:
-                    add(q(nm), "method" if prefix else "func", ch, parent_id)
+                for nm, span in bindings(ch):
+                    add(q(nm), "method" if prefix else "func", span, parent_id)
             elif t == "named_module":
                 nm = ch.child_by_field_name("name")
                 last = text(nm).split(".")[-1] if nm is not None else None
@@ -1742,6 +1749,13 @@ def _fs_path(n, text):
             return None
         parts += sub
     return parts or None
+
+
+def _descendants_all(node):
+    """Todos los descendientes con nombre (preorden)."""
+    for c in node.named_children:
+        yield c
+        yield from _descendants_all(c)
 
 
 def _descendants(node, type_name):
@@ -2240,7 +2254,10 @@ def _ml_imports(root, text, module):
             mp = n.child_by_field_name("module")
             if mp is not None and _RE_ML_PATH.fullmatch(text(mp)):
                 raws.append("mod:" + text(mp))
-                b[f"open:{text(mp)}"] = (text(mp), None)
+                if n.parent is not None and n.parent.type == "compilation_unit":
+                    # solo el `open` de primer nivel vale para todo el archivo: uno local
+                    # (`let open M in`, dentro de un módulo) no se puede acotar aquí
+                    b[f"open:{text(mp)}"] = (text(mp), None)
             return
         if t == "module_binding":
             mn, body = _first_child(n, "module_name"), n.child_by_field_name("body")
@@ -2261,6 +2278,8 @@ def _ml_imports(root, text, module):
         raws.insert(0, "impl:" + module)                     # .mli -> su .ml
     local = {text(mn) for mb in _descendants(root, "module_binding")
              for mn in [_first_child(mb, "module_name")] if mn is not None}
+    # un `open M` / `module X = M` de un módulo DEL ARCHIVO no es otro archivo
+    b = {k: v for k, v in b.items() if v[0].split(".")[0] not in local}
     return [r for r in dict.fromkeys(raws) if r[4:].split(".")[0] not in local], b
 
 
@@ -2312,6 +2331,25 @@ def julia_includes(root, text):
                         and lit.named_children[0].type == "content":
                     out.append((ctx, text(lit.named_children[0])))   # sin interpolación
                 return
+        for c in n.named_children:
+            walk(c, ctx)
+
+    walk(root, "")
+    return out
+
+
+def julia_exports(root, text):
+    """[(contexto_de_módulo, {nombres})] de los `export` de un archivo Julia: `using A` solo
+    trae lo que A exporta. Lo usa el indexer (también para los archivos sin cambios)."""
+    out = []
+
+    def walk(n, ctx):
+        if n.type in ("module_definition", "baremodule_definition"):
+            nm = n.child_by_field_name("name")
+            ctx = f"{ctx}.{text(nm)}" if ctx and nm is not None else (text(nm) if nm is not None else ctx)
+        if n.type == "export_statement":
+            out.append((ctx, {text(c) for c in n.named_children}))
+            return
         for c in n.named_children:
             walk(c, ctx)
 
@@ -2512,6 +2550,13 @@ def _local_names(root, grammar, text) -> set:
                     if c.type == "argument_patterns":
                         collect(c)
                 return
+            if t == "method_or_prop_defn":              # `member this.M(p)`: p es local
+                args = n.child_by_field_name("args")
+                if args is not None:
+                    collect(args)
+            if t == "primary_constr_args":              # `type S(log: ...)`: log es local
+                collect(n)
+                return
         elif grammar == "julia":
             if (t == "argument_list" and n.parent is not None and n.parent.type == "call_expression"
                     and _jl_def_call(n.parent)) or t == "for_binding":
@@ -2519,11 +2564,28 @@ def _local_names(root, grammar, text) -> set:
                 return
             if t == "arrow_function_expression" and n.named_children:
                 collect(n.named_children[0])
-            if inside and t == "assignment" and n.named_children \
-                    and n.named_children[0].type == "identifier":
-                out.add(text(n.named_children[0]))
+            if inside and t == "assignment" and n.named_children:
+                lhs = n.named_children[0]
+                if lhs.type == "identifier":
+                    out.add(text(lhs))
+                elif lhs.type in ("tuple_expression", "parenthesized_expression"):
+                    collect(lhs)                         # `(h, k) = d`
+                elif lhs.type in ("call_expression", "where_expression", "typed_expression"):
+                    nm = _jl_sig_name(lhs, text)         # `g(y) = ...` local
+                    if nm:
+                        out.add(nm)
+            if inside and t == "function_definition":   # `function g(y) ... end` anidada
+                sig = _first_child(n, "signature")
+                nm = _jl_sig_name(sig, text) if sig is not None else None
+                if nm:
+                    out.add(nm)
+            if t == "do_clause":                        # `map(xs) do x ... end`: x es local
+                for c in n.named_children:
+                    if c.type != "block":
+                        collect(c)
         body = inside or t in ("let_binding", "function_or_value_defn", "function_definition",
-                               "arrow_function_expression", "fun_expression") or (
+                               "arrow_function_expression", "fun_expression",
+                               "method_or_prop_defn") or (
             grammar == "julia" and t == "assignment" and bool(n.named_children)
             and n.named_children[0].type == "call_expression")
         for c in n.named_children:
@@ -2557,6 +2619,26 @@ def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls
             if a <= byte <= b_:
                 return sid
         return None
+
+    # OCaml/F#: un `let` solo existe desde su definición: una llamada anterior es a lo de
+    # antes (un `open`, la stdlib...). Salvo dentro de un grupo `let rec ... and ...` o de
+    # un tipo de F# (sus miembros se ven entre sí).
+    start_of: dict = {}
+    for a, _b, sid in spans:
+        start_of[sid] = min(start_of.get(sid, a), a)
+    groups = []
+    if grammar in ("ocaml", "fsharp"):
+        for n in _descendants_all(root):
+            if (n.type in ("value_definition", "function_or_value_defn")
+                    and any(not c.is_named and c.type == "rec" for c in n.children)) \
+                    or (grammar == "fsharp" and n.type == "type_definition"):
+                groups.append((n.start_byte, n.end_byte))
+
+    def defined_before(callee, byte):
+        if grammar not in ("ocaml", "fsharp"):
+            return True
+        s = start_of.get(callee, 0)
+        return s <= byte or any(a <= byte <= b and a <= s <= b for a, b in groups)
 
     def scoped(cq, name):
         """`name` visto desde el símbolo `cq`: su contenedor, el de fuera… y el archivo."""
@@ -2593,7 +2675,15 @@ def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls
             head = recv.split(".")[0] if recv else None
             if head in bound or (not recv and method in bound):
                 continue                                            # local: tapa lo importado
-            callee = scoped(cq, f"{recv}.{method}" if recv else method)
+            name = f"{recv}.{method}" if recv else method
+            if grammar == "julia":
+                # un módulo anidado NO hereda los nombres del de fuera (sin `using ..M`)
+                own = cq if cq in containers else (cq.rsplit(".", 1)[0] if "." in cq else "")
+                callee = by_qual.get(f"{own}.{name}" if own else name)
+            else:
+                callee = scoped(cq, name)
+                if callee is not None and not defined_before(callee, byte):
+                    callee = None                                   # aún no definido aquí
             if callee is None and not (head and head in containers):
                 calls_out.append((caller, method, recv))            # el indexer, por nombre completo
         elif grammar == "objc":

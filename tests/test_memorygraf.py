@@ -1236,6 +1236,86 @@ class TestM15d2(_M15dGraph):
         self.assertEqual({t for s, t in deps if s == "proj/bin/main.ml"}, {"proj/b/util.ml"})
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_audit_cases(self):
+        # Hallazgos de la auditoría de M15d-2: cada caso, sus aristas exactas (o ninguna).
+        fsproj = ('<Project><ItemGroup><Compile Include="Util.fs" />'
+                  '<Compile Include="Main.fs" /></ItemGroup></Project>')
+        cases = {
+            # librería envuelta: fuera de ella `List` es Stdlib; y list.ml no se importa a sí mismo
+            "ml_wrapped": ({"lib/dune": "(library (name mylib))\n",
+                            "lib/list.ml": "let map f l = List.rev (List.rev_map f l)\n",
+                            "bin/main.ml": "let run () = List.map succ [1; 2]\n"}, set()),
+            # una llamada anterior a la definición es a lo de antes (el `open Util`)
+            "ml_order": ({"util.ml": "let helper x = x + 1\n",
+                          "main.ml": "open Util\nlet run x = helper x\nlet helper x = x * 2\n"},
+                         {("calls", "main.ml::run", "util.ml::helper")}),
+            # `open`/alias de un módulo del propio archivo no es otro archivo
+            "ml_local_module": ({"helpers.ml": "let f x = x + 100\n",
+                                 "a.ml": "module Helpers = struct\n  let f x = x\nend\nopen Helpers\n"
+                                         "let run x = f x\nmodule H2 = Helpers\nlet run2 x = H2.f x\n"}, set()),
+            # un `let open` local no vale para todo el archivo
+            "ml_local_open": ({"util.ml": "let max a b = if a > b then b else a\n",
+                               "main.ml": "let a x y = let open Util in max x y\nlet b x y = max x y\n"}, set()),
+            # lo que el .mli oculta no se ve con `open`
+            "ml_mli": ({"util.ml": "let max a b = a\nlet biggest l = List.fold_left max 0 l\n",
+                        "util.mli": "val biggest : int list -> int\n",
+                        "main.ml": "open Util\nlet pick a b = max a b\n"}, set()),
+            "fs_order": ({"App.fsproj": fsproj, "Util.fs": "module App.Util\nlet helper x = x + 1\n",
+                          "Main.fs": "module App.Main\nopen App.Util\nlet run x = helper x\nlet helper x = x * 2\n"},
+                         {("calls", "Main.fs::Main.run", "Util.fs::Util.helper")}),
+            # `let private` es un símbolo, y tapa al del `open`
+            "fs_private": ({"App.fsproj": fsproj, "Util.fs": "module App.Util\nlet helper x = x + 1\n",
+                            "Main.fs": "module App.Main\nopen App.Util\nlet private helper x = x * 2\nlet run x = helper x\n"},
+                           {("calls", "Main.fs::Main.run", "Main.fs::Main.helper")}),
+            # parámetros de member y del constructor primario son locales
+            "fs_member": ({"App.fsproj": fsproj, "Util.fs": "module App.Util\nlet handler x = x\nlet log x = x\n",
+                           "Main.fs": "module App.Main\nopen App.Util\ntype S(log: int -> unit) =\n"
+                                      "    member this.Run(handler: int -> unit) = handler 1\n"
+                                      "    member this.Log() = log 2\n"}, set()),
+            # `let rec f ... and g ...`: g también es un símbolo y f lo ve
+            "fs_rec": ({"App.fsproj": fsproj, "Util.fs": "module App.Util\nlet z x = x\n",
+                        "Main.fs": "module App.Main\nlet rec f x = g x\nand g x = f x\n"},
+                       {("calls", "Main.fs::Main.f", "Main.fs::Main.g"),
+                        ("calls", "Main.fs::Main.g", "Main.fs::Main.f")}),
+            # dos scripts que nadie incluye no comparten nombres
+            "jl_scripts": ({"examples/demo.jl": "main() = draw(1)\n", "docs/make.jl": "draw(x) = x\n",
+                            "bench/b.jl": "draw(x) = 2x\n"}, set()),
+            # funciones locales, `do` y desestructuración tapan; un módulo anidado no hereda
+            "jl_locals": ({"src/Pkg.jl": 'module Pkg\ninclude("util.jl")\ninclude("main.jl")\nend\n',
+                           # cada mecanismo con un nombre propio: el conjunto de locales es
+                           # de todo el archivo y uno taparía a otro
+                           "src/util.jl": "step(x) = x\nhelper(x) = x\nh(x) = x\nk(x) = x\nq(x) = x\n",
+                           "src/main.jl": "function outer(x)\n    step(y) = y + 1\n    step(x)\nend\n"
+                                          "function outer2(x)\n    function helper(y)\n        y\n    end\n    helper(x)\nend\n"
+                                          "function outer3(d)\n    (h, k) = d\n    h(1) + k(2)\nend\n"
+                                          "function outer4(d)\n    map(d) do q\n        q(1)\n    end\nend\n"},
+                          set()),
+            "jl_nested": ({"M.jl": "module M\nload_config(p) = p\nmodule Sub\nfunction read_all(p)\n"
+                                   "    load_config(p)\nend\nend\nend\n"}, set()),
+            # `using A` solo trae lo exportado; un include mutuo no rompe nada
+            "jl_export": ({"src/Pkg.jl": 'module Pkg\ninclude("helpers.jl")\ninclude("api.jl")\nend\n',
+                           "src/helpers.jl": "module Helpers\nexport tidy\ntidy(x) = x\nselect(df, c) = df\nend\n",
+                           "src/api.jl": "module Api\nusing ..Helpers\nfunction run(df)\n    tidy(select(df, 1))\nend\nend\n",
+                           "src/a.jl": 'include("b.jl")\n', "src/b.jl": 'include("a.jl")\nf() = 1\n'},
+                          {("calls", "src/api.jl::Api.run", "src/helpers.jl::Helpers.tidy")}),
+        }
+        for label, (files, expected) in cases.items():
+            root = os.path.join(self.tmp, label)
+            for rel, src in files.items():
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                with open(os.path.join(root, rel), "w", encoding="utf-8") as f:
+                    f.write(src)
+            store = Store(os.path.join(self.tmp, f"{label}.db"))
+            Indexer(store, {"projects": [{"name": label, "root": root}]}).index_all()
+            got = {(e["type"], e["source"].split("/", 1)[1], e["target"].split("/", 1)[1])
+                   for e in store.all_edges() if e["type"] == "calls" and "::" in e["source"]}
+            selfimp = [e for e in store.all_edges() if e["type"] == "imports" and e["source"] == e["target"]]
+            prefixes = [n["name"] for n in store.all_nodes(types=["symbol"]) if "M.M.M" in n["name"]]
+            store.close()
+            self.assertEqual(got, expected, label)
+            self.assertEqual((selfimp, prefixes), ([], []), label)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_camelcase_module_names(self):
         # OCaml `myModule.ml` es `MyModule` (no `Mymodule`). En F#, `open BuildCommon` de un
         # script `BuildCommon.fsx` es un módulo propio, no `external:BuildCommon`.
