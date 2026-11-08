@@ -1118,16 +1118,39 @@ class TestM15d(_M15dGraph):
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_objc_own_framework_import_is_internal(self):
-        # `<MyKit/Foo.h>` con Foo.h en el proyecto (una vez) es el framework propio;
-        # `<UIKit/UIView.h>` no está -> externo. `<MyKit/Dup.h>` está dos veces -> ninguno.
+        # `<MyKit/Foo.h>` es el framework propio si Foo.h está bajo un directorio MyKit/;
+        # `<MyKit/Dup.h>` va al Dup.h de MyKit/ aunque haya otro en Other/. `<UIKit/...>` no
+        # está -> externo. `<sys/types.h>` NO es el `support/types.h` propio (auditoría).
+        # `<MyKit/version.h>` (generado, no está) con MyKit/ propio no es `external:MyKit`.
         self.write("App/A.m", "#import <MyKit/Foo.h>\n#import <UIKit/UIView.h>\n"
-                   "#import <MyKit/Dup.h>\n@implementation A\n@end\n")
+                   "#import <MyKit/Dup.h>\n#import <sys/types.h>\n#import <MyKit/version.h>\n"
+                   "@implementation A\n@end\n")
         self.write("MyKit/Foo.h", "@interface Foo\n@end\n")
         self.write("MyKit/Dup.h", "@interface Dup\n@end\n")
         self.write("Other/Dup.h", "@interface Dup\n@end\n")
+        self.write("support/types.h", "typedef int t;\n")
         _x, deps, _intra, _syms = self._graph()
         self.assertEqual({t for s, t in deps if s == "proj/App/A.m"},
-                         {"proj/MyKit/Foo.h", "external:UIKit"})
+                         {"proj/MyKit/Foo.h", "proj/MyKit/Dup.h", "external:UIKit", "external:sys"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_objc_header_keeps_c_types_and_stem_collisions(self):
+        # Un .h con `#ifdef __OBJC__` pasa a ObjC pero conserva sus tipos de C. Y un stem
+        # compartido entre un lenguaje previo y uno nuevo (`greeter.js`/`greeter.proto`,
+        # `util.rs`/`util.zig`) no desvía los imports del previo (auditoría: path_index).
+        self.write("core.h", "#ifdef __OBJC__\n@class NSString;\n#endif\n"
+                   "typedef struct { int x; } point_t;\nenum color { RED };\n")
+        self.write("src/greeter.js", "export function sayHello() {}\n")
+        self.write("src/greeter.proto", 'syntax = "proto3";\nmessage M {}\n')
+        self.write("src/server.js", 'import { sayHello } from "./greeter";\nexport function run() { sayHello(); }\n')
+        self.write("src/util.rs", "pub fn helper() {}\n")
+        self.write("src/util.zig", "pub fn helper() void {}\n")
+        self.write("src/main.rs", "mod util;\nfn main() { util::helper(); }\n")
+        xcalls, deps, _intra, syms = self._graph()
+        self.assertIn("color", syms)                      # lo mismo que da el extractor de C
+        self.assertIn(("proj/src/server.js", "proj/src/greeter.js"), deps)
+        self.assertIn(("proj/src/main.rs", "proj/src/util.rs"), deps)
+        self.assertEqual({t for s, t in xcalls}, {"proj/src/greeter.js::sayHello", "proj/src/util.rs::helper"})
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_h_and_m_content_sniff(self):

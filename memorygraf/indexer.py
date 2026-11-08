@@ -30,6 +30,11 @@ _TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 _GENERIC_EXTS = {"." + e for e in ts_generic._GRAMMAR_BY_EXT}
 # SQL (M15c): extractor LÉXICO propio (stdlib, todos los dialectos, incluido PL/SQL)
 _SQL_EXTS = {"." + e for e in sql_lex.EXTS}
+# Extensiones que trae M15d: resuelven por ruta exacta o por sus propios índices, nunca por
+# path_index (stem sin extensión), que comparten JS/TS, Rust, PHP, Java y C
+_M15D_EXTS = ({"." + e for e, g in ts_generic._GRAMMAR_BY_EXT.items()
+               if g in ts_generic._M15D or g in ts_generic._CONTRACTS or g == "cobol"}
+              | {".ddl"})
 EXT_LANG = ({".py": "py", ".ts": "ts", ".tsx": "tsx", ".js": "js", ".jsx": "jsx"}
             | {e: ts_generic._GRAMMAR_BY_EXT[e[1:]] for e in _GENERIC_EXTS}
             | {e: "sql" for e in _SQL_EXTS})
@@ -838,6 +843,7 @@ class Indexer:
         self._sol_scopes = {}      # (file_id, sufijo) -> [file_id visibles]  (perezoso)
         self._perl_pkgs = None     # (project, paquete) -> [file_id]  (perezoso)
         self._basenames = None     # (project, nombre_archivo) -> [relpath]  (perezoso)
+        self._segments = None      # project -> {nombres de directorio}  (perezoso)
         self.clj_ns_index = {}     # (project, ns) -> [file_id .clj/.cljs/.cljc]
         self._objc_classes = None  # (project, clase) -> [file_id]  (perezoso)
         self.ext_override = {}     # file_id -> ext efectiva (`.h` con Objective-C -> `.m`)
@@ -1907,8 +1913,10 @@ class Indexer:
             head = path.split(".")[0]
             return bool(self._fullname_index(project, "julia")(head))
         if g == "objc":
-            if raw.startswith("fw:"):                 # header propio repetido: ambiguo
-                return "/" in raw and len(self._by_basename(project, raw[3:])) > 1
+            if raw.startswith("fw:"):
+                # `<mylib/version.h>` (generado, no está) con un directorio mylib/ propio:
+                # es código del proyecto, no `external:mylib`
+                return "/" in raw and raw[3:].split("/")[0] in self._dir_segments(project)
             return True                               # un `#import "x.h"` es siempre propio
         if g == "zig":
             return (raw.endswith((".zig", ".zon")) or "/" in raw or raw == "root"
@@ -1949,6 +1957,14 @@ class Indexer:
         if not hits and os.path.isfile(os.path.join(root, "src", f"{app}.app.src")):
             hits = {self.file_index.get((project, rest))} - {None}
         return hits.pop() if len(hits) == 1 else None
+
+    def _dir_segments(self, project):
+        """Nombres de directorio del proyecto (cualquier nivel)."""
+        if self._segments is None:
+            self._segments = {}
+            for (p, rel) in self.file_index:
+                self._segments.setdefault(p, set()).update(rel.split("/")[:-1])
+        return self._segments.get(project, set())
 
     def _by_basename(self, project, path):
         """[(relpath, file_id)] de los archivos del proyecto con el nombre de `path`."""
@@ -2093,6 +2109,9 @@ class Indexer:
                 self.dart_parts[rel_id] = parts
         no_ext = relpath.rsplit(".", 1)[0]
         self.file_index[(project, relpath)] = rel_id
+        if ext in _M15D_EXTS:
+            return     # path_index (por stem) es de JS/TS, Rust, PHP, Java y C: un `x.proto`
+            #            o `x.zig` no debe pisar al `x.js`/`x.rs` que esos resolvers buscan
         self.path_index[(project, no_ext)] = rel_id
         # index/ resoluciones tipo carpeta
         if no_ext.endswith("/index"):
@@ -2452,14 +2471,17 @@ class Indexer:
             if raw.startswith("fw:"):
                 # `<Fw/X.h>`: el framework del PROPIO proyecto si X.h existe una sola vez en
                 # él (SDWebImage importa <SDWebImage/SDImageCache.h>); si no, externo
+                # ...pero solo si ese X.h está bajo un directorio llamado Fw: `<sys/types.h>`
+                # no es un `support/types.h` propio
                 path = raw[3:]
-                hits = [fid for rel, fid in self._by_basename(project, path)] if "/" in path else []
+                fw = path.split("/")[0]
+                hits = [fid for rel, fid in self._by_basename(project, path)
+                        if fw in rel.split("/")[:-1]] if "/" in path else []
                 return hits[0] if len(hits) == 1 else None
-            # como C (ruta exacta, si no stem) y, si no, el mapa de headers de Xcode: el
-            # `#import "Foo.h"` se encuentra por nombre en todo el proyecto, si es único
+            # la ruta exacta y, si no, el mapa de headers de Xcode: el `#import "Foo.h"` se
+            # encuentra por nombre en todo el proyecto, si es único
             norm = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
-            hit = (self.file_index.get((project, norm))
-                   or self.path_index.get((project, os.path.splitext(norm)[0])))
+            hit = self.file_index.get((project, norm))
             if hit:
                 return hit
             hits = [fid for rel, fid in self._by_basename(project, raw)

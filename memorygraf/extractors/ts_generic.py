@@ -1572,6 +1572,9 @@ def _extract_objc(root, text, fid, add):
                 walk(ch)
 
     walk(root)
+    # superconjunto de C: un header con `#ifdef __OBJC__` sigue dando sus struct/enum/union/
+    # typedef (las funciones repetidas se funden en el mismo símbolo)
+    _walk_defs(root, _SPEC["c"], "c", text, None, "", fid, add)
 
 
 def _clj_values(n):
