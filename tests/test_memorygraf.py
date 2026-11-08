@@ -1304,6 +1304,12 @@ class TestM15d3(_M15dGraph):
         self.assertEqual(rows, set())
 
 
+def _cobol_extract_in_child(name, src):
+    """Destino de subproceso (nivel de módulo: `spawn` lo importa por nombre)."""
+    from memorygraf.extractors import ts_generic
+    ts_generic.extract(name, "p", src)
+
+
 class TestM15d4(_M15dGraph):
     """M15d-4: COBOL. Normalización previa (EXEC fuera, formato libre -> fijo, sin mover
     líneas), PERFORM/GO TO dentro del programa, CALL/LINK/XCTL con literal entre
@@ -1381,6 +1387,31 @@ class TestM15d4(_M15dGraph):
         # el `EXEC CICS` del comentario no se traga el párrafo A
         names = {n.name for n in ts_generic.extract("p.cbl", "p", fixed)[0]}
         self.assertIn("P.A", names)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_short_lines_and_ctrl_z_do_not_hang(self):
+        # La gramática entra en un bucle infinito NATIVO (ni try/except ni el callback de
+        # progreso lo cortan) si el archivo acaba en una línea de 1 a 5 caracteres: el
+        # Ctrl-Z de DOS, un número de secuencia suelto, un copybook en formato libre...
+        # Cada caso corre en un subproceso con tope: si vuelve el cuelgue, el test falla
+        # en vez de dejar colgada la suite.
+        import multiprocessing as mp
+        base = ("       IDENTIFICATION DIVISION.\n       PROGRAM-ID. X.\n"
+                "       PROCEDURE DIVISION.\n       A.\n           GOBACK.\n")
+        cases = [("x.cbl", base + "\x1a"), ("x.cbl", base + "0\n"), ("x.cbl", base + "12345\n\n"),
+                 ("x.cbl", "\x1a"), ("x.cbl", "AB\n"), ("x.cbl", "  .\n"), ("x.cbl", "EJECT\n"),
+                 ("c.cpy", "01 CUST-REC.\n   05 CUST-ID PIC 9(5).\n01 X.\n"),
+                 ("c.cpy", "       01  REC.\n?")]
+        ctx = mp.get_context("spawn")
+        for name, src in cases:
+            p = ctx.Process(target=_cobol_extract_in_child, args=(name, src))
+            p.start()
+            p.join(20)
+            hung = p.is_alive()
+            if hung:
+                p.kill()
+            self.assertFalse(hung, f"cuelgue con {name}: {src[-12:]!r}")
+            self.assertEqual(p.exitcode, 0, f"excepción con {name}: {src[-12:]!r}")
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_grammar_limits_are_worked_around(self):

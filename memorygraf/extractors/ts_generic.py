@@ -235,11 +235,15 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
         return nodes, edges, [], [], {}
 
     exec_blocks: list = []
+    copybook = False
     if grammar == "cobol":
         source, exec_blocks = _cobol_normalize(source)
+        # copybook: sus 01/77 por léxico, SIN pasar por la gramática (un fragmento sin
+        # divisiones no lo entiende, y ciertas formas la colgaban)
+        copybook = not _RE_PROGRAM_ID.search(source)
     src = source.encode("utf-8", "replace")
     try:
-        root = _parser(grammar).parse(src).root_node
+        root = None if copybook else _parser(grammar).parse(src).root_node
     except Exception:
         return nodes, edges, [], [], {}
 
@@ -287,6 +291,9 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
         # dentro del directorio = módulo) y `source` de los `module` como imports.
         calls_out, raw_imports = _extract_hcl(root, text, fid, add, spans)
         return nodes, edges, raw_imports, calls_out, {}
+    elif copybook:
+        _cobol_copybook(source, fid, add)
+        return nodes, edges, [], [], {}
     elif grammar == "cobol":
         calls_out = []
         raw_imports = _extract_cobol(root, text, source, fid, add, by_qual, edges, calls_out,
@@ -2774,6 +2781,7 @@ _RE_COBOL_DIV = re.compile(r"\b(?:IDENTIFICATION|ID)\s+DIVISION\b|\bPROGRAM-ID\b
 _RE_EXEC = re.compile(r"\bEXEC\s+(?:SQL|CICS|DLI|SQLIMS|HTML|XML|ADABAS)\b", re.I)
 _RE_END_EXEC = re.compile(r"\bEND-EXEC\b", re.I)
 _RE_PROC_DIV = re.compile(r"\bPROCEDURE\s+DIVISION\b", re.I)
+_RE_C0 = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _RE_COPY = re.compile(r"(?<![\w-])COPY\s+(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z0-9][\w#@$-]*))", re.I)
 _RE_NOT_OP = re.compile(r"\bNOT([=<>]) ", re.I)             # `NOT= X` -> `NOT =X` (mismo largo)
 
@@ -2800,6 +2808,9 @@ def _cobol_normalize(source: str):
         DIVISION se quedan: los parsea bien y quitarlos dejaría un `FD` sin registro.
       - `NOT= X` -> `NOT =X`: la gramática exige el espacio; mismo largo, mismo sentido.
       - Formato libre -> fijo, con 7 espacios delante."""
+    # Caracteres de control (el Ctrl-Z de fin de archivo DOS, etc.) -> espacio: no se
+    # mueven columnas. Y la BOM fuera.
+    source = _RE_C0.sub(" ", source.lstrip("\ufeff"))
     source, copies = _strip_cobol_copies(source)
     free = _cobol_is_free(source)
     lines = source.split("\n")
@@ -2843,6 +2854,10 @@ def _cobol_normalize(source: str):
         lines[i] = _RE_NOT_OP.sub(lambda m: f"NOT {m.group(1)}", "".join(chars))
     if free:
         lines = [("       " + ln) if ln.strip() else ln for ln in lines]
+    # Una línea de 1 a 6 caracteres solo tiene área de secuencia (el compilador la ignora)
+    # y una de 1 a 5 al final del archivo CUELGA la gramática (bucle infinito en código
+    # nativo: ni un try/except ni el callback de progreso lo cortan). Se deja en blanco.
+    lines = ["" if len(ln.rstrip()) <= 6 and not ln[6:].strip() else ln for ln in lines]
     return "\n".join(lines), blocks
 
 
@@ -2916,15 +2931,6 @@ def _extract_cobol(root, text, source, fid, add, by_qual, edges, calls_out, bloc
     raws: list = []
     seen: set = set()
     programs = [p for p in _descendants(root, "program_definition")]
-    if not programs and not _RE_PROGRAM_ID.search(source):   # copybook: solo registros
-        for row, line in enumerate(source.split("\n")):
-            fixed = len(line) > 6 and (line[:6].strip() == "" or line[:6].isdigit())
-            if fixed and line[6] in "*/":
-                continue
-            m = _RE_COPY_RECORD.match(line[7:72] if fixed else line)
-            if m:
-                add(m.group(2).upper(), "type", _RowSpan(row, row), fid)
-        return raws
 
     # anidamiento por el orden de PROGRAM-ID / END PROGRAM (la gramática los deja hermanos)
     events = []
@@ -3116,6 +3122,16 @@ def _cobol_lexical_fallback(source, fid, add, by_qual, edges, calls_out, raws, s
         for m in _RE_CALL_LIT.finditer(body):
             calls_out.append((sid, m.group(1).upper(), "program"))
             raws.append("pgm:" + m.group(1).upper())
+
+
+def _cobol_copybook(source, fid, add):
+    """Registros 01/77 de un copybook (ya normalizado a formato fijo)."""
+    for row, line in enumerate(source.split("\n")):
+        if len(line) > 6 and line[6] in "*/":
+            continue
+        m = _RE_COPY_RECORD.match(line[7:72])
+        if m:
+            add(m.group(2).upper(), "type", _RowSpan(row, row), fid)
 
 
 class _RowSpan:
