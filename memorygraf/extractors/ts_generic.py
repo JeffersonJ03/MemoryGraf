@@ -65,6 +65,7 @@ _CALLS = {
 
 # M15d: lenguajes con su propio casado de llamadas (_find_calls_m15d) e imports
 # (_imports_m15d). Sus cláusulas/ecuaciones/sobrecargas de un mismo nombre son UN símbolo.
+_RE_BLANK = re.compile(r"\s")
 _M15D = {"erlang", "haskell", "perl", "zig", "solidity", "clojure", "objc",
          "ocaml", "ocaml_interface", "fsharp", "fsharp_signature", "julia"}
 # M15d-2: resolución por NOMBRE COMPLETO (prefijo de módulo del archivo + símbolo) en el
@@ -255,6 +256,9 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     by_qual: dict = {}        # nombre cualificado -> sid (`Tipo.metodo` intra-archivo)
 
     def add(qual, kind, node, parent_id):
+        if (grammar in _M15D or grammar in _CONTRACTS or grammar == "cobol") and (
+                not qual or "" in qual.split(".") or _RE_BLANK.search(qual)):
+            return parent_id     # nombre vacío o con blancos: un nodo MISSING o en recuperación
         if (grammar in _M15D or grammar == "cobol") and qual in by_qual:
             # Cláusulas de Erlang, ecuaciones de Haskell, sobrecargas de Solidity: un
             # solo símbolo cuyo span cubre todas (se llaman por nombre, no por aridad).
@@ -306,10 +310,15 @@ def extract(rel_path: str, project: str, source: str) -> Tuple[list, list, list,
     elif grammar in _M15D:
         _M15D_DEFS[grammar](root, text, fid, add)
         module = rel_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]    # Erlang: módulo = archivo
-        raw_imports, bindings = _imports_m15d(root, grammar, text, module)
         calls_out = []
-        _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls_out,
-                         module)
+        try:
+            raw_imports, bindings = _imports_m15d(root, grammar, text, module)
+            _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls_out,
+                             module)
+        except RecursionError:
+            # anidamiento patológico: mejor los símbolos sin aristas que perder el archivo
+            edges[:] = [e for e in edges if e.type == EDGE_DEFINES]
+            return nodes, edges, [], [], {}
         return nodes, edges, raw_imports, calls_out, bindings
     else:
         _walk_defs(root, _SPEC[grammar], grammar, text, src, rel_path, fid, add)
@@ -790,14 +799,12 @@ def _iter_calls(root, grammar, text):
         yield from _iter_calls_dart(root, text)
         return
     call_types, _field = _CALLS[grammar]
-
-    def walk(n):
+    stack = [root]                   # iterativo: un `else if` de 500 ramas anida ~1000
+    while stack:                     # niveles y una recursión reventaría
+        n = stack.pop()
         if n.type in call_types:
             yield (n.start_byte, *_call_parts(n, grammar, text))
-        for c in n.children:
-            yield from walk(c)
-
-    yield from walk(root)
+        stack.extend(reversed(n.children))
 
 
 def _find_calls(root, grammar, text, spans, by_short, by_qual, edges, bindings, calls_out):
@@ -1608,6 +1615,25 @@ _CLJ_SPECIAL = _CLJ_FUNCS | _CLJ_TYPES | _CLJ_IMPL | {
     "var", "throw", "try", "catch", "finally", "new", "set!", "comment"}
 
 
+def _clj_evaluated(n, text) -> bool:
+    """¿Se evalúa esta lista? No dentro de `#_`, de una cita `'(...)`, de `(comment ...)` /
+    `(quote ...)`, ni en la posición de constante de un `case`."""
+    child, p = n, n.parent
+    while p is not None:
+        if p.type in ("dis_expr", "quoting_lit"):
+            return False
+        if p.type == "list_lit":
+            head, vals = _clj_head(p, text)
+            if head in ("comment", "quote"):
+                return False
+            if head == "case" and child in vals:
+                i = vals.index(child)
+                if i >= 2 and i % 2 == 0 and i + 1 < len(vals):
+                    return False                                # (case x (a b) ... ): constantes
+        child, p = p, p.parent
+    return True
+
+
 def _extract_clojure(root, text, fid, add):
     """Clojure: todo es `list_lit` y la semántica sale del primer símbolo. `defn`/`defn-`/
     `def`/`defmacro`/`defmulti`/`defonce` son funciones; `defrecord`/`deftype` tipos;
@@ -1628,7 +1654,11 @@ def _extract_clojure(root, text, fid, add):
             if not nm or nm[0] is not None or not nm[1]:
                 continue
             if head in _CLJ_FUNCS:
-                add(nm[1], "func", ch, fid)
+                # `defn-` / `^:private` / `^{:private true}`: no se ve desde otro ns
+                meta = _first_child(vals[1], "meta_lit")
+                private = head == "defn-" or (meta is not None and ":private" in text(meta)
+                                              and "false" not in text(meta))
+                add(nm[1], "private" if private else "func", ch, fid)
             elif head in _CLJ_TYPES:
                 add(nm[1], "type", ch, fid)
             elif head == "defprotocol":
@@ -1752,19 +1782,23 @@ def _fs_path(n, text):
 
 
 def _descendants_all(node):
-    """Todos los descendientes con nombre (preorden)."""
-    for c in node.named_children:
+    """Todos los descendientes con nombre (preorden, iterativo)."""
+    stack = list(reversed(node.named_children))
+    while stack:
+        c = stack.pop()
         yield c
-        yield from _descendants_all(c)
+        stack.extend(reversed(c.named_children))
 
 
 def _descendants(node, type_name):
-    """Descendientes de un tipo, sin entrar en ellos."""
-    for c in node.named_children:
+    """Descendientes de un tipo, sin entrar en ellos (preorden, iterativo)."""
+    stack = list(reversed(node.named_children))
+    while stack:
+        c = stack.pop()
         if c.type == type_name:
             yield c
         else:
-            yield from _descendants(c, type_name)
+            stack.extend(reversed(c.named_children))
 
 
 def _jl_sig_name(sig, text):
@@ -1863,15 +1897,18 @@ def _call_parts_m15d(n, grammar, text):
             # `A::B->new`: método de clase; `$obj->m`: dinámico (sin arista)
             return (text(inv) if inv is not None and inv.type == "bareword" else _OPAQUE), name
         fn = n.child_by_field_name("function")
-        name = text(fn).lstrip("&") if fn is not None else ""
+        raw = text(fn) if fn is not None else ""
+        name = raw.lstrip("&")
         if not re.fullmatch(r"\w+(?:::\w+)*", name):
             return None, None
         if "::" in name:
             pkg, sub = name.rsplit("::", 1)
             if pkg in ("SUPER", "CORE", "CORE::GLOBAL"):
                 return None, None
-            return (None, sub) if pkg == "main" else (pkg, sub)
-        return None, name
+            return (pkg or "main"), sub                      # `main::f` / `::f` -> main
+        # una builtin sin `&` (`push(...)`, `split(...)`) es la de CORE aunque el paquete
+        # tenga una sub con ese nombre: la marca `&` la conserva _find_calls_m15d
+        return None, ("&" + name if raw.startswith("&") else name)
     if grammar == "zig":
         kids = n.named_children
         if len(kids) < 2 or kids[0].type != "IDENTIFIER":
@@ -1915,6 +1952,8 @@ def _call_parts_m15d(n, grammar, text):
         par = n.parent
         if par is not None and par.type == "list_lit" and _clj_head(par, text)[0] in _CLJ_IMPL:
             return None, None                                   # firma / método de un tipo
+        if not _clj_evaluated(n, text):
+            return None, None                                   # #_, (comment), '(...), case
         vals = _clj_values(n)
         s = _clj_sym(vals[0], text) if vals else None
         if not s or not s[1] or s[1][0] == "." or s[1][-1] == "." \
@@ -1981,6 +2020,26 @@ def _erl_imports(root, text, module):
     return list(dict.fromkeys(raws)), b
 
 
+def haskell_exports(root, text):
+    """Lo que exporta un módulo Haskell: None si no hay lista (o reexporta un `module X`:
+    entonces no se sabe), o (nombres, tipos/clases con `(..)`). `C(m)` exporta m. Lo usa el
+    indexer para no enlazar un import abierto a una función privada."""
+    header = _first_child(root, "header")
+    exports = header.child_by_field_name("exports") if header is not None else None
+    if exports is None or _first_child(exports, "module_export") is not None:
+        return None
+    names, whole = set(), set()
+    for ex in (c for c in exports.named_children if c.type == "export"):
+        var, typ, kids = (ex.child_by_field_name(f) for f in ("variable", "type", "children"))
+        if var is not None:
+            names.add(text(var))
+        if typ is not None and kids is not None:
+            if _first_child(kids, "all_names") is not None:
+                whole.add(text(typ))
+            names.update(text(c) for c in _descendants(kids, "variable"))
+    return names, whole
+
+
 def _hs_imports(root, text, _module):
     """Haskell: raw = el módulo importado. Bindings (los resuelve el indexer):
       "q:<X>:<Mod>"  -> `X.f` vale para Mod (X = su alias `as X`, o su nombre completo)
@@ -2012,6 +2071,20 @@ def _hs_imports(root, text, _module):
     return list(dict.fromkeys(raws)), b
 
 
+# Builtins de Perl (perlfunc) que se escriben como llamada: una sub del paquete con ese
+# nombre NO las tapa (la llamada sin `&` va a CORE::)
+_PERL_BUILTINS = set("""abs accept alarm atan2 bind binmode bless caller chdir chmod chomp chop
+chown chr chroot close closedir connect cos crypt dbmclose dbmopen defined delete die do dump
+each eof eval exec exists exit exp fcntl fileno flock fork formline getc getlogin getpeername
+getpgrp getppid getpriority glob gmtime goto grep hex index int ioctl join keys kill lc lcfirst
+length link listen localtime lock log lstat map mkdir msgctl msgget msgrcv msgsnd oct open
+opendir ord pack pipe pop pos print printf prototype push quotemeta rand read readdir readline
+readlink readpipe recv ref rename require reset reverse rewinddir rindex rmdir say scalar seek
+seekdir select semctl semget semop send setpgrp setpriority setsockopt shift shmctl shmget
+shmread shmwrite shutdown sin sleep socket socketpair sort splice split sprintf sqrt srand stat
+study substr symlink syscall sysopen sysread sysseek system syswrite tell telldir tie tied time
+times truncate uc ucfirst umask undef unlink unpack unshift untie utime values vec wait waitpid
+wantarray warn write""".split())
 _PERL_PRAGMA = re.compile(r"[a-z][a-z0-9_]*")       # strict, warnings, utf8, lib, parent…
 
 
@@ -2113,21 +2186,33 @@ def _zig_imports(root, text, _module):
             walk(c)
 
     walk(root)
-    for name, s in decls:                                   # 1º los @import directos
+    # Un valor por DECLARACIÓN: Zig permite el mismo nombre local en funciones distintas
+    # (`const T = a.S;` en una, `const T = b.S;` en otra). Un nombre con declaraciones de
+    # valor distinto (o alguna que no es un import/alias) queda ambiguo y no se liga.
+    values = []
+    for _name, s in decls:                                  # 1º los @import directos
         raw, rest = import_of(s)
         mem = member(rest) if raw else None
-        if raw and mem is not None:
-            b[name] = (raw, mem or None)
+        values.append((raw, mem or None) if raw and mem is not None else None)
+
+    def unique():
+        per: dict = {}
+        for (name, _s), v in zip(decls, values):
+            per.setdefault(name, set()).add(v)
+        return {n: next(iter(vs)) for n, vs in per.items() if len(vs) == 1 and None not in vs}
+
     for _ in range(3):                                      # luego los alias encadenados
-        for name, s in decls:
+        b = unique()
+        for i, (_name, s) in enumerate(decls):
             kids = s.named_children
-            if name in b or not kids or kids[0].type != "IDENTIFIER" or text(kids[0]) not in b:
+            if values[i] is not None or not kids or kids[0].type != "IDENTIFIER" \
+                    or text(kids[0]) not in b:
                 continue
             mem = member(kids[1:])
             if mem:
                 raw, base = b[text(kids[0])]
-                b[name] = (raw, f"{base}.{mem}" if base else mem)
-    return list(dict.fromkeys(raws)), b
+                values[i] = (raw, f"{base}.{mem}" if base else mem)
+    return list(dict.fromkeys(raws)), unique()
 
 
 def _sol_imports(root, text, _module):
@@ -2699,6 +2784,18 @@ def _find_calls_m15d(root, grammar, text, spans, by_qual, edges, bindings, calls
                 if callee is None:
                     calls_out.append((caller, method, None))        # función C
         elif grammar == "perl":
+            amp = method.startswith("&")
+            method = method.lstrip("&")
+            if not recv and not amp and method in _PERL_BUILTINS and method not in bindings:
+                continue                                            # CORE::push, no la sub
+            if recv == "main":
+                callee = by_qual.get(method)                        # `main::f`
+                if callee is None:
+                    calls_out.append((caller, method, None))
+                if callee and callee != caller and (caller, callee) not in seen:
+                    seen.add((caller, callee))
+                    edges.append(Edge(caller, callee, EDGE_CALLS, 1.0, "tree-sitter"))
+                continue
             own = cq.rsplit(".", 1)[0] if "." in cq else (cq if cq in containers else "")
             want = f"{recv}.{method}" if recv else (f"{own}.{method}" if own else method)
             callee = by_qual.get(want)

@@ -320,6 +320,7 @@ _RE_CLJ_NS = re.compile(r"^\(ns\s+(?:\^(?:\{[^}]*\}|[^\s]+)\s+)*([^\s()\[\]{}^;]
 _CLJ_PLATFORM = {".clj": (".clj", ".cljc"), ".cljs": (".cljs", ".cljc"),
                  ".cljc": (".clj", ".cljs", ".cljc")}
 _RE_SOL_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+_RE_SOL_PLAIN_IMPORT = re.compile(r'''^\s*import\s+["']([^"']+)["']\s*;''', re.MULTILINE)
 _RE_SOL_IS = re.compile(r"\b(?:contract|interface)\s+(\w+)\s+is\s+([^{;]+)\{")
 # Raíces jerárquicas de la base de Haskell: compartirlas no hace interno un import
 _HS_STD_ROOTS = {"Data", "Control", "System", "Text", "Foreign", "GHC", "Numeric",
@@ -328,13 +329,14 @@ _HS_STD_ROOTS = {"Data", "Control", "System", "Text", "Foreign", "GHC", "Numeric
 
 def _sol_parents(source: str) -> dict:
     """{contrato: [padres]} de `contract C is A, B(args)`. Los argumentos de constructor
-    se descartan y un padre cualificado (`U.Base`) no se resuelve: se omite."""
+    se descartan; un padre cualificado (`U.Base`) se conserva tal cual: no se resuelve,
+    pero dice que la herencia del contrato es incompleta."""
     out = {}
     for name, parents in _RE_SOL_IS.findall(_RE_SOL_COMMENT.sub(" ", source)):
         prev = None
         while prev != parents:                       # quita (args) anidados
             prev, parents = parents, re.sub(r"\([^()]*\)", "", parents)
-        out[name] = [p.strip() for p in parents.split(",") if re.fullmatch(r"\s*\w+\s*", p)]
+        out[name] = [p.strip() for p in parents.split(",") if re.fullmatch(r"\s*[\w.]+\s*", p)]
     return out
 
 
@@ -476,9 +478,11 @@ def _xcode_membership(text: str):
 _RE_ZIG_ROOT = re.compile(
     r'''\.root_source_file\s*=\s*(?:b\.path\(\s*"([^"]+)"\s*\)|\.\{\s*\.path\s*=\s*"([^"]+)"\s*\})''')
 _RE_ZIG_VAR_MOD = re.compile(r'''(?:const|var)\s+(\w+)\s*=\s*b\.(?:createModule|addModule)\(''')
-_RE_ZIG_ADD_MOD = re.compile(r'''\baddModule\(\s*"([^"]+)"''')
+# `addModule("m", .{...})` declara un módulo con ruta; `exe.addModule("m", x)` (Zig 0.11) y
+# `addImport("m", x)` lo cablean a una expresión
+_RE_ZIG_ADD_MOD = re.compile(r'''\baddModule\(\s*"([^"]+)"\s*,\s*\.\{''')
 _RE_ZIG_IMPORT = re.compile(
-    r'''\baddImport\(\s*"([^"]+)"\s*,\s*([\w.]+)|\.name\s*=\s*"([^"]+)"\s*,\s*\.module\s*=\s*([\w.]+)''')
+    r'''\b(?:addImport|addModule)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][\w.]*)|\.name\s*=\s*"([^"]+)"\s*,\s*\.module\s*=\s*([\w.]+)''')
 _RE_ZIG_DEP_VAR = re.compile(r'''(?:const|var)\s+(\w+)\s*=\s*b\.(?:lazyDependency|dependency)\(''')
 
 
@@ -506,8 +510,11 @@ def _load_zig_modules(root: str, excludes: set) -> dict:
         base = "" if rel == "." else rel
 
         def path_after(pos):
-            end = src.find("});", pos)                       # fin de la llamada
-            m = _RE_ZIG_ROOT.search(src[pos:end if end != -1 else None])
+            depth, end = 1, pos                              # fin de la llamada: el `)` que
+            while end < len(src) and depth:                  # cierra el `(` (paréntesis
+                depth += {"(": 1, ")": -1}.get(src[end], 0)  # balanceados)
+                end += 1
+            m = _RE_ZIG_ROOT.search(src[pos:end])
             p = (m.group(1) or m.group(2)) if m else None
             return os.path.normpath(os.path.join(base, p)).replace("\\", "/") if p else None
 
@@ -527,29 +534,34 @@ def _load_zig_modules(root: str, excludes: set) -> dict:
     return out
 
 
-def _load_sol_remappings(root: str) -> list:
-    """[(prefijo, destino)] de `remappings.txt` y de `remappings = [...]` en foundry.toml,
-    del prefijo más largo al más corto (M15d). El contexto (`ctx:a=b`) se ignora."""
-    lines = []
-    for name in ("remappings.txt", "foundry.toml"):
+def _load_sol_remappings(root: str, excludes: set) -> list:
+    """[(dir, [(prefijo, destino)])] de cada `remappings.txt` / `remappings = [...]` de
+    foundry.toml del árbol (un monorepo puede tener el proyecto Foundry en `contracts/`),
+    del directorio más profundo al menos, y en cada uno del prefijo más largo al más corto.
+    Los destinos son relativos a ese directorio. El contexto (`ctx:a=b`) se ignora."""
+    lines: dict = {}
+    for d, path in _walk_named(root, excludes, lambda f: f in ("remappings.txt", "foundry.toml")):
         try:
-            with open(os.path.join(root, name), "r", encoding="utf-8", errors="replace") as f:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
                 text = f.read()
         except OSError:
             continue
-        if name == "remappings.txt":
-            lines += text.splitlines()
+        if path.endswith("remappings.txt"):
+            lines.setdefault(d, []).extend(text.splitlines())
         else:
             m = re.search(r'^\s*remappings\s*=\s*\[(.*?)\]', text, re.S | re.M)
-            lines += re.findall(r'''["']([^"']+)["']''', m.group(1)) if m else []
-    out = {}
-    for line in lines:
-        line = line.strip()
-        if "=" not in line or line.startswith("#"):
-            continue
-        pre, dst = line.split("=", 1)
-        out.setdefault(pre.split(":", 1)[-1].strip(), dst.strip())
-    return sorted(out.items(), key=lambda kv: -len(kv[0]))
+            lines.setdefault(d, []).extend(re.findall(r'''["']([^"']+)["']''', m.group(1)) if m else [])
+    out = []
+    for d, ls in lines.items():
+        maps: dict = {}
+        for line in ls:
+            line = line.strip()
+            if "=" not in line or line.startswith("#"):
+                continue
+            pre, dst = line.split("=", 1)
+            maps.setdefault(pre.split(":", 1)[-1].strip(), dst.strip())
+        out.append((d, sorted(maps.items(), key=lambda kv: -len(kv[0]))))
+    return sorted(out, key=lambda dm: -dm[0].count("/") - bool(dm[0]))
 
 
 _RE_DUNE_STANZA = re.compile(r"\((library|executables?|tests?)\b")
@@ -839,8 +851,11 @@ class Indexer:
         self.roots = {p["name"]: p["root"] for p in config["projects"]}
         self.erl_mod_index = {}    # (project, módulo) -> [file_id .erl]
         self.hs_mod_index = {}     # (project, módulo) -> [file_id .hs]
+        self.hs_exports = {}       # file_id -> (nombres, tipos con (..)) | None (todo)
+        self._clj_private = None   # {sid de defn- / ^:private}  (perezoso)
         self.zig_modules = {}      # project -> {nombre: {ruta}}
-        self.sol_remaps = {}       # project -> [(prefijo, destino)]
+        self.sol_remaps = {}       # project -> [(dir, [(prefijo, destino)])]
+        self.sol_plain = {}        # file_id -> [rutas de `import "x";` sin alias ni lista]
         self.sol_parents = {}      # (file_id, contrato) -> [padres]
         self._sol_scopes = {}      # (file_id, sufijo) -> [file_id visibles]  (perezoso)
         self._perl_pkgs = None     # (project, paquete) -> [file_id]  (perezoso)
@@ -875,7 +890,7 @@ class Indexer:
             zig = _load_zig_modules(root, self.excludes)
             if zig:
                 self.zig_modules[name] = zig
-            remaps = _load_sol_remappings(root)
+            remaps = _load_sol_remappings(root, self.excludes)
             if remaps:
                 self.sol_remaps[name] = remaps
             dune = _load_dune_libraries(root, self.excludes)
@@ -1343,7 +1358,8 @@ class Indexer:
             return [(f, sid) for m in dict.fromkeys(mods)
                     for f in (self._hs_module_files(project, m) if g == "haskell"
                               else self._clj_ns_files(project, m, ext))
-                    for sid in short_index.get((f, callee), []) if sid != caller]
+                    for sid in short_index.get((f, callee), [])
+                    if sid != caller and self._exported(g, f, sid)]
         if g == "ocaml":
             return self._ml_pairs(project, file_id_, caller, callee, via, bindings, at, name_index)
         if g == "fsharp":
@@ -1383,8 +1399,11 @@ class Indexer:
             scope = self._sol_scope(project, file_id_)
             if via:
                 return at(scope, f"{via}.{callee}")
-            return (self._sol_inherited(project, file_id_, caller, callee, name_index, scope)
-                    or at(scope, callee))
+            inherited, incomplete = self._sol_inherited(project, file_id_, caller, callee,
+                                                        name_index, scope)
+            if inherited or incomplete:
+                return inherited    # un padre sin resolver podría definirla: no se adivina
+            return at(self._sol_free_scope(project, file_id_), callee)
         return []
 
     # --- M15d-2: OCaml ------------------------------------------------------------
@@ -1662,6 +1681,22 @@ class Indexer:
                                                 []).append((n["path"], n["id"]))
         return self._cobol_pgms.get((project, name.upper()), [])
 
+    def _exported(self, g, f, sid):
+        """¿Se ve `sid` desde otro módulo? Haskell: su lista de exports (sin lista, todo;
+        `T(..)` exporta los métodos de T). Clojure: no si es `defn-` / `^:private`."""
+        if g == "haskell":
+            exp = self.hs_exports.get(f)
+            if exp is None:
+                return True
+            names, whole = exp
+            qual = sid.split("::", 1)[1]
+            return qual in names or qual.rsplit(".", 1)[-1] in names or \
+                ("." in qual and qual.split(".")[0] in whole)
+        if self._clj_private is None:
+            self._clj_private = {n["id"] for n in self.store.all_nodes(types=["symbol"])
+                                 if (n.get("tags") or [])[:2] == ["clojure", "private"]}
+        return sid not in self._clj_private
+
     def _unique(self, files):
         return list(files) if len(files) == 1 else []
 
@@ -1699,6 +1734,35 @@ class Indexer:
                     self._objc_classes.setdefault((n.get("project"), owner), []).append(n["path"])
         return list(dict.fromkeys(self._objc_classes.get((project, cls), [])))
 
+    def _sol_remap(self, project, base_dir, raw, any_dir=False):
+        """(dir del foundry que aplica, ruta remapeada relativa a él | None). Aplica el
+        `remappings` más cercano que contiene a `base_dir` (con `any_dir`, cualquiera que
+        mapee `raw`)."""
+        for d, maps in self.sol_remaps.get(project, []):
+            if any_dir or not d or base_dir == d or base_dir.startswith(d + "/"):
+                hit = next((dst + raw[len(pre):] for pre, dst in maps if raw.startswith(pre)), None)
+                if hit is not None or not any_dir:
+                    return d, hit
+        return "", None
+
+    def _sol_free_scope(self, project, file_id_):
+        """Archivos cuyas funciones LIBRES ve un .sol: él mismo y lo que entra con un
+        `import "x";` simple (transitivo). `import {A} from` / `import "x" as U` no las
+        traen al ámbito."""
+        key = (file_id_, "free")
+        if key not in self._sol_scopes:
+            seen, queue = [file_id_], [file_id_]
+            while queue:
+                f = queue.pop()
+                fdir = os.path.dirname(f[len(project) + 1:])
+                for raw in self.sol_plain.get(f, ()):
+                    t = self._resolve_generic(project, ".sol", fdir, raw)
+                    if t and t not in seen:
+                        seen.append(t)
+                        queue.append(t)
+            self._sol_scopes[key] = seen
+        return self._sol_scopes[key]
+
     def _sol_scope(self, project, file_id_):
         """El archivo y lo que importa, transitivamente: en Solidity `import "x"` trae
         también lo que x importó."""
@@ -1724,10 +1788,12 @@ class Indexer:
         B`. De los ancestros que la definen se descartan los tapados por otro que hereda
         de ellos (`B is A` y ambos definen f -> B.f). Si quedan varios (dos ramas, que
         Solidity obliga a resolver con `override` propio) no se elige ninguno. Un padre
-        solo cuenta si su nombre es único en el scope de quien lo hereda."""
+        solo cuenta si su nombre es único en el scope de quien lo hereda. Devuelve también
+        si algún padre no se pudo resolver (cualificado, ausente o ambiguo)."""
         cq = caller.split("::", 1)[1]
         if "." not in cq:
-            return []
+            return [], False
+        incomplete = False
         start = (file_id_, cq.split(".")[0])
         parents_of, order, queue = {}, [], [start]
         while queue:
@@ -1736,6 +1802,8 @@ class Indexer:
             parents_of[node] = []
             for parent in self.sol_parents.get(node, ()):
                 where = [x for x in fscope if (x, parent) in name_index]
+                if len(where) != 1:
+                    incomplete = True
                 if len(where) == 1:
                     parents_of[node].append((where[0], parent))
                     if (where[0], parent) not in parents_of and (where[0], parent) not in queue:
@@ -1753,7 +1821,7 @@ class Indexer:
 
         defs = [n for n in order if (n[0], f"{n[1]}.{callee}") in name_index]
         defs = [n for n in defs if not any(n in above(o) for o in defs if o != n)]
-        return [(f, name_index[(f, f"{c}.{callee}")]) for f, c in defs]
+        return [(f, name_index[(f, f"{c}.{callee}")]) for f, c in defs], incomplete
 
     def _jvm_scope_files(self, file_id_, project, bindings):
         """Archivos visibles sin import explícito en Java/Kotlin: los del paquete propio
@@ -1970,9 +2038,9 @@ class Indexer:
         if g == "solidity":
             if raw.startswith(("./", "../")):
                 return True
-            dst = next((d for pre, d in self.sol_remaps.get(project, []) if raw.startswith(pre)),
-                       None)
-            return bool(dst) and os.path.isdir(os.path.join(self.roots.get(project, ""), dst))
+            cfg, dst = self._sol_remap(project, "", raw, any_dir=True)
+            return dst is not None and os.path.isdir(os.path.join(
+                self.roots.get(project, ""), cfg, os.path.dirname(dst) or dst))
         return False
 
     def _resolve_erlang(self, project, base_dir, raw):
@@ -2110,6 +2178,15 @@ class Indexer:
         if ext == ".hs":
             m = _RE_HS_MODULE.search(source)
             self.hs_mod_index.setdefault((project, m.group(1) if m else "Main"), []).append(rel_id)
+            if m and "(" in source[m.end():m.end() + 2000].split("where", 1)[0] \
+                    and ts_treesitter.available():
+                try:
+                    src = source.encode("utf-8", "replace")
+                    root = ts_generic._parser("haskell").parse(src).root_node
+                    self.hs_exports[rel_id] = ts_generic.haskell_exports(
+                        root, lambda n: src[n.start_byte:n.end_byte].decode("utf-8", "replace"))
+                except Exception:
+                    pass
         if ext == ".ml":
             mod = _cap(os.path.basename(relpath)[:-3])
             self.ml_mod_index.setdefault((project, mod), []).append(rel_id)
@@ -2149,6 +2226,9 @@ class Indexer:
         if ext == ".sol":
             for contract, parents in _sol_parents(source).items():
                 self.sol_parents[(rel_id, contract)] = parents
+            plain = _RE_SOL_PLAIN_IMPORT.findall(_RE_SOL_COMMENT.sub(" ", source))
+            if plain:
+                self.sol_plain[rel_id] = plain
         if ext == ".dart":
             exports, parts = _RE_DART_EXPORT.findall(source), _RE_DART_PART.findall(source)
             if exports:
@@ -2550,9 +2630,9 @@ class Indexer:
         if g == "solidity":
             if raw.startswith(("./", "../")):
                 cand = os.path.join(base_dir, raw)
-            else:                       # remapping (foundry) o ruta desde la raíz (base path)
-                cand = next((dst + raw[len(pre):] for pre, dst in self.sol_remaps.get(project, [])
-                             if raw.startswith(pre)), raw)
+            else:   # remapping del foundry más cercano, o ruta desde su raíz (base path)
+                cfg, dst = self._sol_remap(project, base_dir, raw)
+                cand = os.path.join(cfg, dst if dst is not None else raw)
             return self.file_index.get((project, os.path.normpath(cand).replace("\\", "/")))
         if g in ("bash", "powershell", "sql", "perl"):
             # "./x": relativo al script (inequívoco). "cwd:x": depende del directorio de

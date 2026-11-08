@@ -961,6 +961,111 @@ class TestM15d(_M15dGraph):
     proyecto propio por test (precisión primero, como TestPrecisionM15a/b)."""
 
     @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_audit_cases(self):
+        # Hallazgos de la auditoría de M15d-1 y transversales: cada caso, sus calls (intra y
+        # xfile) exactas y, si importa, sus dependencias.
+        cases = {
+            # alias locales del mismo nombre en dos funciones: ambiguo, ni a.zig ni b.zig
+            "zig_alias": ({"src/a.zig": "pub const S = struct { pub fn init() void {} };\npub fn f() void {}\n",
+                           "src/b.zig": "pub const S = struct { pub fn init() void {} };\npub fn f() void {}\n",
+                           "src/main.zig": 'const a = @import("a.zig");\nconst b = @import("b.zig");\n'
+                                           "fn one() void { const T = a.S; T.init(); }\n"
+                                           "fn two() void { const T = b.S; T.init(); }\n"}, set(), None),
+            # Zig 0.11 `exe.addModule("dep", zap.module("dep"))`: es un paquete, no la ruta
+            # del addExecutable siguiente
+            "zig_011": ({"build.zig": 'pub fn build(b: *std.Build) void {\n'
+                                      '    const zap = b.dependency("zap", .{});\n'
+                                      '    exe.addModule("zap", zap.module("zap"));\n'
+                                      '    const t = b.addTest(.{ .root_source_file = .{ .path = "src/main.zig" } });\n}\n',
+                         "src/main.zig": 'const zap = @import("zap");\npub fn main() void { zap.go(); }\npub fn go() void {}\n'},
+                        set(), {("src/main.zig", "external:zap")}),
+            # import abierto: solo lo exportado
+            "hs_exports": ({"src/App/Util.hs": "module App.Util (render) where\nrender n = n\nlookup n = n\n",
+                            "src/App/Main.hs": "module App.Main where\nimport App.Util\nrun x = render (lookup x)\n"},
+                           {("src/App/Main.hs::run", "src/App/Util.hs::render")}, None),
+            # `:refer :all` no ve `defn-`/`^:private`; `#_`, comment, '() y case no son llamadas
+            "clj": ({"src/u.clj": "(ns u)\n(defn- format [x] x)\n(defn ^:private update [x] x)\n(defn render [x] x)\n",
+                     "src/core.clj": "(ns core (:require [u :refer :all]))\n"
+                                     "(defn save [x] x)\n(defn run [x] (format x) (update x) (render x)\n"
+                                     "  #_(save x) (comment (save x)) '(save x) (case x (save) 1 2))\n"},
+                    {("src/core.clj::run", "src/u.clj::render")}, None),
+            # builtin sin `&` es CORE (no la sub); `&push` y `main::helper` sí son subs
+            "perl": ({"lib/Sock.pm": "package Sock;\nsub split { 1 }\nsub push { 1 }\n"
+                                     "sub run { my @a; push(@a, 1); my @p = split(/,/, 'a'); &push(1); }\n1;\n",
+                      "app.pl": "sub helper { 1 }\npackage Foo;\nsub helper { 2 }\nsub go { return main::helper(); }\n"},
+                     {("lib/Sock.pm::Sock.run", "lib/Sock.pm::Sock.push"), ("app.pl::Foo.go", "app.pl::helper")}, None),
+            # herencia sin resolver (padre cualificado `B.Base`): `helper()` puede ser el
+            # heredado, así que no cae en la función libre helper de L.sol (importado simple)
+            "sol_parent": ({"B.sol": "contract Base { function helper() internal {} }\n",
+                            "L.sol": "function helper() pure {}\n",
+                            "C.sol": 'import "./B.sol" as B;\nimport "./L.sol";\n'
+                                     "contract C is B.Base {\n  function run() public { helper(); }\n}\n"},
+                           set(), None),
+            # `import {Cfg} from` no trae las funciones libres de L.sol al ámbito
+            "sol_scope": ({"L.sol": "function other() pure {}\nstruct Cfg { uint a; }\n",
+                           "C.sol": 'import {Cfg} from "./L.sol";\n'
+                                    "contract C {\n  function run() public { other(); }\n}\n"},
+                          set(), None),
+            # remappings de un foundry.toml en un subdirectorio (monorepo)
+            "sol_remap": ({"contracts/foundry.toml": 'remappings = ["@app/=src/"]\n',
+                           "contracts/src/Math.sol": "library Math { function add() internal {} }\n",
+                           "contracts/src/V.sol": 'import "@app/Math.sol";\ncontract V { function f() public { Math.add(); } }\n'},
+                          {("contracts/src/V.sol::V.f", "contracts/src/Math.sol::Math.add")},
+                          {("contracts/src/V.sol", "contracts/src/Math.sol")}),
+            # 600 `else if`: sin RecursionError, el archivo conserva símbolos y llamadas
+            "deep": ({"R.sol": "contract R {\n  function g() public {}\n  function route(uint x) public {\n"
+                               + "    if (x == 0) { g(); }\n" + "".join(f"    else if (x == {i}) {{ g(); }}\n" for i in range(1, 600))
+                               + "  }\n}\n"},
+                     {("R.sol::R.route", "R.sol::R.g")}, None),
+        }
+        for label, (files, expected, deps) in cases.items():
+            root = os.path.join(self.tmp, label)
+            for rel, src in files.items():
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                with open(os.path.join(root, rel), "w", encoding="utf-8") as f:
+                    f.write(src)
+            store = Store(os.path.join(self.tmp, f"{label}.db"))
+            Indexer(store, {"projects": [{"name": label, "root": root}]}).index_all()
+            got = {(e["source"].split("/", 1)[1], e["target"].split("/", 1)[1])
+                   for e in store.all_edges() if e["type"] == "calls" and "::" in e["source"]}
+            got_deps = {(e["source"].split("/", 1)[1], e["target"] if e["target"].startswith("external:")
+                         else e["target"].split("/", 1)[1])
+                        for e in store.all_edges() if e["type"] in ("imports", "depends_on")}
+            store.close()
+            self.assertEqual(got, expected, label)
+            if deps is not None:
+                self.assertEqual(got_deps, deps, label)
+
+    def test_doctor_portable_does_not_claim_symbols(self):
+        # Sin tree-sitter, los lenguajes sin LSP solo dan nodo archivo: doctor no puede
+        # decir "indexado (símbolos)" (auditoría, prueba de sistema).
+        from memorygraf import doctor
+        lines = []
+        report = [{"lang": "cobol", "supported": False}]
+        with unittest.mock.patch.object(doctor, "_has_parsers", return_value=False):
+            doctor._render_lsp_langs(report, log=lines.append)
+        self.assertTrue(any("solo archivo" in ln for ln in lines))
+        self.assertFalse(any("indexado (símbolos)" in ln for ln in lines))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_audit_no_junk_names_and_impact_follows_implements(self):
+        # Código a medias (nodos MISSING) no da símbolos de nombre vacío ni con blancos; e
+        # `impact` de una interface GraphQL ve a quien la implementa.
+        from memorygraf.extractors import ts_generic
+        for name, src in (("a.ml", "let f x = x\nlet"), ("s.graphql", "type A { id: ID }\ntype"),
+                          ("m.erl", "-module(m).\n(X), local(X)."), ("u.fsi", "module Validator\n\nlet chec")):
+            nodes, _e, raws, out, _b = ts_generic.extract(name, "p", src)
+            names = [n.name for n in nodes if n.type == "symbol"]
+            self.assertFalse([n for n in names if not n or any(c.isspace() for c in n) or "" in n.split(".")], name)
+            self.assertFalse([r for r in raws if any(c.isspace() for c in r)], name)
+            self.assertFalse([m for _c, m, _v in out if not m], name)
+        self.write("schema.graphql", "interface Node { id: ID! }\ntype User implements Node { id: ID! }\n")
+        store, _ = self.index()
+        report = Query(store).impact("proj/schema.graphql::Node", depth=1)
+        store.close()
+        self.assertIn("User", report)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
     def test_fixture_imports_and_calls(self):
         e, h, p = "erlang/src/billing.erl", "haskell/src/App", "perl/lib/App"
         z, s, c = "zig/src", "solidity/contracts", "clojure/src/my_app"

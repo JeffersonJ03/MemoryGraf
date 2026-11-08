@@ -448,7 +448,8 @@ class Query:
         node = self.store.get_node(node_id)
         if not node:
             return f"(nodo no encontrado: {node_id})"
-        static_types = {"calls", "imports", "depends_on", "references"}
+        # `implements` (M15d-3, GraphQL): quien implementa una interface se rompe si cambia
+        static_types = {"calls", "imports", "depends_on", "references", "implements"}
         # "impacto" = blast radius: quién DEPENDE de nid (aristas entrantes) + co-cambio.
         # Cambiar X afecta a quien lo llama/importa, no a aquello de lo que X depende.
         why: dict[str, set] = {}
