@@ -547,8 +547,10 @@ archivo). Así el sistema es agnóstico del LLM también en la generación, no s
 
 La extracción estructural dejó de ser solo Python + JS/TS. Un extractor GENÉRICO dirigido por
 config sobre tree-sitter cubre **C, C++, Java, C#, Go, Rust, PHP, R, Visual Basic, Assembly**,
-(M15a) **Ruby, Kotlin, Swift, Dart**, (M15b) **Scala, Lua, Elixir, Bash** y (M15c)
-**Terraform/HCL y PowerShell** (SQL va aparte: extractor léxico propio, ver abajo):
+(M15a) **Ruby, Kotlin, Swift, Dart**, (M15b) **Scala, Lua, Elixir, Bash**, (M15c)
+**Terraform/HCL y PowerShell** y (M15d) **Erlang, Haskell, Perl, Zig, Solidity, Clojure,
+Objective-C, OCaml, F#, Julia, Protobuf, GraphQL y COBOL** (SQL va
+aparte: extractor léxico propio, ver abajo):
 emite `symbol` (funciones, clases/tipos, métodos `Clase.m`) + aristas `defines` + `calls`
 INTRA-archivo (callee resuelto por nombre local), con extracción de nombre por-gramática
 (campo `name`; casos especiales: declarator en C/C++, `type_spec` en Go, `impl` en Rust,
@@ -583,7 +585,37 @@ stdlib válido para todos los dialectos (la gramática de tree-sitter no entiend
 `references` a tablas/vistas (procedencia `ast-ref` = EXTRACTED) y `calls` a rutinas sobre
 el espacio de nombres global del proyecto; Terraform por directorio (= módulo) y
 `module.m.out` → `output`; PowerShell por dot-sourcing relativo al script y ámbito de
-módulo. Regla transversal: una llamada con receptor no resoluble
+módulo. **M15d:** Erlang por módulo = nombre de archivo (`mod:f`, `-import`, `-include` y
+`-include_lib`); Haskell por el header `module` (`import qualified … as X`, listas
+explícitas, imports abiertos con `hiding`; los nombres ligados localmente tapan a los
+importados); Perl por `package` (`A::B::f`, `A::B->m`, `use A::B qw(f)`, `require "x.pl"`);
+Zig por `@import` relativo o los módulos de build.zig (solo literales; `b.dependency` es
+externo); Solidity por imports relativos/remappings con scope transitivo, alias de import y
+herencia `is A, B` (gana el ancestro que tapa a los demás; dos ramas = sin arista); Clojure
+por `(ns …)` como Haskell (`u/f`, `:refer`, `:use`), prefiriendo la misma plataforma
+(`.clj`/`.cljs` + `.cljc`); Objective-C por selector completo (`Foo.greet:with:`), `[Foo m]`
+si Foo está declarada en lo importado (transitivo), `[self m]` a la propia clase y la regla de
+C para funciones, con el mapa de headers de Xcode (`#import "Foo.h"` por nombre, si es único)
+y `<Fw/X.h>` del framework propio. **M15d-2** resuelve por nombre completo (prefijo de
+módulo del archivo + símbolo): OCaml con módulo = archivo (y `Lib.Util` si dune envuelve la
+librería; gana la librería propia), alias `module M = A.B` y `open`; F# con su `namespace`/
+`module A.B` de cabecera, los `open` y solo los archivos que el `.fsproj` compila antes (nunca
+el `.fsi`); Julia con el módulo heredado por `include` (inclusión textual), `using .A`/`..A` y
+`import A: f`, contando los métodos de una función como una sola. Los nombres ligados
+localmente tapan a lo importado. **M15d-3** (contratos): Protobuf y GraphQL dan
+`references` (y `implements` en GraphQL) con procedencia `ast-ref` (EXTRACTED): un campo, un
+argumento o un `rpc` apuntan al tipo que usan. Protobuf busca como protoc (del mensaje más
+interno hacia fuera, luego el paquete; `.a.B` absoluto) en el archivo y lo que importa
+(raíces de `buf.yaml`); GraphQL trata el esquema como global y solo enlaza nombres únicos,
+sin enlazar operaciones de cliente. **M15d-4** (COBOL): la gramática solo entiende formato
+fijo y falla con `EXEC CICS`, `COPY ... REPLACING` en la PROCEDURE DIVISION y `NOT=`, así que
+la fuente se normaliza antes de parsear SIN mover líneas (bloques EXEC y esos COPY fuera,
+formato libre a fijo); si aun así hay ERROR, una red léxica recupera los párrafos del área A.
+`PERFORM`/`GO TO` enlazan dentro del programa, `CALL 'X'` y `EXEC CICS LINK/XCTL` (solo
+literales) con el `PROGRAM-ID`, `COPY` con el copybook y `EXEC SQL` con el DDL vía
+`sql_lex`. Las cláusulas/ecuaciones/sobrecargas de un nombre son un
+solo símbolo, y la extensión no basta en tres casos: `.pl` de Prolog y `.m` de MATLAB quedan
+como nodo `file`, y un `.h` es Objective-C solo con directivas propias fuera de comentarios. Regla transversal: una llamada con receptor no resoluble
 (`a.b().m()`) nunca se trata como llamada libre. Encima, una **capa LLM
 opcional y opt-in** (`resolver.llm` / `MEMORYGRAF_XLINK_LLM`) desempata los casos ambiguos que el
 resolutor estático deja sin enlazar (confidence baja + provenance `llm`, fallback determinista).
@@ -645,7 +677,9 @@ diffs y blobs leídos en lote (`git show` multi-commit + `git cat-file --batch`)
   degradación; espejo "en vivo" del instalador.
 - **Indexado multi-lenguaje (§18.7):** Python + JS/TS y C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly
   + (M15a) Ruby/Kotlin/Swift/Dart + (M15b) Scala/Lua/Elixir/Bash + (M15c) SQL/Terraform/
-  PowerShell (símbolos + `defines` + `calls` intra); `calls`/`imports`/`references`
-  **cross-file** en los 21 lenguajes genéricos donde aplica (M9/M15), + capa LLM opcional
+  PowerShell + (M15d) Erlang/Haskell/Perl/Zig/Solidity/Clojure/Objective-C/OCaml/F#/Julia/
+  Protobuf/GraphQL/COBOL (símbolos + `defines` + `calls` intra); `calls`/`imports`/
+  `references` **cross-file** en los 34 lenguajes genéricos donde
+  aplica (M9/M15), + capa LLM opcional
   de desambiguación.
 - **Suite:** 155 tests (`python -m unittest discover -s tests`), sin dependencias.

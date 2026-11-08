@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from .model import (
     Node, Edge, content_hash, NODE_EXTERNAL, NODE_FILE, EDGE_IMPORTS, EDGE_DEPENDS_ON,
-    EDGE_CALLS, EDGE_REFERENCES,
+    EDGE_CALLS, EDGE_REFERENCES, EDGE_IMPLEMENTS,
 )
 from .store import Store
 from .extractors import python_ast, js_ts, ts_treesitter, ts_generic, sql_lex
@@ -24,11 +24,17 @@ from .extractors import python_ast, js_ts, ts_treesitter, ts_generic, sql_lex
 # Python (ast) y JS/TS (tree-sitter, con calls/imports) tienen extractor propio.
 _TS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
 # El resto (C/C++/Java/C#/Go/Rust/PHP/R/VB/Assembly/Ruby/Kotlin/Swift/Dart/Scala/Lua/
-# Elixir/Bash/Terraform/PowerShell) usa el extractor genérico (símbolos + defines) cuando
+# Elixir/Bash/Terraform/PowerShell/Erlang/Haskell/Perl/Zig/Solidity/Clojure/ObjC/OCaml/
+# F#/Julia/Protobuf/GraphQL/COBOL) usa el extractor genérico (símbolos + defines) cuando
 # tree-sitter está. SQL va por `sql_lex` (léxico, sin tree-sitter).
 _GENERIC_EXTS = {"." + e for e in ts_generic._GRAMMAR_BY_EXT}
 # SQL (M15c): extractor LÉXICO propio (stdlib, todos los dialectos, incluido PL/SQL)
 _SQL_EXTS = {"." + e for e in sql_lex.EXTS}
+# Extensiones que trae M15d: resuelven por ruta exacta o por sus propios índices, nunca por
+# path_index (stem sin extensión), que comparten JS/TS, Rust, PHP, Java y C
+_M15D_EXTS = ({"." + e for e, g in ts_generic._GRAMMAR_BY_EXT.items()
+               if g in ts_generic._M15D or g in ts_generic._CONTRACTS or g == "cobol"}
+              | {".ddl"})
 EXT_LANG = ({".py": "py", ".ts": "ts", ".tsx": "tsx", ".js": "js", ".jsx": "jsx"}
             | {e: ts_generic._GRAMMAR_BY_EXT[e[1:]] for e in _GENERIC_EXTS}
             | {e: "sql" for e in _SQL_EXTS})
@@ -305,6 +311,33 @@ _RE_KT_EXPECT = re.compile(
 _RE_TF_MODULE = re.compile(r'''\bmodule\s+"([\w-]+)"\s*\{[^{}]*?\bsource\s*=\s*"([^"]+)"''', re.S)
 _RE_DART_EXPORT = re.compile(r'''^\s*export\s+['"]([^'"]+)['"]''', re.MULTILINE)
 _RE_DART_PART = re.compile(r'''^\s*part\s+['"]([^'"]+)['"]''', re.MULTILINE)
+# M15d. Haskell: el módulo lo da el header (`module A.B where`), no la ruta; sin header
+# es `Main`. Solidity: la cadena `contract C is A, B(x) {`, sin comentarios.
+_RE_HS_MODULE = re.compile(r"^module\s+([A-Z][\w']*(?:\.[A-Z][\w']*)*)", re.MULTILINE)
+# Clojure: `(ns a.b ...)`, con metadatos opcionales (`(ns ^:no-doc a.b)`)
+_RE_CLJ_NS = re.compile(r"^\(ns\s+(?:\^(?:\{[^}]*\}|[^\s]+)\s+)*([^\s()\[\]{}^;]+)", re.MULTILINE)
+# Plataformas que puede ver cada extensión de Clojure (un ns puede existir en ambas)
+_CLJ_PLATFORM = {".clj": (".clj", ".cljc"), ".cljs": (".cljs", ".cljc"),
+                 ".cljc": (".clj", ".cljs", ".cljc")}
+_RE_SOL_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+_RE_SOL_PLAIN_IMPORT = re.compile(r'''^\s*import\s+["']([^"']+)["']\s*;''', re.MULTILINE)
+_RE_SOL_IS = re.compile(r"\b(?:contract|interface)\s+(\w+)\s+is\s+([^{;]+)\{")
+# Raíces jerárquicas de la base de Haskell: compartirlas no hace interno un import
+_HS_STD_ROOTS = {"Data", "Control", "System", "Text", "Foreign", "GHC", "Numeric",
+                 "Prelude", "Debug", "Test", "Network", "Unsafe"}
+
+
+def _sol_parents(source: str) -> dict:
+    """{contrato: [padres]} de `contract C is A, B(args)`. Los argumentos de constructor
+    se descartan; un padre cualificado (`U.Base`) se conserva tal cual: no se resuelve,
+    pero dice que la herencia del contrato es incompleta."""
+    out = {}
+    for name, parents in _RE_SOL_IS.findall(_RE_SOL_COMMENT.sub(" ", source)):
+        prev = None
+        while prev != parents:                       # quita (args) anidados
+            prev, parents = parents, re.sub(r"\([^()]*\)", "", parents)
+        out[name] = [p.strip() for p in parents.split(",") if re.fullmatch(r"\s*[\w.]+\s*", p)]
+    return out
 
 
 def _kmp_source_set(relpath: str):
@@ -440,6 +473,188 @@ def _xcode_membership(text: str):
                     members.setdefault(path, set()).add(name)
     files = {p: (next(iter(ts)) if len(ts) == 1 else "") for p, ts in members.items()}
     return folders, files
+
+
+_RE_ZIG_ROOT = re.compile(
+    r'''\.root_source_file\s*=\s*(?:b\.path\(\s*"([^"]+)"\s*\)|\.\{\s*\.path\s*=\s*"([^"]+)"\s*\})''')
+_RE_ZIG_VAR_MOD = re.compile(r'''(?:const|var)\s+(\w+)\s*=\s*b\.(?:createModule|addModule)\(''')
+# `addModule("m", .{...})` declara un módulo con ruta; `exe.addModule("m", x)` (Zig 0.11) y
+# `addImport("m", x)` lo cablean a una expresión
+_RE_ZIG_ADD_MOD = re.compile(r'''\baddModule\(\s*"([^"]+)"\s*,\s*\.\{''')
+_RE_ZIG_IMPORT = re.compile(
+    r'''\b(?:addImport|addModule)\(\s*"([^"]+)"\s*,\s*([A-Za-z_][\w.]*)|\.name\s*=\s*"([^"]+)"\s*,\s*\.module\s*=\s*([\w.]+)''')
+_RE_ZIG_DEP_VAR = re.compile(r'''(?:const|var)\s+(\w+)\s*=\s*b\.(?:lazyDependency|dependency)\(''')
+
+
+def _load_zig_modules(root: str, excludes: set) -> dict:
+    """{nombre: {ruta}} de los módulos que declaran los build.zig del proyecto (M15d),
+    con lectura estática y SOLO literales: `b.addModule("m", .{ .root_source_file =
+    b.path("src/m.zig") })`, o `const x = b.createModule(.{ ... })` + `addImport("m", x)`
+    / `.imports = &.{ .{ .name = "m", .module = x } }`. La ruta es relativa al build.zig.
+    Un nombre con dos rutas queda ambiguo (el indexer no lo enlaza). Un nombre cuyo módulo
+    no viene de `b.dependency(...)` (opciones de `addOptions`, código generado) es propio
+    aunque no tenga ruta: sin arista, pero nunca `external:`."""
+    out: dict = {}
+    skip = excludes | {"zig-cache", ".zig-cache", "zig-out"}
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in skip and not d.startswith("."))
+        if "build.zig" not in files:
+            continue
+        try:
+            with open(os.path.join(dirpath, "build.zig"), "r", encoding="utf-8",
+                      errors="replace") as f:
+                src = f.read()
+        except OSError:
+            continue
+        rel = os.path.relpath(dirpath, root).replace("\\", "/")
+        base = "" if rel == "." else rel
+
+        def path_after(pos):
+            depth, end = 1, pos                              # fin de la llamada: el `)` que
+            while end < len(src) and depth:                  # cierra el `(` (paréntesis
+                depth += {"(": 1, ")": -1}.get(src[end], 0)  # balanceados)
+                end += 1
+            m = _RE_ZIG_ROOT.search(src[pos:end])
+            p = (m.group(1) or m.group(2)) if m else None
+            return os.path.normpath(os.path.join(base, p)).replace("\\", "/") if p else None
+
+        # Un módulo declarado con una ruta NO literal también se registra (sin ruta): es
+        # código propio, así que su `@import` queda sin arista y nunca como `external:`.
+        by_var = {m.group(1): path_after(m.end()) for m in _RE_ZIG_VAR_MOD.finditer(src)}
+        deps = set(_RE_ZIG_DEP_VAR.findall(src))
+        for m in _RE_ZIG_ADD_MOD.finditer(src):
+            p = path_after(m.end())
+            out.setdefault(m.group(1), set()).update([p] if p else [])
+        for m in _RE_ZIG_IMPORT.finditer(src):
+            name, expr = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+            if expr.split(".")[0] in deps:
+                continue                                 # paquete de build.zig.zon: externo
+            p = by_var.get(expr)
+            out.setdefault(name, set()).update([p] if p else [])
+    return out
+
+
+def _load_sol_remappings(root: str, excludes: set) -> list:
+    """[(dir, [(prefijo, destino)])] de cada `remappings.txt` / `remappings = [...]` de
+    foundry.toml del árbol (un monorepo puede tener el proyecto Foundry en `contracts/`),
+    del directorio más profundo al menos, y en cada uno del prefijo más largo al más corto.
+    Los destinos son relativos a ese directorio. El contexto (`ctx:a=b`) se ignora."""
+    lines: dict = {}
+    for d, path in _walk_named(root, excludes, lambda f: f in ("remappings.txt", "foundry.toml")):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if path.endswith("remappings.txt"):
+            lines.setdefault(d, []).extend(text.splitlines())
+        else:
+            m = re.search(r'^\s*remappings\s*=\s*\[(.*?)\]', text, re.S | re.M)
+            lines.setdefault(d, []).extend(re.findall(r'''["']([^"']+)["']''', m.group(1)) if m else [])
+    out = []
+    for d, ls in lines.items():
+        maps: dict = {}
+        for line in ls:
+            line = line.strip()
+            if "=" not in line or line.startswith("#"):
+                continue
+            pre, dst = line.split("=", 1)
+            maps.setdefault(pre.split(":", 1)[-1].strip(), dst.strip())
+        out.append((d, sorted(maps.items(), key=lambda kv: -len(kv[0]))))
+    return sorted(out, key=lambda dm: -dm[0].count("/") - bool(dm[0]))
+
+
+_RE_DUNE_STANZA = re.compile(r"\((library|executables?|tests?)\b")
+_RE_DUNE_NAME = re.compile(r"\(name\s+([A-Za-z_][\w]*)\)")
+_RE_FSPROJ_COMPILE = re.compile(r'<Compile\s+Include\s*=\s*"([^"]+)"')
+_RE_FS_NAMESPACE = re.compile(r"^\s*namespace\s+(?:rec\s+)?(?:global\.)?([A-Za-z_][\w.]*)", re.MULTILINE)
+_RE_FS_TOPMODULE = re.compile(r"^module\s+(?:rec\s+)?([A-Za-z_][\w.]*)\s*$", re.MULTILINE)
+
+
+def _walk_named(root: str, excludes: set, match) -> list:
+    """[(dir_relativo, ruta_absoluta)] de los archivos cuyo nombre cumple `match`."""
+    out = []
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in excludes and not d.startswith("."))
+        rel = os.path.relpath(dirpath, root).replace("\\", "/")
+        for f in sorted(files):
+            if match(f):
+                out.append(("" if rel == "." else rel, os.path.join(dirpath, f)))
+    return out
+
+
+def _load_dune_libraries(root: str, excludes: set) -> dict:
+    """{dir: nombre} de las `(library (name x))` de dune (M15d-2): sus módulos se ven desde
+    fuera envueltos como `X.Util`. Con `(wrapped false)` no hay envoltorio."""
+    out = {}
+    for d, path in _walk_named(root, excludes | {"_build", "_opam"}, lambda f: f == "dune"):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                src = f.read()
+        except OSError:
+            continue
+        starts = [(m.start(), m.group(1)) for m in _RE_DUNE_STANZA.finditer(src)]
+        for i, (pos, kind) in enumerate(starts):
+            stanza = src[pos:starts[i + 1][0] if i + 1 < len(starts) else None]
+            m = _RE_DUNE_NAME.search(stanza)
+            if kind == "library" and m and "(wrapped false)" not in stanza:
+                out[d] = m.group(1)
+    return out
+
+
+def _load_fsproj_order(root: str, excludes: set) -> dict:
+    """{relpath: (fsproj, índice)}: el orden de compilación de cada .fsproj (M15d-2). En F#
+    un archivo solo ve lo que se compila ANTES que él."""
+    out = {}
+    for d, path in _walk_named(root, excludes | {"bin", "obj"}, lambda f: f.endswith(".fsproj")):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                src = f.read()
+        except OSError:
+            continue
+        proj = os.path.relpath(path, root).replace("\\", "/")
+        for i, inc in enumerate(_RE_FSPROJ_COMPILE.findall(src)):
+            rel = os.path.normpath(os.path.join(d, inc.replace("\\", "/"))).replace("\\", "/")
+            out.setdefault(rel, (proj, i))
+    return out
+
+
+def _cap(name: str) -> str:
+    """`myModule` -> `MyModule`: OCaml y F# solo suben la PRIMERA letra (str.capitalize()
+    bajaría el resto)."""
+    return name[:1].upper() + name[1:]
+
+
+def _fs_namespace(source: str):
+    """Prefijo de nombre completo de un archivo F#: su `namespace`, o la parte de fuera de
+    su `module A.B.C` de cabecera (`A.B`; `C` ya es el contenedor de sus símbolos)."""
+    ns = _RE_FS_NAMESPACE.findall(source)
+    if len(set(ns)) > 1:
+        return None                     # varios namespace: el prefijo no es del archivo
+    if ns:
+        return ns[0]
+    m = _RE_FS_TOPMODULE.search(source)
+    return m.group(1).rsplit(".", 1)[0] if m and "." in m.group(1) else ""
+
+
+_RE_PROTO_PKG = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
+_RE_BUF_ITEM = re.compile(r"^\s*-\s*(?:path:\s*)?['\"]?([\w./-]+)['\"]?\s*$", re.MULTILINE)
+
+
+def _load_proto_roots(root: str) -> list:
+    """Raíces de import de Protobuf (M15d-3): los directorios de buf.yaml (`roots:` v1,
+    `modules: - path:` v2) y de buf.work.yaml (`directories:`) que existen en el repo."""
+    out = []
+    for name in ("buf.yaml", "buf.work.yaml"):
+        try:
+            with open(os.path.join(root, name), "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        for item in _RE_BUF_ITEM.findall(text):
+            if os.path.isdir(os.path.join(root, item)) and item.strip("./"):
+                out.append(item.strip("/"))
+    return list(dict.fromkeys(out))
 
 
 def _load_xcode_targets(root: str, excludes: set) -> list:
@@ -631,8 +846,62 @@ class Indexer:
         self.tf_dir_index = {}     # (project, dir) -> [file_id .tf]
         self.tf_module_src = {}    # (project, dir, módulo) -> `source` del bloque module
         self._sql_objects = None   # project -> {nombre_minúsculas: [(file, sid, kind)]}
+        # M15d: módulos de Erlang (= archivo) y Haskell (header), paquetes de Perl (de los
+        # símbolos), módulos de build.zig, remappings y herencia de Solidity
+        self.roots = {p["name"]: p["root"] for p in config["projects"]}
+        self.erl_mod_index = {}    # (project, módulo) -> [file_id .erl]
+        self.hs_mod_index = {}     # (project, módulo) -> [file_id .hs]
+        self.hs_exports = {}       # file_id -> (nombres, tipos con (..)) | None (todo)
+        self._clj_private = None   # {sid de defn- / ^:private}  (perezoso)
+        self.zig_modules = {}      # project -> {nombre: {ruta}}
+        self.sol_remaps = {}       # project -> [(dir, [(prefijo, destino)])]
+        self.sol_plain = {}        # file_id -> [rutas de `import "x";` sin alias ni lista]
+        self.sol_parents = {}      # (file_id, contrato) -> [padres]
+        self._sol_scopes = {}      # (file_id, sufijo) -> [file_id visibles]  (perezoso)
+        self._perl_pkgs = None     # (project, paquete) -> [file_id]  (perezoso)
+        self._basenames = None     # (project, nombre_archivo) -> [relpath]  (perezoso)
+        self._segments = None      # project -> {nombres de directorio}  (perezoso)
+        self.clj_ns_index = {}     # (project, ns) -> [file_id .clj/.cljs/.cljc]
+        self._objc_classes = None  # (project, clase) -> [file_id]  (perezoso)
+        self.ext_override = {}     # file_id -> ext efectiva (`.h` con Objective-C -> `.m`)
+        # M15d-2: OCaml (módulo = archivo, librerías de dune), F# (namespace + orden del
+        # .fsproj) y Julia (módulo heredado por `include`)
+        self.ml_mod_index = {}     # (project, Módulo o Lib.Módulo) -> [file_id .ml]
+        self.dune_libs = {}        # project -> {dir: librería}
+        self.fs_order = {}         # project -> {relpath: (fsproj, índice)}
+        self.fs_ns = {}            # file_id -> prefijo de nombre completo
+        self.fs_heads = {}         # project -> {primeros tramos de namespaces/módulos propios}
+        self.jl_includes = {}      # file_id -> [(contexto, ruta)]
+        self.jl_exports = {}       # file_id -> [(contexto, {nombres exportados})]
+        self._jl_parent = None     # file_id incluido -> (quien lo incluye, contexto)  (perezoso)
+        self._jl_mods = None       # file_id -> {módulos definidos en él}  (perezoso)
+        self._jl_export_index = None   # (project, módulo completo) -> {nombres}  (perezoso)
+        self._fullnames = None     # (project, lenguaje, nombre_completo) -> [(file, sid)]
+        self._ml_nested = None     # project -> {nombres de módulos anidados de OCaml}
+        # M15d-3: Protobuf (paquete + raíces de buf) y GraphQL (esquema global)
+        self.proto_pkg = {}        # file_id -> paquete
+        self.proto_roots = {}      # project -> [raíces de import]
+        self._contracts = None     # (project, lenguaje, nombre_completo) -> [(file, sid)]
+        # M15d-4: COBOL (copybooks por nombre, programas por PROGRAM-ID)
+        self.cobol_stems = {}      # (project, NOMBRE) -> [file_id .cbl/.cob/.cobol/.cpy]
+        self._cobol_pgms = None    # (project, PROGRAMA) -> [(file, sid)]  (perezoso)
         for proj in config["projects"]:
             name, root = proj["name"], proj["root"]
+            zig = _load_zig_modules(root, self.excludes)
+            if zig:
+                self.zig_modules[name] = zig
+            remaps = _load_sol_remappings(root, self.excludes)
+            if remaps:
+                self.sol_remaps[name] = remaps
+            dune = _load_dune_libraries(root, self.excludes)
+            if dune:
+                self.dune_libs[name] = dune
+            proots = _load_proto_roots(root)
+            if proots:
+                self.proto_roots[name] = proots
+            order = _load_fsproj_order(root, self.excludes)
+            if order:
+                self.fs_order[name] = order
             al = _load_ts_aliases(root)
             if al:
                 self.js_aliases[name] = al
@@ -686,6 +955,8 @@ class Indexer:
                 nodes, edges, raw_imports, calls_out, bindings = self._extract(
                     rel_id, name, source, abspath)
                 ext = os.path.splitext(abspath)[1].lower()
+                if ext == ".h" and nodes and nodes[0].tags[:1] == ["objc"]:
+                    ext = self.ext_override[rel_id] = ".m"   # header de Objective-C
                 self.pending_calls.append(
                     (rel_id, name, ext, os.path.dirname(relpath), calls_out, bindings))
                 now = _now()
@@ -794,6 +1065,27 @@ class Indexer:
                     # `Alias.f` -> módulo completo vía `alias`; `f` libre -> los `import`.
                     count += self._link_pairs(caller, callee_name, self._ex_call_pairs(
                         project, via, callee_name, bindings, name_index, caller))
+                    continue
+                if generic and EXT_LANG.get(ext) == "cobol":
+                    # M15d-4: CALL/LINK/XCTL -> el programa; EXEC SQL -> el DDL (como SQL)
+                    if via in ("ref", "call"):
+                        count += self._link_sql(caller, callee_name, via, project)
+                    else:
+                        count += self._link_pairs(caller, callee_name, [
+                            p for p in self._cobol_programs(project, callee_name) if p[1] != caller])
+                    continue
+                if generic and EXT_LANG.get(ext) in ts_generic._CONTRACTS:
+                    # M15d-3: `references` (e `implements`) de un contrato, ver _contract_pairs
+                    etype = EDGE_IMPLEMENTS if via == "impl" else EDGE_REFERENCES
+                    count += self._link_pairs(caller, callee_name, self._contract_pairs(
+                        EXT_LANG[ext], project, file_id_, caller, callee_name, via),
+                        etype=etype, prov="ast-ref")
+                    continue
+                if generic and EXT_LANG.get(ext) in ts_generic._M15D:
+                    # M15d (Erlang/Haskell/Perl/Zig/Solidity): ver _m15d_pairs
+                    count += self._link_pairs(caller, callee_name, self._m15d_pairs(
+                        EXT_LANG[ext], project, file_id_, base_dir, caller, callee_name,
+                        via, bindings, name_index, short_index, short_all))
                     continue
                 if generic and EXT_LANG.get(ext) in ts_generic._SCOPED:
                     # M15a (Ruby/Swift/Dart): `Tipo.m` o `m` libre -> el símbolo con ese
@@ -1030,6 +1322,507 @@ class Indexer:
                 if (f, f"{m}.{callee}") in name_index
                 and name_index[(f, f"{m}.{callee}")] != caller]
 
+    def _m15d_pairs(self, g, project, file_id_, base_dir, caller, callee, via, bindings,
+                    name_index, short_index, short_all):
+        """Candidatos `(file_id, sym_id)` de una llamada cross-file M15d:
+          erlang:   `mod:f` (o `f` de un `-import`) -> `f` en `mod.erl`, si el módulo es
+                    único (el nombre de módulo es global en la VM y es el del archivo).
+          haskell:  `X.f` -> los módulos importados `as X` (o con ese nombre); `f` -> el de
+                    la lista explícita `import M (f)` o el de los imports abiertos.
+          perl:     `A::B::f` / `A::B->f` -> `sub f` del paquete; `f` -> el `use A::B
+                    qw(f)` explícito o, si no, una sub de `main` de lo que se `require`.
+          zig:      `u.f` / `S.m` / alias -> el archivo del `@import` ligado.
+          solidity: `U.f` / `B.f` -> el import con alias; `Lib.f` -> el contrato visible
+                    (imports transitivos); `f` -> la cadena `is A, B` y luego las funciones
+                    libres visibles.
+          clojure:  como Haskell (`u/f`, `:refer`, `:refer :all`), con el ns de la misma
+                    plataforma (`.clj`/`.cljs` + `.cljc`).
+          objc:     `[Foo sel]` -> `Foo.sel` en cualquier `@implementation` (o categoría) de
+                    Foo, si Foo está declarada en lo que el archivo importa (transitivo:
+                    `#import` es textual); función C -> la regla de C (stem del include)."""
+        def at(files, qual):
+            return [(f, name_index[(f, qual)]) for f in files
+                    if (f, qual) in name_index and name_index[(f, qual)] != caller]
+
+        if g == "erlang":
+            mod = via or bindings[callee][0][4:]          # "mod:util" -> util
+            return at(self._erl_module_files(project, mod), callee)
+        if g in ("haskell", "clojure"):
+            if via:
+                mods = [m for k, (m, _x) in bindings.items() if k.startswith(f"q:{via}:")]
+            else:
+                mods = [m for k, (m, _x) in bindings.items() if k.startswith(f"n:{callee}:")]
+                mods += [m for k, (m, hidden) in bindings.items() if k.startswith("open:")
+                         and callee not in (hidden or "").split(",")]
+            ext = os.path.splitext(file_id_)[1].lower()
+            return [(f, sid) for m in dict.fromkeys(mods)
+                    for f in (self._hs_module_files(project, m) if g == "haskell"
+                              else self._clj_ns_files(project, m, ext))
+                    for sid in short_index.get((f, callee), [])
+                    if sid != caller and self._exported(g, f, sid)]
+        if g == "ocaml":
+            return self._ml_pairs(project, file_id_, caller, callee, via, bindings, at, name_index)
+        if g == "fsharp":
+            return self._fs_pairs(project, file_id_, caller, callee, via, bindings, name_index)
+        if g == "julia":
+            return self._jl_pairs(project, file_id_, caller, callee, via, bindings)
+        if g == "objc":
+            if via is None:
+                return [(sid.split("::", 1)[0], sid) for sid in
+                        self._c_call_candidates(file_id_, callee, short_all, caller)]
+            visible = self._import_closure(file_id_, None)
+            if not any((f, via) in name_index for f in visible):
+                return []                             # la clase no se ve desde aquí
+            return at(self._objc_class_files(project, via), f"{via}.{callee}")
+        if g == "perl":
+            pkg = via or (bindings[callee][0] if callee in bindings else None)
+            if pkg:
+                return at(self._perl_package_files(project, pkg), f"{pkg}.{callee}")
+            if pkg == "":
+                return []                                 # dos `use` exportan el nombre
+            return at([e["target"] for e in self.store.neighbors(
+                file_id_, edge_types=[EDGE_IMPORTS], direction="out")], callee)
+        if g == "zig":
+            raw, member = bindings[via or callee]
+            f = self._resolve_generic(project, ".zig", base_dir, raw)
+            qual = (f"{member}.{callee}" if member else callee) if via else (member or callee)
+            return at([f], qual) if f else []
+        if g == "solidity":
+            if via and via in bindings:
+                raw, real = bindings[via]
+                f = self._resolve_generic(project, ".sol", base_dir, raw)
+                if not f:
+                    return []
+                if real is None:
+                    return at([f], callee)                # `U.f`: función libre de U
+                return at(self._sol_scope(project, f), f"{real}.{callee}")
+            scope = self._sol_scope(project, file_id_)
+            if via:
+                return at(scope, f"{via}.{callee}")
+            inherited, incomplete = self._sol_inherited(project, file_id_, caller, callee,
+                                                        name_index, scope)
+            if inherited or incomplete:
+                return inherited    # un padre sin resolver podría definirla: no se adivina
+            return at(self._sol_free_scope(project, file_id_), callee)
+        return []
+
+    # --- M15d-2: OCaml ------------------------------------------------------------
+    def _ml_module_files(self, project, module, from_file):
+        """Archivo `.ml` del módulo `module` (`Util` o `Lib.Util`). Nunca el propio archivo (en
+        list.ml, `List` es el de la stdlib). El nombre suelto de un módulo de una librería
+        envuelta de dune solo se ve DENTRO de esa librería (fuera, `List` es Stdlib). Si
+        quedan varios, gana el de la misma librería (directorio); si no, ninguno."""
+        here = os.path.dirname(from_file[len(project) + 1:])
+        files = [f for f in self.ml_mod_index.get((project, module), []) if f != from_file]
+        if "." not in module:
+            wrapped = self.dune_libs.get(project, {})
+            files = [f for f in files if (d := os.path.dirname(f[len(project) + 1:])) not in wrapped
+                     or d == here]
+        if len(files) > 1:
+            files = [f for f in files if os.path.dirname(f[len(project) + 1:]) == here]
+        return self._unique(files)
+
+    def _ml_locate(self, project, from_file, path):
+        """(archivo, [submódulos]) de una ruta de módulo: el prefijo más largo que es un
+        archivo (`Util.Sub` -> util.ml + ["Sub"]); (None, []) si no hay o es ambiguo."""
+        parts = path.split(".")
+        for i in range(len(parts), 0, -1):
+            files = self._ml_module_files(project, ".".join(parts[:i]), from_file) or \
+                self.ml_mod_index.get((project, ".".join(parts[:i])), [])
+            if files:
+                hit = self._ml_module_files(project, ".".join(parts[:i]), from_file)
+                return (hit[0], parts[i:]) if hit else (None, [])
+        return None, []
+
+    def _ml_pairs(self, project, file_id_, caller, callee, via, bindings, at, name_index):
+        """OCaml: `M.f` -> `f` en el archivo del módulo M (alias `module M = A.B` expandido;
+        tras `open Lib`, `Util.f` también puede ser `Lib.Util.f`); `f` libre -> los módulos
+        abiertos con `open`/`include`."""
+        def expand(path):
+            head, _, rest = path.partition(".")
+            alias = bindings.get(f"alias:{head}")
+            return (alias[0] + ("." + rest if rest else "")) if alias else path
+        opens = [expand(k[5:]) for k in bindings if k.startswith("open:")]
+        paths = ([expand(via)] + [f"{o}.{expand(via)}" for o in opens]) if via else opens
+        pairs = []
+        for p in paths:
+            f, inner = self._ml_locate(project, file_id_, p)
+            qual = ".".join(inner + [callee])
+            mli = self.file_index.get((project, f[len(project) + 1:-3] + ".mli")) if f else None
+            if f and (mli is None or (mli, qual) in name_index):
+                pairs += at([f], qual)                 # lo que el .mli oculta no se ve
+        return pairs
+
+    def _ml_nested_modules(self, project):
+        """Nombres de los módulos anidados de OCaml del proyecto (`module Sub = struct`)."""
+        if self._ml_nested is None:
+            self._ml_nested = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                if (n.get("tags") or [])[:2] in (["ocaml", "class"], ["ocaml_interface", "class"]):
+                    self._ml_nested.setdefault(n.get("project"), set()).add(n["name"].split(".")[-1])
+        return self._ml_nested.get(project, set())
+
+    # --- M15d-2: F# ---------------------------------------------------------------
+    def _fs_visible(self, project, file_id_):
+        """Archivos que un archivo F# puede ver: los que su .fsproj compila ANTES (un
+        script `.fsx`: los que carga con `#load`). Sin .fsproj, ninguno."""
+        order = self.fs_order.get(project, {})
+        rel = file_id_[len(project) + 1:]
+        if rel in order:
+            proj, idx = order[rel]
+            return [f"{project}/{r}" for r, (p, i) in order.items() if p == proj and i < idx]
+        if file_id_.endswith(".fsx"):
+            return [e["target"] for e in self.store.neighbors(
+                file_id_, edge_types=[EDGE_IMPORTS], direction="out")]
+        return []
+
+    def _fs_pairs(self, project, file_id_, caller, callee, via, bindings, name_index):
+        """F#: el nombre completo (`App.Util.Validator.check`) que la llamada puede querer
+        decir desde el namespace propio, sus padres y los `open` (también relativos al
+        namespace), buscado en los archivos visibles por el orden de compilación."""
+        if via:
+            head, _, rest = via.partition(".")
+            alias = bindings.get(f"alias:{head}")
+            via = (alias[0] + ("." + rest if rest else "")) if alias else via
+        ns = self.fs_ns.get(file_id_) or ""
+        parts = ns.split(".") if ns else []
+        bases = [".".join(parts[:i]) for i in range(len(parts), -1, -1)]
+        opens = [k[5:] for k in bindings if k.startswith("open:")]
+        scopes = bases + [f"{b}.{o}" if b else o for o in opens for b in bases]
+        tail = f"{via}.{callee}" if via else callee
+        fulls = {f"{s}.{tail}" if s else tail for s in scopes}
+        pairs = []
+        for g in self._fs_visible(project, file_id_):
+            if g.endswith(".fsi"):
+                continue                               # la firma: se enlaza la implementación
+            gns = self.fs_ns.get(g, "")
+            if gns is None:
+                continue                               # varios namespace: no se adivina
+            for full in fulls:
+                q = full[len(gns) + 1:] if gns and full.startswith(gns + ".") else (None if gns else full)
+                if q and (g, q) in name_index and name_index[(g, q)] != caller:
+                    pairs.append((g, name_index[(g, q)]))
+        return pairs
+
+    # --- M15d-2: Julia -----------------------------------------------------------
+    def _jl_parents(self):
+        """{archivo incluido: (quien lo incluye, contexto de módulo del include)}."""
+        if self._jl_parent is None:
+            parent = {}
+            for f, incs in self.jl_includes.items():
+                proj = f.split("/", 1)[0]
+                fdir = os.path.dirname(f[len(proj) + 1:])
+                for ctx, p in incs:
+                    g = self.file_index.get((proj, os.path.normpath(os.path.join(fdir, p)).replace("\\", "/")))
+                    if g and g != f:
+                        parent.setdefault(g, (f, ctx))
+            self._jl_parent = parent
+        return self._jl_parent
+
+    def _jl_scope(self, f, ctx, seen=frozenset()):
+        """Nombre completo del módulo del código de `f` escrito en el contexto `ctx` (`""`,
+        `App`, `App.Sub`). `include` es textual: un archivo incluido hereda el ámbito del
+        punto de inclusión. En un archivo que nadie incluye (un script), un módulo es global
+        pero su código de primer nivel es SOLO de ese script (`@<archivo>`): dos scripts no
+        comparten nombres. Un ciclo de `include` se corta como si fuera raíz."""
+        parent = self._jl_parents()
+        if f in parent and f not in seen:
+            inc, c = parent[f]
+            base = self._jl_scope(inc, c, seen | {f})
+        else:
+            base = "" if ctx else "@" + f.replace(".", "_")
+        return ".".join(x for x in (base, ctx) if x)
+
+    def _jl_modules_in(self, f):
+        if self._jl_mods is None:
+            self._jl_mods = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                if (n.get("tags") or [])[:2] == ["julia", "class"] and n.get("path"):
+                    self._jl_mods.setdefault(n["path"], set()).add(n["name"])
+        return self._jl_mods.get(f, set())
+
+    def _jl_full(self, f, q):
+        """Nombre completo del símbolo `q` del archivo `f` (o de su módulo, si `q` lo es)."""
+        mods, parts = self._jl_modules_in(f), (q.split(".") if q else [])
+        k = next((i for i in range(len(parts), 0, -1) if ".".join(parts[:i]) in mods), 0)
+        return ".".join(x for x in (self._jl_scope(f, ".".join(parts[:k])), *parts[k:]) if x)
+
+    def _jl_exported(self, project, module):
+        """Nombres que exporta el módulo `module` (nombre completo)."""
+        if self._jl_export_index is None:
+            self._jl_export_index = {}
+            for f, exps in self.jl_exports.items():
+                for ctx, names in exps:
+                    self._jl_export_index.setdefault(
+                        (f.split("/", 1)[0], self._jl_scope(f, ctx)), set()).update(names)
+        return self._jl_export_index.get((project, module), set())
+
+    def _fullname_index(self, project, lang):
+        """{nombre_completo: [(file, sid)]} de un lenguaje M15d-2 (Julia: ver _jl_full)."""
+        if self._fullnames is None:
+            self._fullnames = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                tags = n.get("tags") or []
+                if tags[:1] == ["julia"] and n.get("path"):
+                    self._fullnames.setdefault(
+                        (n.get("project"), "julia", self._jl_full(n["path"], n["name"])), []).append(
+                        (n["path"], n["id"]))
+        return lambda full: self._fullnames.get((project, lang, full), [])  # type: ignore[union-attr]
+
+    def _jl_absolute(self, file_id_, ctx, path):
+        """`using .A` / `..A` / `A.B` (escrito en el módulo `ctx` del archivo) -> nombre
+        completo del módulo."""
+        dots = len(path) - len(path.lstrip("."))
+        rest = path.lstrip(".")
+        if not dots:
+            return rest
+        base = [x for x in self._jl_scope(file_id_, ctx).split(".") if x]
+        up = dots - 1
+        if up > len(base):
+            return None
+        return ".".join(base[:len(base) - up] + ([rest] if rest else []))
+
+    def _jl_pairs(self, project, file_id_, caller, callee, via, bindings):
+        """Julia: el mismo módulo primero (también en otros archivos incluidos en él), luego
+        `import A: f` / `using A: f`, luego los `using A` abiertos (solo lo que A EXPORTA).
+        `X.f` se busca desde el módulo del llamante hacia fuera. Varios métodos de la MISMA
+        función en archivos del mismo módulo son una función: se enlaza su primera
+        definición; el mismo nombre en módulos distintos, ambiguo."""
+        lookup = self._fullname_index(project, "julia")
+        cq = caller.split("::", 1)[1]
+        mods = self._jl_modules_in(file_id_)
+        container = cq if cq in mods else (cq.rsplit(".", 1)[0] if "." in cq else "")
+        own = self._jl_full(file_id_, container)
+        anc = own.split(".") if own else []
+        chain = [".".join(anc[:i]) for i in range(len(anc), -1, -1)]
+
+        def hits(full):
+            return [p for p in lookup(full) if p[1] != caller] if full else []
+
+        if via:
+            tiers = [[f"{m}.{via}.{callee}" if m else f"{via}.{callee}"] for m in chain]
+        else:
+            explicit = [self._jl_absolute(file_id_, ctx, path) for k, (path, ctx) in bindings.items()
+                        if k.startswith(f"n:{callee}:")]
+            opened = [m for k, (path, ctx) in bindings.items() if k.startswith("use:")
+                      for m in [self._jl_absolute(file_id_, ctx, path)]
+                      if m and callee in self._jl_exported(project, m)]
+            tiers = [[f"{own}.{callee}" if own else callee],
+                     [f"{m}.{callee}" for m in explicit if m],
+                     [f"{m}.{callee}" for m in opened]]
+        for tier in tiers:
+            by_full = {full: hits(full) for full in dict.fromkeys(tier)}
+            by_full = {k: v for k, v in by_full.items() if v}
+            if len(by_full) == 1:
+                return [min(next(iter(by_full.values())))]   # una función (quizá varios archivos)
+            if by_full:
+                return [p for v in by_full.values() for p in v]   # varias funciones: ambiguo
+        return []
+
+    def _jl_use_target(self, project, file_id_, raw):
+        """`using/import A.B` -> el archivo que define el módulo `A.B` (único), o None."""
+        _kind, ctx, path = raw.split(":", 2)
+        full = self._jl_absolute(file_id_, ctx, path)
+        files = {f for f, _sid in self._fullname_index(project, "julia")(full or "") if f != file_id_}
+        return files.pop() if len(files) == 1 else None
+
+    # --- M15d-3: Protobuf y GraphQL ---------------------------------------------
+    def _contract_index(self, project, lang):
+        """{nombre_completo: [(file, sid)]}: Protobuf `paquete.Mensaje.Anidado`; GraphQL
+        el nombre del tipo (el esquema es global)."""
+        if self._contracts is None:
+            self._contracts = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                g = (n.get("tags") or [""])[0]
+                path = n.get("path")
+                if g == "proto" and path:
+                    pkg = self.proto_pkg.get(path, "")
+                    full = f"{pkg}.{n['name']}" if pkg else n["name"]
+                elif g == "graphql" and path and "." not in n["name"]:
+                    full = n["name"]
+                else:
+                    continue
+                self._contracts.setdefault((n.get("project"), g, full), []).append((path, n["id"]))
+        return lambda full: self._contracts.get((project, lang, full), [])  # type: ignore[union-attr]
+
+    def _contract_pairs(self, g, project, file_id_, caller, name, via):
+        """Protobuf: como protoc, desde el ámbito del origen (`via` = su nombre completo)
+        hacia fuera, en el archivo y lo que importa directamente; `.a.B` es absoluto.
+        GraphQL: el tipo con ese nombre en el proyecto (único, o nada)."""
+        lookup = self._contract_index(project, g)
+        if g == "graphql":
+            return [p for p in lookup(name) if p[1] != caller]
+        visible = {file_id_} | {e["target"] for e in self.store.neighbors(
+            file_id_, edge_types=[EDGE_IMPORTS], direction="out")}
+        if name.startswith("."):
+            scopes, name = [""], name[1:]
+        else:
+            parts = via.split(".") if via else []
+            scopes = [".".join(parts[:i]) for i in range(len(parts), -1, -1)]
+        for s in scopes:
+            hits = [p for p in lookup(f"{s}.{name}" if s else name)
+                    if p[0] in visible and p[1] != caller]
+            if hits:
+                return hits
+        return []
+
+    # --- M15d-4: COBOL --------------------------------------------------------------
+    def _cobol_programs(self, project, name):
+        """[(file, sid)] de los programas COBOL con ese PROGRAM-ID. El nombre de programa
+        es global en la librería de carga, como el módulo en Erlang."""
+        if self._cobol_pgms is None:
+            self._cobol_pgms = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                # solo programas de PRIMER nivel: un anidado no se ve fuera de su padre, y
+                # una sección (`PROG.SECT`) no es un programa
+                if (n.get("tags") or [])[:2] == ["cobol", "class"] and "." not in n["name"] \
+                        and (n.get("path") or "").lower().endswith((".cbl", ".cob", ".cobol")):
+                    self._cobol_pgms.setdefault((n.get("project"), n["name"].split(".")[-1]),
+                                                []).append((n["path"], n["id"]))
+        return self._cobol_pgms.get((project, name.upper()), [])
+
+    def _exported(self, g, f, sid):
+        """¿Se ve `sid` desde otro módulo? Haskell: su lista de exports (sin lista, todo;
+        `T(..)` exporta los métodos de T). Clojure: no si es `defn-` / `^:private`."""
+        if g == "haskell":
+            exp = self.hs_exports.get(f)
+            if exp is None:
+                return True
+            names, whole = exp
+            qual = sid.split("::", 1)[1]
+            return qual in names or qual.rsplit(".", 1)[-1] in names or \
+                ("." in qual and qual.split(".")[0] in whole)
+        if self._clj_private is None:
+            self._clj_private = {n["id"] for n in self.store.all_nodes(types=["symbol"])
+                                 if (n.get("tags") or [])[:2] == ["clojure", "private"]}
+        return sid not in self._clj_private
+
+    def _unique(self, files):
+        return list(files) if len(files) == 1 else []
+
+    def _erl_module_files(self, project, module):
+        return self._unique(self.erl_mod_index.get((project, module), []))
+
+    def _hs_module_files(self, project, module):
+        return self._unique(self.hs_mod_index.get((project, module), []))
+
+    def _perl_package_files(self, project, package):
+        """Archivos que declaran `package P` (símbolos `class` de Perl). Un paquete puede
+        repartirse entre archivos: las llamadas buscan `P.f` en todos."""
+        if self._perl_pkgs is None:
+            self._perl_pkgs = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                if (n.get("tags") or [])[:2] == ["perl", "class"]:
+                    self._perl_pkgs.setdefault((n.get("project"), n["name"]), []).append(n["path"])
+        return list(dict.fromkeys(self._perl_pkgs.get((project, package), [])))
+
+    def _clj_ns_files(self, project, ns, from_ext):
+        """El archivo del ns `ns` que ve un archivo `from_ext`: un ns puede existir en
+        `.clj` y `.cljs` a la vez; desde `.clj` se ve el `.clj`/`.cljc`, desde `.cljs` el
+        `.cljs`/`.cljc`. Único o nada."""
+        ok = _CLJ_PLATFORM.get(from_ext, tuple(_CLJ_PLATFORM))
+        return self._unique([f for f in self.clj_ns_index.get((project, ns), [])
+                             if f.endswith(ok)])
+
+    def _objc_class_files(self, project, cls):
+        """Archivos que definen métodos o declaran la clase Objective-C `cls`."""
+        if self._objc_classes is None:
+            self._objc_classes = {}
+            for n in self.store.all_nodes(types=["symbol"]):
+                if (n.get("tags") or [])[:1] == ["objc"]:
+                    owner = n["name"].split(".")[0]
+                    self._objc_classes.setdefault((n.get("project"), owner), []).append(n["path"])
+        return list(dict.fromkeys(self._objc_classes.get((project, cls), [])))
+
+    def _sol_remap(self, project, base_dir, raw, any_dir=False):
+        """(dir del foundry que aplica, ruta remapeada relativa a él | None). Aplica el
+        `remappings` más cercano que contiene a `base_dir` (con `any_dir`, cualquiera que
+        mapee `raw`)."""
+        for d, maps in self.sol_remaps.get(project, []):
+            if any_dir or not d or base_dir == d or base_dir.startswith(d + "/"):
+                hit = next((dst + raw[len(pre):] for pre, dst in maps if raw.startswith(pre)), None)
+                if hit is not None or not any_dir:
+                    return d, hit
+        return "", None
+
+    def _sol_free_scope(self, project, file_id_):
+        """Archivos cuyas funciones LIBRES ve un .sol: él mismo y lo que entra con un
+        `import "x";` simple (transitivo). `import {A} from` / `import "x" as U` no las
+        traen al ámbito."""
+        key = (file_id_, "free")
+        if key not in self._sol_scopes:
+            seen, queue = [file_id_], [file_id_]
+            while queue:
+                f = queue.pop()
+                fdir = os.path.dirname(f[len(project) + 1:])
+                for raw in self.sol_plain.get(f, ()):
+                    t = self._resolve_generic(project, ".sol", fdir, raw)
+                    if t and t not in seen:
+                        seen.append(t)
+                        queue.append(t)
+            self._sol_scopes[key] = seen
+        return self._sol_scopes[key]
+
+    def _sol_scope(self, project, file_id_):
+        """El archivo y lo que importa, transitivamente: en Solidity `import "x"` trae
+        también lo que x importó."""
+        return self._import_closure(file_id_, ".sol")
+
+    def _import_closure(self, file_id_, suffix):
+        """El archivo y lo que importa, transitivamente (solo destinos `suffix`, o todos)."""
+        key = (file_id_, suffix)
+        if key not in self._sol_scopes:
+            seen, queue = [file_id_], [file_id_]
+            while queue:
+                for e in self.store.neighbors(queue.pop(), edge_types=[EDGE_IMPORTS],
+                                              direction="out"):
+                    t = e["target"]
+                    if (suffix is None or t.endswith(suffix)) and t not in seen:
+                        seen.append(t)
+                        queue.append(t)
+            self._sol_scopes[key] = seen
+        return self._sol_scopes[key]
+
+    def _sol_inherited(self, project, file_id_, caller, callee, name_index, scope):
+        """Llamada libre dentro de un contrato: la función que hereda por la cadena `is A,
+        B`. De los ancestros que la definen se descartan los tapados por otro que hereda
+        de ellos (`B is A` y ambos definen f -> B.f). Si quedan varios (dos ramas, que
+        Solidity obliga a resolver con `override` propio) no se elige ninguno. Un padre
+        solo cuenta si su nombre es único en el scope de quien lo hereda. Devuelve también
+        si algún padre no se pudo resolver (cualificado, ausente o ambiguo)."""
+        cq = caller.split("::", 1)[1]
+        if "." not in cq:
+            return [], False
+        incomplete = False
+        start = (file_id_, cq.split(".")[0])
+        parents_of, order, queue = {}, [], [start]
+        while queue:
+            node = queue.pop(0)
+            fscope = scope if node[0] == file_id_ else self._sol_scope(project, node[0])
+            parents_of[node] = []
+            for parent in self.sol_parents.get(node, ()):
+                where = [x for x in fscope if (x, parent) in name_index]
+                if len(where) != 1:
+                    incomplete = True
+                if len(where) == 1:
+                    parents_of[node].append((where[0], parent))
+                    if (where[0], parent) not in parents_of and (where[0], parent) not in queue:
+                        queue.append((where[0], parent))
+                        order.append((where[0], parent))
+
+        def above(node):
+            out, stack = set(), list(parents_of.get(node, ()))
+            while stack:
+                n = stack.pop()
+                if n not in out:
+                    out.add(n)
+                    stack.extend(parents_of.get(n, ()))
+            return out
+
+        defs = [n for n in order if (n[0], f"{n[1]}.{callee}") in name_index]
+        defs = [n for n in defs if not any(n in above(o) for o in defs if o != n)]
+        return [(f, name_index[(f, f"{c}.{callee}")]) for f, c in defs], incomplete
+
     def _jvm_scope_files(self, file_id_, project, bindings):
         """Archivos visibles sin import explícito en Java/Kotlin: los del paquete propio
         y los de cada `import a.b.*` (claves `*:a.b` de los bindings)."""
@@ -1188,7 +1981,112 @@ class Indexer:
         if g == "dart":
             own = self.dart_package.get(project)
             return ":" not in raw or bool(own and raw.startswith(f"package:{own}/"))
+        # M15d: un include/require/@import local sin destino, o un módulo/paquete que el
+        # proyecto define más de una vez (ambiguo), no es una dependencia externa
+        if g == "erlang":
+            kind, _, path = raw.partition(":")
+            if kind == "mod":
+                return bool(self.erl_mod_index.get((project, path)))
+            app = path.split("/")[0]                 # lib: de la propia app -> interno
+            return kind == "inc" or os.path.isfile(
+                os.path.join(self.roots.get(project, ""), "src", f"{app}.app.src"))
+        if g == "haskell":
+            head = raw.split(".")[0]
+            return (project, raw) in self.hs_mod_index or head not in _HS_STD_ROOTS and any(
+                p == project and m.split(".")[0] == head for p, m in self.hs_mod_index)
+        if g == "perl":
+            if not raw.startswith("pkg:"):
+                return True
+            head = raw[4:].split("::")[0]
+            self._perl_package_files(project, raw[4:])          # asegura el índice perezoso
+            return any(p == project and (m == raw[4:] or m.split("::")[0] == head)
+                       for p, m in self._perl_pkgs or {})
+        if g == "cobol":
+            return True                               # copybooks y programas: siempre propios
+        if g == "proto":                              # ruta repetida: ambigua, no externa
+            return len([1 for rel, _f in self._by_basename(project, raw)
+                        if rel == raw or rel.endswith("/" + raw)]) > 1
+        if g == "clojure":
+            head = raw.split(".")[0]
+            return head != "clojure" and any(
+                p == project and (n == raw or n.split(".")[0] == head)
+                for p, n in self.clj_ns_index)
+        if g in ("ocaml", "ocaml_interface"):
+            name = raw.split(":", 1)[1].split(".")[0]
+            return (raw.startswith("impl:") or bool(self.ml_mod_index.get((project, name)))
+                    or name.lower() in {v.lower() for v in self.dune_libs.get(project, {}).values()}
+                    or name in self._ml_nested_modules(project))
+        if g in ("fsharp", "fsharp_signature"):
+            if not raw.startswith("open:"):
+                return True
+            return raw[5:].split(".")[0] in self.fs_heads.get(project, set())
+        if g == "julia":
+            kind, _ctx, path = raw.split(":", 2)
+            if kind == "inc" or path.startswith("."):
+                return True
+            head = path.split(".")[0]
+            return bool(self._fullname_index(project, "julia")(head))
+        if g == "objc":
+            if raw.startswith("fw:"):
+                # `<mylib/version.h>` (generado, no está) con un directorio mylib/ propio:
+                # es código del proyecto, no `external:mylib`
+                return "/" in raw and raw[3:].split("/")[0] in self._dir_segments(project)
+            return True                               # un `#import "x.h"` es siempre propio
+        if g == "zig":
+            return (raw.endswith((".zig", ".zon")) or "/" in raw or raw == "root"
+                    or raw in self.zig_modules.get(project, {}))
+        if g == "solidity":
+            if raw.startswith(("./", "../")):
+                return True
+            cfg, dst = self._sol_remap(project, "", raw, any_dir=True)
+            return dst is not None and os.path.isdir(os.path.join(
+                self.roots.get(project, ""), cfg, os.path.dirname(dst) or dst))
         return False
+
+    def _resolve_erlang(self, project, base_dir, raw):
+        """`mod:m` -> m.erl (único); `inc:x.hrl` -> junto al archivo y si no, el
+        `include/` más cercano hacia arriba (el de la app); `lib:app/include/x.hrl` -> el
+        directorio de la app (`app/`, `app-1.2/`, `apps/app/`…), o la raíz si el proyecto
+        ES la app (`src/app.app.src`). Único o nada."""
+        kind, _, path = raw.partition(":")
+        if kind == "mod":
+            files = self._erl_module_files(project, path)
+            return files[0] if files else None
+        if kind == "inc":
+            cands, d = [os.path.join(base_dir, path)], base_dir
+            while True:
+                cands.append(os.path.join(d, "include", path))
+                if not d:
+                    break
+                d = os.path.dirname(d)
+            for c in cands:
+                hit = self.file_index.get((project, os.path.normpath(c).replace("\\", "/")))
+                if hit:
+                    return hit
+            return None
+        app, _, rest = path.partition("/")
+        pat = re.compile(rf"(?:.*/)?{re.escape(app)}(?:-[\w.]+)?/{re.escape(rest)}")
+        hits = {fid for rel, fid in self._by_basename(project, path) if pat.fullmatch(rel)}
+        root = self.roots.get(project, "")
+        if not hits and os.path.isfile(os.path.join(root, "src", f"{app}.app.src")):
+            hits = {self.file_index.get((project, rest))} - {None}
+        return hits.pop() if len(hits) == 1 else None
+
+    def _dir_segments(self, project):
+        """Nombres de directorio del proyecto (cualquier nivel)."""
+        if self._segments is None:
+            self._segments = {}
+            for (p, rel) in self.file_index:
+                self._segments.setdefault(p, set()).update(rel.split("/")[:-1])
+        return self._segments.get(project, set())
+
+    def _by_basename(self, project, path):
+        """[(relpath, file_id)] de los archivos del proyecto con el nombre de `path`."""
+        if self._basenames is None:
+            self._basenames = {}
+            for (p, rel), fid in self.file_index.items():
+                self._basenames.setdefault((p, rel.rsplit("/", 1)[-1]), []).append((rel, fid))
+        return self._basenames.get((project, path.rsplit("/", 1)[-1]), [])
 
     def _resolve_jvm(self, project, base_dir, raw):
         """`a.b.C` (o `a.b.C.Inner`, o `import static a.b.C.m`) -> archivo del paquete
@@ -1274,6 +2172,63 @@ class Indexer:
             self.tf_dir_index.setdefault((project, tfdir), []).append(rel_id)
             for mod, src in _RE_TF_MODULE.findall(source):
                 self.tf_module_src[(project, tfdir, mod)] = src
+        if ext == ".erl":
+            stem = os.path.basename(relpath)[:-4]
+            self.erl_mod_index.setdefault((project, stem), []).append(rel_id)
+        if ext == ".hs":
+            m = _RE_HS_MODULE.search(source)
+            self.hs_mod_index.setdefault((project, m.group(1) if m else "Main"), []).append(rel_id)
+            if m and "(" in source[m.end():m.end() + 2000].split("where", 1)[0] \
+                    and ts_treesitter.available():
+                try:
+                    src = source.encode("utf-8", "replace")
+                    root = ts_generic._parser("haskell").parse(src).root_node
+                    self.hs_exports[rel_id] = ts_generic.haskell_exports(
+                        root, lambda n: src[n.start_byte:n.end_byte].decode("utf-8", "replace"))
+                except Exception:
+                    pass
+        if ext == ".ml":
+            mod = _cap(os.path.basename(relpath)[:-3])
+            self.ml_mod_index.setdefault((project, mod), []).append(rel_id)
+            lib = self.dune_libs.get(project, {}).get(os.path.dirname(relpath))
+            if lib:
+                self.ml_mod_index.setdefault((project, f"{_cap(lib)}.{mod}"), []).append(rel_id)
+        if ext in (".cbl", ".cob", ".cobol", ".cpy"):
+            stem = os.path.basename(relpath).rsplit(".", 1)[0].upper()
+            self.cobol_stems.setdefault((project, stem), []).append(rel_id)
+        if ext == ".proto":
+            m = _RE_PROTO_PKG.search(source)
+            self.proto_pkg[rel_id] = m.group(1) if m else ""
+        if ext in (".fs", ".fsi", ".fsx"):
+            self.fs_ns[rel_id] = _fs_namespace(source)
+            # namespace, `module A.B` de cabecera y el módulo implícito (el nombre del archivo)
+            top = _RE_FS_TOPMODULE.search(source)
+            heads = self.fs_heads.setdefault(project, set())
+            heads.update(x.split(".")[0] for x in (
+                self.fs_ns[rel_id], top.group(1) if top else "",
+                _cap(os.path.basename(relpath).rsplit(".", 1)[0])) if x)
+        if ext == ".jl" and ts_treesitter.available():
+            try:
+                src = source.encode("utf-8", "replace")
+                root = ts_generic._parser("julia").parse(src).root_node
+                txt = lambda n: src[n.start_byte:n.end_byte].decode("utf-8", "replace")  # noqa: E731
+                incs, exps = ts_generic.julia_includes(root, txt), ts_generic.julia_exports(root, txt)
+            except Exception:
+                incs, exps = [], []
+            if incs:
+                self.jl_includes[rel_id] = incs
+            if exps:
+                self.jl_exports[rel_id] = exps
+        if ext in _CLJ_PLATFORM:
+            m = _RE_CLJ_NS.search(source)
+            if m:
+                self.clj_ns_index.setdefault((project, m.group(1)), []).append(rel_id)
+        if ext == ".sol":
+            for contract, parents in _sol_parents(source).items():
+                self.sol_parents[(rel_id, contract)] = parents
+            plain = _RE_SOL_PLAIN_IMPORT.findall(_RE_SOL_COMMENT.sub(" ", source))
+            if plain:
+                self.sol_plain[rel_id] = plain
         if ext == ".dart":
             exports, parts = _RE_DART_EXPORT.findall(source), _RE_DART_PART.findall(source)
             if exports:
@@ -1282,6 +2237,9 @@ class Indexer:
                 self.dart_parts[rel_id] = parts
         no_ext = relpath.rsplit(".", 1)[0]
         self.file_index[(project, relpath)] = rel_id
+        if ext in _M15D_EXTS:
+            return     # path_index (por stem) es de JS/TS, Rust, PHP, Java y C: un `x.proto`
+            #            o `x.zig` no debe pisar al `x.js`/`x.rs` que esos resolvers buscan
         self.path_index[(project, no_ext)] = rel_id
         # index/ resoluciones tipo carpeta
         if no_ext.endswith("/index"):
@@ -1322,7 +2280,7 @@ class Indexer:
         self._import_edge_count = 0
         external_seen = set()
         for file_id_, project, raws in self.pending_imports:
-            ext = os.path.splitext(file_id_)[1].lower()
+            ext = self.ext_override.get(file_id_) or os.path.splitext(file_id_)[1].lower()
             base_dir = os.path.dirname(file_id_[len(project) + 1:])  # relpath dir
             done = set()   # un mismo destino por archivo cuenta una vez (raws redundantes)
             prior = {}     # Scala: nombre importado antes -> su ruta (imports encadenados)
@@ -1337,10 +2295,15 @@ class Indexer:
                         prior[raw.split(".")[-1]] = raw
                 if ext == ".py":
                     target = self._resolve_py(project, raw, base_dir)
+                elif ext == ".jl" and raw.startswith("use:"):
+                    target = self._jl_use_target(project, file_id_, raw)
                 elif ext in _TS_EXTS:
                     target = self._resolve_js(project, base_dir, raw)
                 else:
                     target = self._resolve_generic(project, ext, base_dir, raw)
+                if target == file_id_:
+                    continue                # un archivo no se importa a sí mismo (en list.ml,
+                    #                         `List` es el de la stdlib)
                 if target:
                     if target in done:
                         continue
@@ -1362,6 +2325,30 @@ class Indexer:
                         pkg = _tf_module_name(raw)               # registro / git
                     elif ext in (".ps1", ".psm1"):
                         pkg = raw                                # `Az.Accounts` es el nombre
+                    elif ext in (".erl", ".hrl"):
+                        pkg = raw.split(":", 1)[1].split("/")[0]   # mod:lists / lib:kernel/…
+                    elif ext == ".hs":
+                        pkg = ".".join(raw.split(".")[:2])       # Data.Map, Control.Monad
+                    elif ext in (".pm", ".pl", ".t"):
+                        pkg = raw[4:] if raw.startswith("pkg:") else ""   # List::Util
+                    elif ext == ".zig":
+                        pkg = raw                                # std, builtin, un paquete
+                    elif ext in (".clj", ".cljs", ".cljc"):
+                        pkg = raw.split(".")[0]                  # clojure, cheshire…
+                    elif ext in (".ml", ".mli"):
+                        pkg = raw[4:].split(".")[0]              # mod:Printf -> Printf
+                    elif ext in (".fs", ".fsi", ".fsx"):
+                        pkg = raw[5:].split(".")[0] if raw.startswith("open:") else ""
+                    elif ext == ".jl":
+                        pkg = raw.split(":", 2)[2].split(".")[0]   # LinearAlgebra
+                    elif ext == ".proto":                         # google/protobuf, validate
+                        parts = raw.split("/")
+                        pkg = "/".join(parts[:2]) if parts[0] == "google" and len(parts) > 2 else parts[0]
+                    elif ext in (".m", ".mm"):
+                        pkg = raw[3:].split("/")[0]              # fw:UIKit/X.h -> UIKit
+                    elif ext == ".sol":
+                        parts = raw.split("/")                   # @openzeppelin/contracts
+                        pkg = "/".join(parts[:2]) if raw.startswith("@") else parts[0]
                     else:
                         pkg = raw.lstrip(".").split("/")[0].split(".")[0]
                     if not pkg or raw.startswith("."):
@@ -1469,7 +2456,19 @@ class Indexer:
           scala: como Java/Kotlin (mismo índice de paquetes).
           lua:  `require("a.b")` -> a/b.lua o a/b/init.lua (raíz, lua/ o src/), si es único.
           elixir: `alias A.B` -> el archivo que hace `defmodule A.B` (nombre global).
-          bash: `source` relativo al script; literal (`cwd:`) solo si es único."""
+          bash: `source` relativo al script; literal (`cwd:`) solo si es único.
+          erlang: `mod:m` -> m.erl; `-include`/`-include_lib` (ver _resolve_erlang).
+          haskell: `import A.B` -> el archivo cuyo header es `module A.B`, si es único.
+          perl: `use A::B` -> el archivo que declara `package A::B`, si es único.
+          zig:  `@import("x.zig")` relativo; un nombre -> su módulo de build.zig.
+          solidity: relativo, remapping de foundry o ruta desde la raíz.
+          clojure: `(:require [a.b ...])` -> el archivo con `(ns a.b)` de la plataforma.
+          objc: como C y, si no, el header por nombre (mapa de headers de Xcode).
+          ocaml: `mod:A.B` -> el archivo del prefijo más largo que es módulo; `.mli` -> `.ml`.
+          fsharp: `#load "x.fsx"` relativo (`open` es un namespace: sin arista).
+          julia: `include("x.jl")` relativo; `using` -> ver _jl_use_target.
+          proto: raíces de buf.yaml o del repo y, si no, la única ruta con ese final.
+          cobol: `copy:X` -> el copybook X (`.cpy` primero), `pgm:X` -> su PROGRAM-ID."""
         g = EXT_LANG.get(ext)
         if g in ts_generic._JVM:
             if raw.endswith(".*"):
@@ -1556,7 +2555,86 @@ class Indexer:
             mdir = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
             files = self.tf_dir_index.get((project, "" if mdir == "." else mdir))
             return sorted(files)[0] if files else None
-        if g in ("bash", "powershell", "sql"):
+        if g == "erlang":
+            return self._resolve_erlang(project, base_dir, raw)
+        if g == "haskell":
+            files = self._hs_module_files(project, raw)
+            return files[0] if files else None
+        if g == "clojure":
+            files = self._clj_ns_files(project, raw, ext)
+            return files[0] if files else None
+        if g == "cobol":
+            kind, _, name = raw.partition(":")
+            if kind == "copy":                        # el copybook: `.cpy` primero, único
+                files = self.cobol_stems.get((project, name.upper()), [])
+                cpy = [f for f in files if f.lower().endswith(".cpy")]
+                files = cpy or files
+                return files[0] if len(files) == 1 else None
+            files = {f for f, _sid in self._cobol_programs(project, name)}
+            return files.pop() if len(files) == 1 else None
+        if g == "proto":
+            # raíces de buf.yaml o la raíz del repo; si no, el único archivo con esa ruta
+            # al final (el -I de protoc es desconocido)
+            hits = {self.file_index.get((project, "/".join(x for x in (r, raw) if x)))
+                    for r in self.proto_roots.get(project, []) + [""]} - {None}
+            if not hits:
+                hits = {fid for rel, fid in self._by_basename(project, raw)
+                        if rel == raw or rel.endswith("/" + raw)}
+            return hits.pop() if len(hits) == 1 else None
+        if g in ("ocaml", "ocaml_interface"):
+            if raw.startswith("impl:"):               # .mli -> su .ml (mismo directorio)
+                return self.file_index.get((project, "/".join(
+                    x for x in (base_dir, raw[5:] + ".ml") if x)))
+            f, _inner = self._ml_locate(project, f"{project}/{base_dir}/x", raw[4:])
+            return f                                  # `Util.Sub` -> util.ml
+        if g in ("fsharp", "fsharp_signature"):
+            if raw.startswith("load:"):
+                return self.file_index.get((project, os.path.normpath(
+                    os.path.join(base_dir, raw[5:])).replace("\\", "/")))
+            return None                                # `open X`: un namespace, no un archivo
+        if g == "julia":
+            kind, ctx, path = raw.split(":", 2)
+            if kind == "inc":
+                return self.file_index.get((project, os.path.normpath(
+                    os.path.join(base_dir, path)).replace("\\", "/")))
+            return None                                # `using`: ver _jl_use_target
+        if g == "objc":
+            if raw.startswith("fw:"):
+                # `<Fw/X.h>`: el framework del PROPIO proyecto si X.h existe una sola vez en
+                # él (SDWebImage importa <SDWebImage/SDImageCache.h>); si no, externo
+                # ...pero solo si ese X.h está bajo un directorio llamado Fw: `<sys/types.h>`
+                # no es un `support/types.h` propio
+                path = raw[3:]
+                fw = path.split("/")[0]
+                hits = [fid for rel, fid in self._by_basename(project, path)
+                        if fw in rel.split("/")[:-1]] if "/" in path else []
+                return hits[0] if len(hits) == 1 else None
+            # la ruta exacta y, si no, el mapa de headers de Xcode: el `#import "Foo.h"` se
+            # encuentra por nombre en todo el proyecto, si es único
+            norm = os.path.normpath(os.path.join(base_dir, raw)).replace("\\", "/")
+            hit = self.file_index.get((project, norm))
+            if hit:
+                return hit
+            hits = [fid for rel, fid in self._by_basename(project, raw)
+                    if rel == raw or rel.endswith("/" + raw)]
+            return hits[0] if len(hits) == 1 else None
+        if g == "perl" and raw.startswith("pkg:"):
+            files = self._unique(self._perl_package_files(project, raw[4:]))
+            return files[0] if files else None
+        if g == "zig":
+            if raw.endswith((".zig", ".zon")) or "/" in raw:
+                return self.file_index.get((project, os.path.normpath(
+                    os.path.join(base_dir, raw)).replace("\\", "/")))
+            paths = self.zig_modules.get(project, {}).get(raw, set())
+            return self.file_index.get((project, next(iter(paths)))) if len(paths) == 1 else None
+        if g == "solidity":
+            if raw.startswith(("./", "../")):
+                cand = os.path.join(base_dir, raw)
+            else:   # remapping del foundry más cercano, o ruta desde su raíz (base path)
+                cfg, dst = self._sol_remap(project, base_dir, raw)
+                cand = os.path.join(cfg, dst if dst is not None else raw)
+            return self.file_index.get((project, os.path.normpath(cand).replace("\\", "/")))
+        if g in ("bash", "powershell", "sql", "perl"):
             # "./x": relativo al script (inequívoco). "cwd:x": depende del directorio de
             # trabajo -> junto al script o desde la raíz, y solo si existe en UNO de ellos.
             rel = raw[4:] if raw.startswith("cwd:") else raw

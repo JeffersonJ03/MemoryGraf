@@ -935,6 +935,809 @@ class TestM15c(Base):
         self.assertEqual(deps, set())
 
 
+class _M15dGraph(Base):
+    """Base de los tests de M15d: indexa un fixture (o el proyecto del test) y devuelve
+    (calls xfile, imports/depends_on, calls intra-archivo, nombres de símbolos)."""
+
+    def _graph(self, lang=None):
+        if lang:
+            root = os.path.join(CROSSFILE_DIR, lang)
+            store = Store(os.path.join(self.tmp, f"{lang}.db"))
+            Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        else:
+            store, _ = self.index()
+        rows = [(e["source"], e["target"], e["type"], e["provenance"]) for e in store.all_edges()]
+        syms = {n["name"] for n in store.all_nodes(types=["symbol"])}
+        store.close()
+        return ({(s, t) for s, t, ty, pv in rows if ty == "calls" and pv == "xfile"},
+                {(s, t) for s, t, ty, _pv in rows if ty in ("imports", "depends_on")},
+                {(s, t) for s, t, ty, pv in rows if ty == "calls" and pv == "tree-sitter"},
+                syms)
+
+
+class TestM15d(_M15dGraph):
+    """M15d-1: Erlang, Haskell, Perl, Zig, Solidity, Clojure y Objective-C. Fixtures en
+    tests/fixtures/crossfile/<lenguaje>/; los casos que NO deben enlazar, con un
+    proyecto propio por test (precisión primero, como TestPrecisionM15a/b)."""
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_audit_cases(self):
+        # Hallazgos de la auditoría de M15d-1 y transversales: cada caso, sus calls (intra y
+        # xfile) exactas y, si importa, sus dependencias.
+        cases = {
+            # alias locales del mismo nombre en dos funciones: ambiguo, ni a.zig ni b.zig
+            "zig_alias": ({"src/a.zig": "pub const S = struct { pub fn init() void {} };\npub fn f() void {}\n",
+                           "src/b.zig": "pub const S = struct { pub fn init() void {} };\npub fn f() void {}\n",
+                           "src/main.zig": 'const a = @import("a.zig");\nconst b = @import("b.zig");\n'
+                                           "fn one() void { const T = a.S; T.init(); }\n"
+                                           "fn two() void { const T = b.S; T.init(); }\n"}, set(), None),
+            # Zig 0.11 `exe.addModule("dep", zap.module("dep"))`: es un paquete, no la ruta
+            # del addExecutable siguiente
+            "zig_011": ({"build.zig": 'pub fn build(b: *std.Build) void {\n'
+                                      '    const zap = b.dependency("zap", .{});\n'
+                                      '    exe.addModule("zap", zap.module("zap"));\n'
+                                      '    const t = b.addTest(.{ .root_source_file = .{ .path = "src/main.zig" } });\n}\n',
+                         "src/main.zig": 'const zap = @import("zap");\npub fn main() void { zap.go(); }\npub fn go() void {}\n'},
+                        set(), {("src/main.zig", "external:zap")}),
+            # import abierto: solo lo exportado
+            "hs_exports": ({"src/App/Util.hs": "module App.Util (render) where\nrender n = n\nlookup n = n\n",
+                            "src/App/Main.hs": "module App.Main where\nimport App.Util\nrun x = render (lookup x)\n"},
+                           {("src/App/Main.hs::run", "src/App/Util.hs::render")}, None),
+            # `:refer :all` no ve `defn-`/`^:private`; `#_`, comment, '() y case no son llamadas
+            "clj": ({"src/u.clj": "(ns u)\n(defn- format [x] x)\n(defn ^:private update [x] x)\n(defn render [x] x)\n",
+                     "src/core.clj": "(ns core (:require [u :refer :all]))\n"
+                                     "(defn save [x] x)\n(defn run [x] (format x) (update x) (render x)\n"
+                                     "  #_(save x) (comment (save x)) '(save x) (case x (save) 1 2))\n"},
+                    {("src/core.clj::run", "src/u.clj::render")}, None),
+            # builtin sin `&` es CORE (no la sub); `&push` y `main::helper` sí son subs
+            "perl": ({"lib/Sock.pm": "package Sock;\nsub split { 1 }\nsub push { 1 }\n"
+                                     "sub run { my @a; push(@a, 1); my @p = split(/,/, 'a'); &push(1); }\n1;\n",
+                      "app.pl": "sub helper { 1 }\npackage Foo;\nsub helper { 2 }\nsub go { return main::helper(); }\n"},
+                     {("lib/Sock.pm::Sock.run", "lib/Sock.pm::Sock.push"), ("app.pl::Foo.go", "app.pl::helper")}, None),
+            # herencia sin resolver (padre cualificado `B.Base`): `helper()` puede ser el
+            # heredado, así que no cae en la función libre helper de L.sol (importado simple)
+            "sol_parent": ({"B.sol": "contract Base { function helper() internal {} }\n",
+                            "L.sol": "function helper() pure {}\n",
+                            "C.sol": 'import "./B.sol" as B;\nimport "./L.sol";\n'
+                                     "contract C is B.Base {\n  function run() public { helper(); }\n}\n"},
+                           set(), None),
+            # `import {Cfg} from` no trae las funciones libres de L.sol al ámbito
+            "sol_scope": ({"L.sol": "function other() pure {}\nstruct Cfg { uint a; }\n",
+                           "C.sol": 'import {Cfg} from "./L.sol";\n'
+                                    "contract C {\n  function run() public { other(); }\n}\n"},
+                          set(), None),
+            # remappings de un foundry.toml en un subdirectorio (monorepo)
+            "sol_remap": ({"contracts/foundry.toml": 'remappings = ["@app/=src/"]\n',
+                           "contracts/src/Math.sol": "library Math { function add() internal {} }\n",
+                           "contracts/src/V.sol": 'import "@app/Math.sol";\ncontract V { function f() public { Math.add(); } }\n'},
+                          {("contracts/src/V.sol::V.f", "contracts/src/Math.sol::Math.add")},
+                          {("contracts/src/V.sol", "contracts/src/Math.sol")}),
+            # 600 `else if`: sin RecursionError, el archivo conserva símbolos y llamadas
+            "deep": ({"R.sol": "contract R {\n  function g() public {}\n  function route(uint x) public {\n"
+                               + "    if (x == 0) { g(); }\n" + "".join(f"    else if (x == {i}) {{ g(); }}\n" for i in range(1, 600))
+                               + "  }\n}\n"},
+                     {("R.sol::R.route", "R.sol::R.g")}, None),
+        }
+        for label, (files, expected, deps) in cases.items():
+            root = os.path.join(self.tmp, label)
+            for rel, src in files.items():
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                with open(os.path.join(root, rel), "w", encoding="utf-8") as f:
+                    f.write(src)
+            store = Store(os.path.join(self.tmp, f"{label}.db"))
+            Indexer(store, {"projects": [{"name": label, "root": root}]}).index_all()
+            got = {(e["source"].split("/", 1)[1], e["target"].split("/", 1)[1])
+                   for e in store.all_edges() if e["type"] == "calls" and "::" in e["source"]}
+            got_deps = {(e["source"].split("/", 1)[1], e["target"] if e["target"].startswith("external:")
+                         else e["target"].split("/", 1)[1])
+                        for e in store.all_edges() if e["type"] in ("imports", "depends_on")}
+            store.close()
+            self.assertEqual(got, expected, label)
+            if deps is not None:
+                self.assertEqual(got_deps, deps, label)
+
+    def test_doctor_portable_does_not_claim_symbols(self):
+        # Sin tree-sitter, los lenguajes sin LSP solo dan nodo archivo: doctor no puede
+        # decir "indexado (símbolos)" (auditoría, prueba de sistema).
+        from memorygraf import doctor
+        lines = []
+        report = [{"lang": "cobol", "supported": False}]
+        with unittest.mock.patch.object(doctor, "_has_parsers", return_value=False):
+            doctor._render_lsp_langs(report, log=lines.append)
+        self.assertTrue(any("solo archivo" in ln for ln in lines))
+        self.assertFalse(any("indexado (símbolos)" in ln for ln in lines))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_audit_no_junk_names_and_impact_follows_implements(self):
+        # Código a medias (nodos MISSING) no da símbolos de nombre vacío ni con blancos; e
+        # `impact` de una interface GraphQL ve a quien la implementa.
+        from memorygraf.extractors import ts_generic
+        for name, src in (("a.ml", "let f x = x\nlet"), ("s.graphql", "type A { id: ID }\ntype"),
+                          ("m.erl", "-module(m).\n(X), local(X)."), ("u.fsi", "module Validator\n\nlet chec")):
+            nodes, _e, raws, out, _b = ts_generic.extract(name, "p", src)
+            names = [n.name for n in nodes if n.type == "symbol"]
+            self.assertFalse([n for n in names if not n or any(c.isspace() for c in n) or "" in n.split(".")], name)
+            self.assertFalse([r for r in raws if any(c.isspace() for c in r)], name)
+            self.assertFalse([m for _c, m, _v in out if not m], name)
+        self.write("schema.graphql", "interface Node { id: ID! }\ntype User implements Node { id: ID! }\n")
+        store, _ = self.index()
+        report = Query(store).impact("proj/schema.graphql::Node", depth=1)
+        store.close()
+        self.assertIn("User", report)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_fixture_imports_and_calls(self):
+        e, h, p = "erlang/src/billing.erl", "haskell/src/App", "perl/lib/App"
+        z, s, c = "zig/src", "solidity/contracts", "clojure/src/my_app"
+        cases = {
+            "erlang": ({(f"{e}::run", "erlang/src/util.erl::check"),          # util:check(X)
+                        (f"{e}::run", "erlang/src/fmt.erl::pretty")},        # -import(fmt, …)
+                       {(e, "erlang/include/records.hrl"), (e, "erlang/src/util.erl"),
+                        (e, "erlang/src/fmt.erl"), (e, "external:lists")}),
+            "haskell": ({(f"{h}/Main.hs::run", f"{h}/Util.hs::check"),        # U.check (as U)
+                         (f"{h}/Main.hs::run", f"{h}/Fmt.hs::pretty"),        # import (pretty)
+                         (f"{h}/Main.hs::run", f"{h}/Open.hs::opened")},      # import abierto
+                        {(f"{h}/Main.hs", f"{h}/Util.hs"), (f"{h}/Main.hs", f"{h}/Fmt.hs"),
+                         (f"{h}/Main.hs", f"{h}/Open.hs")}),
+            "perl": ({(f"{p}/Billing.pm::App::Billing.run", f"{p}/Util.pm::App::Util.check"),
+                      (f"{p}/Billing.pm::App::Billing.run", f"{p}/Model.pm::App::Model.save"),
+                      (f"{p}/Billing.pm::App::Billing.run", f"{p}/Model.pm::App::Model.load"),
+                      ("perl/run.pl::main", "perl/lib/helpers.pl::greet")},   # require "x.pl"
+                     {(f"{p}/Billing.pm", f"{p}/Util.pm"), (f"{p}/Billing.pm", f"{p}/Model.pm"),
+                      (f"{p}/Billing.pm", "external:List::Util"),
+                      ("perl/run.pl", "perl/lib/helpers.pl")}),
+            "zig": ({(f"{z}/main.zig::main", f"{z}/util.zig::check"),         # u.f y alias f
+                     (f"{z}/main.zig::main", f"{z}/util.zig::Shape.init"),    # const S = u.S
+                     (f"{z}/main.zig::main", f"{z}/core.zig::go")},           # módulo de build.zig
+                    {(f"{z}/main.zig", f"{z}/util.zig"), (f"{z}/main.zig", f"{z}/core.zig"),
+                     (f"{z}/main.zig", "external:std")}),
+            "solidity": ({(f"{s}/Vault.sol::Vault.deposit", f"{s}/Math.sol::Math.mul"),
+                          (f"{s}/Vault.sol::Vault.deposit", f"{s}/Util.sol::helper"),
+                          # heredadas: Base llega por un import transitivo (Math -> Base);
+                          # Ownable, por el remapping de remappings.txt
+                          (f"{s}/Vault.sol::Vault.deposit", f"{s}/Base.sol::Base.baseFn"),
+                          (f"{s}/Vault.sol::Vault.deposit", f"{s}/Base.sol::freeFn"),
+                          (f"{s}/Vault.sol::Vault.deposit",
+                           "solidity/lib/oz/contracts/access/Ownable.sol::Ownable.onlyOwner")},
+                         {(f"{s}/Vault.sol", "solidity/lib/oz/contracts/access/Ownable.sol"),
+                          (f"{s}/Vault.sol", "external:forge-std")}),
+            "clojure": ({(f"{c}/billing.clj::run", f"{c}/util.clj::check"),         # u/check
+                         (f"{c}/billing.clj::run", f"{c}/util.clj::Shape.area"),    # protocolo
+                         (f"{c}/billing.clj::run", f"{c}/fmt.cljc::pretty"),        # :refer
+                         (f"{c}/billing.clj::run", f"{c}/plat.clj::go")},           # .clj, no .cljs
+                        {(f"{c}/billing.clj", f"{c}/plat.clj"),
+                         (f"{c}/billing.clj", "external:clojure")}),
+            "objc": ({("objc/App/UI/Bar.m::Bar.run", "objc/App/Foo.m::Foo.greet:with:"),
+                      ("objc/App/UI/Bar.m::Bar.run", "objc/App/Foo+Extra.m::Foo.build"),  # categoría
+                      ("objc/App/UI/Bar.m::Bar.run", "objc/App/util.c::helper")},          # función C
+                     # `#import "Foo.h"` desde UI/: el mapa de headers de Xcode (por nombre)
+                     {("objc/App/UI/Bar.m", "objc/App/Foo.h"),
+                      ("objc/App/UI/Bar.m", "external:UIKit"),
+                      ("objc/App/Foo.h", "external:Foundation")}),              # .h de ObjC
+        }
+        for lang, (calls, deps) in cases.items():
+            xcalls, got_deps, _intra, _syms = self._graph(lang)
+            self.assertEqual(calls - xcalls, set(), lang)
+            self.assertEqual(deps - got_deps, set(), lang)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_erlang_external_module_and_duplicate_module(self):
+        # `lists:map` no apunta a un lists.erl que no existe (y queda `external:lists`);
+        # `dup` existe en dos apps: el módulo es ambiguo -> ni call ni import ni external.
+        self.write("apps/a/src/a.erl", "-module(a).\nrun() -> lists:map(fun f/1, []), dup:f().\n"
+                   "f(X) -> X.\n")
+        self.write("apps/a/src/dup.erl", "-module(dup).\nf() -> 1.\n")
+        self.write("apps/b/src/dup.erl", "-module(dup).\nf() -> 2.\n")
+        xcalls, deps, intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+        self.assertEqual(deps, {("proj/apps/a/src/a.erl", "external:lists")})
+        self.assertEqual(intra, set())         # `fun f/1` es una referencia, no una llamada
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_haskell_ambiguous_open_imports_and_shadowing(self):
+        # `f` lo definen DOS módulos abiertos -> ambiguo. `g` es un parámetro que tapa al
+        # `g` de B. `h` está oculto con `hiding`. `k` es un campo de record del archivo.
+        self.write("Main.hs", "module Main where\nimport A\nimport B hiding (h)\n"
+                   "data R = R { k :: Int }\nrun g r = f 1 + g 2 + h 3 + k r\n")
+        self.write("A.hs", "module A where\nf x = x\n")
+        self.write("B.hs", "module B where\nf x = x\ng x = x\nh x = x\nk x = x\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_perl_dynamic_method_and_conflicting_exports(self):
+        # `$obj->save` es dinámico; `check` lo exportan dos `use` -> sin arista.
+        self.write("lib/A.pm", "package A;\nuse B qw(check);\nuse C qw(check);\n"
+                   "sub run { my $obj = shift; $obj->save; check(1); }\n1;\n")
+        self.write("lib/B.pm", "package B;\nsub check { 1 }\nsub save { 1 }\n1;\n")
+        self.write("lib/C.pm", "package C;\nsub check { 2 }\n1;\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_zig_comptime_only_file(self):
+        # Un archivo que solo tiene un bloque `comptime` con @import (el tests.zig de zls):
+        # sus imports salen con las dos gramáticas de Zig (tree-sitter-language-pack ≤1.13 y
+        # posteriores tienen gramáticas distintas)
+        self.write("tests.zig", 'comptime {\n    _ = @import("helper.zig");\n}\n')
+        self.write("helper.zig", "pub fn h() void {}\n")
+        _x, deps, _intra, _syms = self._graph()
+        self.assertIn(("proj/tests.zig", "proj/helper.zig"), deps)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_zig_non_literal_build_module(self):
+        # `m` se declara en build.zig con una ruta NO literal y `opts` sale de addOptions:
+        # son propios pero sin destino -> ni arista ni `external:`. `kf` viene de un
+        # `lazyDependency` (build.zig.zon): ese sí es externo.
+        self.write("build.zig", 'pub fn build(b: *std.Build) void {\n'
+                   '    _ = b.addModule("m", .{ .root_source_file = b.path(src) });\n'
+                   '    const opts = b.addOptions();\n'
+                   '    const kf = b.lazyDependency("kf", .{}).?.module("kf");\n'
+                   '    exe.root_module.addImport("opts", opts.createModule());\n'
+                   '    exe.root_module.addImport("kf", kf);\n}\n')
+        self.write("src/main.zig", 'const m = @import("m");\nconst o = @import("opts");\n'
+                   'const kf = @import("kf");\npub fn main() void { m.go(); }\n')
+        self.write("src/m.zig", "pub fn go() void {}\n")
+        xcalls, deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+        self.assertEqual({t for s, t in deps if s == "proj/src/main.zig"}, {"external:kf"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_solidity_parent_not_imported(self):
+        # `is Base` sin importar Base.sol: el padre no está en el scope -> sin arista.
+        self.write("V.sol", "contract V is Base {\n  function f() public { baseFn(); }\n}\n")
+        self.write("Base.sol", "contract Base {\n  function baseFn() internal {}\n}\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_solidity_inherited_override_and_two_branches(self):
+        # C is B, B is A; A y B definen f -> B.f (tapa a A.f). `g` llega por DOS ramas
+        # (X y A vía B): Solidity exige un override propio, así que no se adivina.
+        self.write("A.sol", "contract A {\n  function f() internal {}\n  function g() internal {}\n}\n")
+        self.write("B.sol", 'import "./A.sol";\ncontract B is A {\n  function f() internal {}\n}\n')
+        self.write("X.sol", "contract X {\n  function g() internal {}\n}\n")
+        self.write("C.sol", 'import "./B.sol";\nimport "./X.sol";\n'
+                   "contract C is B, X {\n  function run() public { f(); g(); }\n}\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, {("proj/C.sol::C.run", "proj/B.sol::B.f")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_clojure_platform_ambiguity_and_local_bindings(self):
+        # Desde un .cljc, `my-app.plat` existe en .clj Y .cljs -> ambiguo. `fmt` está en
+        # `:refer`, pero el `let` lo liga localmente y lo tapa.
+        self.write("src/a.cljc", "(ns a (:require [my-app.plat :as p] [b :refer [fmt]]))\n"
+                   "(defn run [x] (p/go) (let [fmt identity] (fmt x)))\n")
+        self.write("src/plat.clj", "(ns my-app.plat)\n(defn go [] 1)\n")
+        self.write("src/plat.cljs", "(ns my-app.plat)\n(defn go [] 2)\n")
+        self.write("src/b.clj", "(ns b)\n(defn fmt [x] x)\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_objc_instance_receiver_and_class_not_imported(self):
+        # `[obj greet]`: receptor instancia (v1, sin arista). `[Hidden go]`: Hidden existe
+        # pero no está en nada de lo que A.m importa.
+        self.write("A.m", '#import "Foo.h"\n@implementation A\n'
+                   "- (void)run { Foo *obj = nil; [obj greet]; [Hidden go]; }\n@end\n")
+        self.write("Foo.h", "@interface Foo\n- (void)greet;\n@end\n")
+        self.write("Foo.m", '#import "Foo.h"\n@implementation Foo\n- (void)greet {}\n@end\n')
+        self.write("Hidden.m", "@implementation Hidden\n+ (void)go {}\n@end\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+        # el receptor instancia ni siquiera sale del extractor (no depende del indexer)
+        from memorygraf.extractors import ts_generic
+        with open(os.path.join(self.proj, "A.m"), encoding="utf-8") as f:
+            _n, _e, _i, calls_out, _b = ts_generic.extract("A.m", "p", f.read())
+        self.assertEqual({(m, v) for _c, m, v in calls_out}, {("go", "Hidden")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_objc_own_framework_import_is_internal(self):
+        # `<MyKit/Foo.h>` es el framework propio si Foo.h está bajo un directorio MyKit/;
+        # `<MyKit/Dup.h>` va al Dup.h de MyKit/ aunque haya otro en Other/. `<UIKit/...>` no
+        # está -> externo. `<sys/types.h>` NO es el `support/types.h` propio (auditoría).
+        # `<MyKit/version.h>` (generado, no está) con MyKit/ propio no es `external:MyKit`.
+        self.write("App/A.m", "#import <MyKit/Foo.h>\n#import <UIKit/UIView.h>\n"
+                   "#import <MyKit/Dup.h>\n#import <sys/types.h>\n#import <MyKit/version.h>\n"
+                   "@implementation A\n@end\n")
+        self.write("MyKit/Foo.h", "@interface Foo\n@end\n")
+        self.write("MyKit/Dup.h", "@interface Dup\n@end\n")
+        self.write("Other/Dup.h", "@interface Dup\n@end\n")
+        self.write("support/types.h", "typedef int t;\n")
+        _x, deps, _intra, _syms = self._graph()
+        self.assertEqual({t for s, t in deps if s == "proj/App/A.m"},
+                         {"proj/MyKit/Foo.h", "proj/MyKit/Dup.h", "external:UIKit", "external:sys"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_objc_header_keeps_c_types_and_stem_collisions(self):
+        # Un .h con `#ifdef __OBJC__` pasa a ObjC pero conserva sus tipos de C. Y un stem
+        # compartido entre un lenguaje previo y uno nuevo (`greeter.js`/`greeter.proto`,
+        # `util.rs`/`util.zig`) no desvía los imports del previo (auditoría: path_index).
+        self.write("core.h", "#ifdef __OBJC__\n@class NSString;\n#endif\n"
+                   "typedef struct { int x; } point_t;\nenum color { RED };\n")
+        self.write("src/greeter.js", "export function sayHello() {}\n")
+        self.write("src/greeter.proto", 'syntax = "proto3";\nmessage M {}\n')
+        self.write("src/server.js", 'import { sayHello } from "./greeter";\nexport function run() { sayHello(); }\n')
+        self.write("src/util.rs", "pub fn helper() {}\n")
+        self.write("src/util.zig", "pub fn helper() void {}\n")
+        self.write("src/main.rs", "mod util;\nfn main() { util::helper(); }\n")
+        xcalls, deps, _intra, syms = self._graph()
+        self.assertIn("color", syms)                      # lo mismo que da el extractor de C
+        self.assertIn(("proj/src/server.js", "proj/src/greeter.js"), deps)
+        self.assertIn(("proj/src/main.rs", "proj/src/util.rs"), deps)
+        self.assertEqual({t for s, t in xcalls}, {"proj/src/greeter.js::sayHello", "proj/src/util.rs::helper"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_h_and_m_content_sniff(self):
+        # Un `.h` de C que menciona `@interface` en un comentario sigue siendo C; un `.h`
+        # con `@interface` real es ObjC; un `.m` de MATLAB queda como nodo `file`.
+        self.write("c.h", "/* wraps @interface Foo\n#import x */\nint add(int a, int b);\n")
+        self.write("o.h", "// header\n@interface Foo\n@end\n")
+        self.write("m.m", "function y = f(x)\n  y = x;\nend\n")
+        store, _ = self.index()
+        tags = {n["path"]: n["tags"] for n in store.all_nodes(types=["file"])}
+        syms = [n["name"] for n in store.all_nodes(types=["symbol"]) if n["path"] == "proj/m.m"]
+        store.close()
+        self.assertEqual((tags["proj/c.h"], tags["proj/o.h"], tags["proj/m.m"], syms),
+                         (["c"], ["objc"], ["code"], []))
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_prolog_pl_is_not_parsed_as_perl(self):
+        # `rules.pl` del fixture es Prolog: solo el nodo `file`, sin símbolos de Perl
+        store = Store(os.path.join(self.tmp, "pl.db"))
+        Indexer(store, {"projects": [{"name": "perl",
+                                      "root": os.path.join(CROSSFILE_DIR, "perl")}]}).index_all()
+        rules = [n for n in store.all_nodes() if (n.get("path") or "") == "perl/rules.pl"]
+        store.close()
+        self.assertEqual([(n["type"], n["tags"]) for n in rules], [("file", ["code"])])
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_clauses_and_overloads_are_one_symbol(self):
+        # Erlang `f/1` y `f/2`, ecuaciones de Haskell y sobrecargas de Solidity: UN
+        # símbolo por nombre, con el span de todas.
+        from memorygraf.extractors import ts_generic
+        cases = {"m.erl": ("-module(m).\nf(X) -> X.\nf(X, Y) -> X + Y.\n", "f", (2, 3)),
+                 "M.hs": ("module M where\nf 0 = 0\nf n = n\n", "f", (2, 3)),
+                 "C.sol": ("contract C {\n  function f() public {}\n"
+                           "  function f(uint x) public {}\n}\n", "C.f", (2, 3))}
+        for path, (src, name, span) in cases.items():
+            nodes, *_rest = ts_generic.extract(path, "p", src)
+            got = [(n.span_start, n.span_end) for n in nodes if n.name == name]
+            self.assertEqual(got, [span], path)
+
+
+class TestM15d2(_M15dGraph):
+    """M15d-2: OCaml, F# y Julia, resueltos por nombre completo (módulo del archivo +
+    símbolo) solo cuando el destino es inequívoco."""
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_m15d2_fixture_imports_and_calls(self):
+        o, f, j = "ocaml", "fsharp/src", "julia/src"
+        cases = {
+            "ocaml": ({(f"{o}/bin/main.ml::run", f"{o}/lib/util.ml::Sub.go"),     # alias M
+                       (f"{o}/bin/main.ml::run", f"{o}/lib/util.ml::check"),      # open Mylib
+                       (f"{o}/bin/main.ml::run", f"{o}/lib/fmt.ml::pretty"),      # Mylib.Fmt
+                       (f"{o}/lib/fmt.ml::pretty", f"{o}/lib/util.ml::check")},   # misma librería
+                      {(f"{o}/bin/main.ml", f"{o}/lib/fmt.ml"),
+                       (f"{o}/bin/main.ml", "external:Printf"),
+                       (f"{o}/lib/util.mli", f"{o}/lib/util.ml")}),               # .mli -> .ml
+            "fsharp": ({(f"{f}/Billing.fs::Billing.run", f"{f}/Util.fs::Validator.check"),
+                        (f"{f}/Late.fs::Late.later", f"{f}/Billing.fs::Billing.run")},
+                       {(f"{f}/Billing.fs", "external:System")}),
+            "julia": ({(f"{j}/billing.jl::run", f"{j}/util.jl::check"),          # mismo módulo
+                       (f"{j}/billing.jl::run", f"{j}/App.jl::App.Sub.sub_go")},  # using .Sub
+                      {(f"{j}/App.jl", f"{j}/util.jl"), (f"{j}/billing.jl", f"{j}/App.jl"),
+                       (f"{j}/App.jl", "external:LinearAlgebra")}),
+        }
+        for lang, (calls, deps) in cases.items():
+            xcalls, got_deps, _intra, _syms = self._graph(lang)
+            self.assertEqual(calls - xcalls, set(), lang)
+            self.assertEqual(deps - got_deps, set(), lang)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_ocaml_two_dune_libraries_and_shadowing(self):
+        # `util.ml` en DOS librerías y quien llama no está en ninguna -> ambiguo (sin
+        # arista y sin `external:Util`). `check` es un parámetro que tapa al de `open B`.
+        # `Nested` es un módulo anidado de b/util.ml (visible por el `open`): tampoco es
+        # una dependencia externa.
+        self.write("a/dune", "(library (name a))\n")
+        self.write("a/util.ml", "let f x = x\n")
+        self.write("b/dune", "(library (name b))\n")
+        self.write("b/util.ml", "let f x = x\nlet check x = x\n"
+                   "module Nested = struct let go x = x end\n")
+        self.write("bin/main.ml", "open B.Util\nlet run check x = Util.f x + check x + Nested.go x\n")
+        xcalls, deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, {("proj/bin/main.ml::run", "proj/b/util.ml::Nested.go")})
+        self.assertEqual({t for s, t in deps if s == "proj/bin/main.ml"}, {"proj/b/util.ml"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_audit_cases(self):
+        # Hallazgos de la auditoría de M15d-2: cada caso, sus aristas exactas (o ninguna).
+        fsproj = ('<Project><ItemGroup><Compile Include="Util.fs" />'
+                  '<Compile Include="Main.fs" /></ItemGroup></Project>')
+        cases = {
+            # librería envuelta: fuera de ella `List` es Stdlib; y list.ml no se importa a sí mismo
+            "ml_wrapped": ({"lib/dune": "(library (name mylib))\n",
+                            "lib/list.ml": "let map f l = List.rev (List.rev_map f l)\n",
+                            "bin/main.ml": "let run () = List.map succ [1; 2]\n"}, set()),
+            # una llamada anterior a la definición es a lo de antes (el `open Util`)
+            "ml_order": ({"util.ml": "let helper x = x + 1\n",
+                          "main.ml": "open Util\nlet run x = helper x\nlet helper x = x * 2\n"},
+                         {("calls", "main.ml::run", "util.ml::helper")}),
+            # `open`/alias de un módulo del propio archivo no es otro archivo
+            "ml_local_module": ({"helpers.ml": "let f x = x + 100\n",
+                                 "a.ml": "module Helpers = struct\n  let f x = x\nend\nopen Helpers\n"
+                                         "let run x = f x\nmodule H2 = Helpers\nlet run2 x = H2.f x\n"}, set()),
+            # un `let open` local no vale para todo el archivo
+            "ml_local_open": ({"util.ml": "let max a b = if a > b then b else a\n",
+                               "main.ml": "let a x y = let open Util in max x y\nlet b x y = max x y\n"}, set()),
+            # lo que el .mli oculta no se ve con `open`
+            "ml_mli": ({"util.ml": "let max a b = a\nlet biggest l = List.fold_left max 0 l\n",
+                        "util.mli": "val biggest : int list -> int\n",
+                        "main.ml": "open Util\nlet pick a b = max a b\n"}, set()),
+            "fs_order": ({"App.fsproj": fsproj, "Util.fs": "module App.Util\nlet helper x = x + 1\n",
+                          "Main.fs": "module App.Main\nopen App.Util\nlet run x = helper x\nlet helper x = x * 2\n"},
+                         {("calls", "Main.fs::Main.run", "Util.fs::Util.helper")}),
+            # `let private` es un símbolo, y tapa al del `open`
+            "fs_private": ({"App.fsproj": fsproj, "Util.fs": "module App.Util\nlet helper x = x + 1\n",
+                            "Main.fs": "module App.Main\nopen App.Util\nlet private helper x = x * 2\nlet run x = helper x\n"},
+                           {("calls", "Main.fs::Main.run", "Main.fs::Main.helper")}),
+            # parámetros de member y del constructor primario son locales
+            "fs_member": ({"App.fsproj": fsproj, "Util.fs": "module App.Util\nlet handler x = x\nlet log x = x\n",
+                           "Main.fs": "module App.Main\nopen App.Util\ntype S(log: int -> unit) =\n"
+                                      "    member this.Run(handler: int -> unit) = handler 1\n"
+                                      "    member this.Log() = log 2\n"}, set()),
+            # `let rec f ... and g ...`: g también es un símbolo y f lo ve
+            "fs_rec": ({"App.fsproj": fsproj, "Util.fs": "module App.Util\nlet z x = x\n",
+                        "Main.fs": "module App.Main\nlet rec f x = g x\nand g x = f x\n"},
+                       {("calls", "Main.fs::Main.f", "Main.fs::Main.g"),
+                        ("calls", "Main.fs::Main.g", "Main.fs::Main.f")}),
+            # dos scripts que nadie incluye no comparten nombres
+            "jl_scripts": ({"examples/demo.jl": "main() = draw(1)\n", "docs/make.jl": "draw(x) = x\n",
+                            "bench/b.jl": "draw(x) = 2x\n"}, set()),
+            # funciones locales, `do` y desestructuración tapan; un módulo anidado no hereda
+            "jl_locals": ({"src/Pkg.jl": 'module Pkg\ninclude("util.jl")\ninclude("main.jl")\nend\n',
+                           # cada mecanismo con un nombre propio: el conjunto de locales es
+                           # de todo el archivo y uno taparía a otro
+                           "src/util.jl": "step(x) = x\nhelper(x) = x\nh(x) = x\nk(x) = x\nq(x) = x\n",
+                           "src/main.jl": "function outer(x)\n    step(y) = y + 1\n    step(x)\nend\n"
+                                          "function outer2(x)\n    function helper(y)\n        y\n    end\n    helper(x)\nend\n"
+                                          "function outer3(d)\n    (h, k) = d\n    h(1) + k(2)\nend\n"
+                                          "function outer4(d)\n    map(d) do q\n        q(1)\n    end\nend\n"},
+                          set()),
+            "jl_nested": ({"M.jl": "module M\nload_config(p) = p\nmodule Sub\nfunction read_all(p)\n"
+                                   "    load_config(p)\nend\nend\nend\n"}, set()),
+            # `using A` solo trae lo exportado; un include mutuo no rompe nada
+            "jl_export": ({"src/Pkg.jl": 'module Pkg\ninclude("helpers.jl")\ninclude("api.jl")\nend\n',
+                           "src/helpers.jl": "module Helpers\nexport tidy\ntidy(x) = x\nselect(df, c) = df\nend\n",
+                           "src/api.jl": "module Api\nusing ..Helpers\nfunction run(df)\n    tidy(select(df, 1))\nend\nend\n",
+                           "src/a.jl": 'include("b.jl")\n', "src/b.jl": 'include("a.jl")\nf() = 1\n'},
+                          {("calls", "src/api.jl::Api.run", "src/helpers.jl::Helpers.tidy")}),
+        }
+        for label, (files, expected) in cases.items():
+            root = os.path.join(self.tmp, label)
+            for rel, src in files.items():
+                os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                with open(os.path.join(root, rel), "w", encoding="utf-8") as f:
+                    f.write(src)
+            store = Store(os.path.join(self.tmp, f"{label}.db"))
+            Indexer(store, {"projects": [{"name": label, "root": root}]}).index_all()
+            got = {(e["type"], e["source"].split("/", 1)[1], e["target"].split("/", 1)[1])
+                   for e in store.all_edges() if e["type"] == "calls" and "::" in e["source"]}
+            selfimp = [e for e in store.all_edges() if e["type"] == "imports" and e["source"] == e["target"]]
+            prefixes = [n["name"] for n in store.all_nodes(types=["symbol"]) if "M.M.M" in n["name"]]
+            store.close()
+            self.assertEqual(got, expected, label)
+            self.assertEqual((selfimp, prefixes), ([], []), label)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_camelcase_module_names(self):
+        # OCaml `myModule.ml` es `MyModule` (no `Mymodule`). En F#, `open BuildCommon` de un
+        # script `BuildCommon.fsx` es un módulo propio, no `external:BuildCommon`.
+        self.write("myModule.ml", "let f x = x\n")
+        self.write("main.ml", "let run x = MyModule.f x\n")
+        self.write("scripts/BuildCommon.fsx", "let common x = x\n")
+        self.write("build.fsx", '#load "scripts/BuildCommon.fsx"\nopen BuildCommon\n')
+        xcalls, deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, {("proj/main.ml::run", "proj/myModule.ml::f")})
+        self.assertEqual(deps, {("proj/main.ml", "proj/myModule.ml"),
+                                ("proj/build.fsx", "proj/scripts/BuildCommon.fsx")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_fsharp_symbol_compiled_after_caller(self):
+        # B.fs se compila ANTES que C.fs: no puede ver C.later (y sin .fsproj, nada)
+        self.write("P.fsproj", '<Project><ItemGroup><Compile Include="B.fs" />'
+                   '<Compile Include="C.fs" /></ItemGroup></Project>\n')
+        self.write("B.fs", "module App.B\nlet run x = App.C.later x\n")
+        self.write("C.fs", "module App.C\nlet later x = x\n")
+        self.write("loose/D.fs", "module App.D\nlet go x = App.B.run x\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_julia_same_name_in_two_modules_and_parameter(self):
+        # `f` lo exportan dos módulos no relacionados usados a la vez -> ambiguo. `g` es un
+        # parámetro, aunque `A` defina un `g`.
+        self.write("A.jl", "module A\nf(x) = x\ng(x) = x\nend\n")
+        self.write("B.jl", "module B\nf(x) = x\nend\n")
+        self.write("main.jl", "using A, B\nrun(g, x) = f(x) + g(x)\n")
+        xcalls, _deps, _intra, _syms = self._graph()
+        self.assertEqual(xcalls, set())
+
+
+class TestM15d3(_M15dGraph):
+    """M15d-3: contratos de servicio. Protobuf y GraphQL dan `references` (e `implements`)
+    con procedencia `ast-ref` (EXTRACTED), solo hacia destinos inequívocos."""
+
+    def _refs(self, lang=None):
+        if lang:
+            root = os.path.join(CROSSFILE_DIR, lang)
+            store = Store(os.path.join(self.tmp, f"{lang}.db"))
+            Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        else:
+            store, _ = self.index()
+        rows = {(e["type"], e["source"], e["target"]) for e in store.all_edges()
+                if e["type"] in ("references", "implements") and e["provenance"] == "ast-ref"}
+        deps = {(e["source"], e["target"]) for e in store.all_edges()
+                if e["type"] in ("imports", "depends_on")}
+        store.close()
+        return rows, deps
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_fixture_references(self):
+        b, m = "protobuf/proto/billing/v1/billing.proto", "protobuf/proto/common/money.proto"
+        rows, deps = self._refs("protobuf")
+        self.assertEqual({("references", f"{b}::Invoice", f"{m}::Money"),        # otro paquete
+                          ("references", f"{b}::Invoice", f"{b}::Invoice.Line"),  # anidado
+                          ("references", f"{b}::Billing.Create", f"{b}::CreateRequest"),
+                          ("references", f"{b}::Billing.Create", f"{b}::Invoice")} - rows, set())
+        self.assertEqual({(b, m), (b, "external:google/protobuf")} - deps, set())
+        u, p = "graphql/schema/user.graphql", "graphql/schema/post.graphql"
+        rows, _deps = self._refs("graphql")
+        self.assertEqual({("implements", f"{p}::Post", f"{u}::Node"),
+                          ("references", f"{u}::User.posts", f"{p}::Post"),
+                          ("references", f"{u}::User.posts", f"{u}::PostFilter"),   # argumento
+                          ("references", f"{p}::User.favorite", f"{u}::User"),      # extend type
+                          ("references", f"{p}::Query.me", f"{u}::User")} - rows, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_proto_unqualified_name_in_two_packages_and_not_imported(self):
+        # `Money` existe en los paquetes a y b, ambos importados: sin calificar es ambiguo.
+        # `Hidden` existe en un archivo que no se importa: no se ve.
+        self.write("a.proto", 'syntax = "proto3";\npackage a;\nmessage Money {}\n')
+        self.write("b.proto", 'syntax = "proto3";\npackage b;\nmessage Money {}\n')
+        self.write("h.proto", 'syntax = "proto3";\npackage c;\nmessage Hidden {}\n')
+        self.write("c.proto", 'syntax = "proto3";\npackage c;\nimport "a.proto";\n'
+                   'import "b.proto";\nmessage X {\n  Money m = 1;\n  Hidden h = 2;\n}\n')
+        rows, _deps = self._refs()
+        self.assertEqual(rows, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_graphql_type_defined_twice(self):
+        # Dos esquemas del monorepo definen `User`: sin arista (no se adivina cuál)
+        self.write("a/schema.graphql", "type User { id: ID! }\n")
+        self.write("b/schema.graphql", "type User { id: ID! }\n")
+        self.write("c/query.graphql", "type Query { me: User }\n")
+        rows, _deps = self._refs()
+        self.assertEqual(rows, set())
+
+
+def _cobol_extract_in_child(name, src):
+    """Destino de subproceso (nivel de módulo: `spawn` lo importa por nombre)."""
+    from memorygraf.extractors import ts_generic
+    ts_generic.extract(name, "p", src)
+
+
+class TestM15d4(_M15dGraph):
+    """M15d-4: COBOL. Normalización previa (EXEC fuera, formato libre -> fijo, sin mover
+    líneas), PERFORM/GO TO dentro del programa, CALL/LINK/XCTL con literal entre
+    programas, COPY a copybooks y EXEC SQL contra el DDL del repo."""
+
+    def _all(self, lang=None):
+        if lang:
+            root = os.path.join(CROSSFILE_DIR, lang)
+            store = Store(os.path.join(self.tmp, f"{lang}.db"))
+            Indexer(store, {"projects": [{"name": lang, "root": root}]}).index_all()
+        else:
+            store, _ = self.index()
+        rows = {(e["type"], e["source"], e["target"]) for e in store.all_edges()
+                if e["type"] in ("calls", "imports", "references", "depends_on")}
+        syms = {n["name"]: (n["span_start"], n["span_end"]) for n in store.all_nodes(types=["symbol"])}
+        store.close()
+        return rows, syms
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_fixture(self):
+        b, c = "cobol/app/cbl/BILLING.cbl", "cobol/app/cbl"
+        rows, syms = self._all("cobol")
+        expected = {
+            ("calls", f"{b}::BILLING.MAIN-PARA", f"{b}::BILLING.CALC-PARA"),        # PERFORM
+            ("calls", f"{b}::BILLING.MAIN-PARA", f"{b}::BILLING.CALC-EXIT"),        # ... THRU
+            ("calls", f"{b}::BILLING.MAIN-PARA", f"{c}/UTILPGM.cbl::UTILPGM"),      # CALL 'X'
+            ("calls", f"{b}::BILLING.MAIN-PARA", f"{c}/ACCTUPD.cbl::ACCTUPD"),      # CICS LINK
+            ("imports", b, "cobol/app/cpy/EMPREC.cpy"),                              # COPY
+            ("references", f"{b}::BILLING.MAIN-PARA", "cobol/app/ddl/accounts.sql::ACCOUNTS"),
+        }
+        self.assertEqual(expected - rows, set())
+        # sin aristas de más: CALL WS-PGM es dinámico y nada es `external:`
+        self.assertEqual({r for r in rows if r[1].startswith(b) and r[0] != "imports"},
+                         {r for r in expected if r[0] != "imports"})
+        # números de línea del ORIGINAL (secuencia, comentario en col. 7, bloques EXEC)
+        self.assertEqual((syms["BILLING.MAIN-PARA"], syms["BILLING.CALC-PARA"],
+                          syms["BILLING.WS-PGM"], syms["ACCTUPD.UPD-PARA"], syms["EMP-REC"]),
+                         ((10, 18), (19, 20), (6, 6), (5, 6), (1, 1)))
+        # `CALL WS-PGM` ni siquiera sale del extractor (no depende de que no exista WS-PGM)
+        from memorygraf.extractors import ts_generic
+        with open(os.path.join(CROSSFILE_DIR, b), encoding="utf-8") as f:
+            _n, _e, _i, calls_out, _b = ts_generic.extract("BILLING.cbl", "p", f.read())
+        self.assertEqual({(n, k) for _c, n, k in calls_out},
+                         {("UTILPGM", "program"), ("ACCTUPD", "program"), ("accounts", "ref")})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_duplicate_program_id_and_copybook(self):
+        # Dos programas con el mismo PROGRAM-ID y dos copybooks EMPREC.cpy: ambiguos
+        prog = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. {}.\n" \
+               "       PROCEDURE DIVISION.\n       P.\n           {}\n           GOBACK.\n"
+        self.write("a/MAIN.cbl", "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. MAIN.\n"
+                   "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n           COPY EMPREC.\n"
+                   "       PROCEDURE DIVISION.\n       P.\n           CALL 'DUP'.\n")
+        self.write("a/DUP.cbl", prog.format("DUP", "CONTINUE"))
+        self.write("b/DUP2.cbl", prog.format("DUP", "CONTINUE"))
+        self.write("a/EMPREC.cpy", "       01  EMP-REC.\n")
+        self.write("b/EMPREC.cpy", "       01  EMP-REC.\n")
+        rows, _syms = self._all()
+        self.assertEqual({r for r in rows if r[1].startswith("proj/a/MAIN.cbl")}, set())
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_normalization_keeps_lines_and_parses(self):
+        from memorygraf.extractors import ts_generic
+        fixed = ("000100 IDENTIFICATION DIVISION.\n000200 PROGRAM-ID. P.\n000300 DATA DIVISION.\n"
+                 "000400 WORKING-STORAGE SECTION.\n000500     EXEC SQL INCLUDE SQLCA END-EXEC.\n"
+                 "000600 01  R PIC X.\n000700 PROCEDURE DIVISION.\n000800* EXEC CICS EN UN COMENTARIO\n"
+                 "000900 A.\n001000     EXEC CICS RETURN\n001100     END-EXEC\n001200     GOBACK.\n")
+        free = (">>SOURCE FORMAT FREE\nIDENTIFICATION DIVISION.\nPROGRAM-ID. Q.\n"
+                "PROCEDURE DIVISION.\nB.\n    EXEC SQL SELECT 1 FROM T END-EXEC\n    GOBACK.\n")
+        for src, n_blocks in ((fixed, 2), (free, 1)):
+            norm, blocks = ts_generic._cobol_normalize(src)
+            self.assertEqual(norm.count("\n"), src.count("\n"))           # no mueve líneas
+            self.assertEqual(len(blocks), n_blocks)                         # el comentario no
+            self.assertFalse(ts_generic._parser("cobol").parse(norm.encode()).root_node.has_error)
+        # el `EXEC CICS` del comentario no se traga el párrafo A
+        names = {n.name for n in ts_generic.extract("p.cbl", "p", fixed)[0]}
+        self.assertIn("P.A", names)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_short_lines_and_ctrl_z_do_not_hang(self):
+        # La gramática entra en un bucle infinito NATIVO (ni try/except ni el callback de
+        # progreso lo cortan) si el archivo acaba en una línea de 1 a 5 caracteres: el
+        # Ctrl-Z de DOS, un número de secuencia suelto, un copybook en formato libre...
+        # Cada caso corre en un subproceso con tope: si vuelve el cuelgue, el test falla
+        # en vez de dejar colgada la suite.
+        import multiprocessing as mp
+        base = ("       IDENTIFICATION DIVISION.\n       PROGRAM-ID. X.\n"
+                "       PROCEDURE DIVISION.\n       A.\n           GOBACK.\n")
+        cases = [("x.cbl", base + "\x1a"), ("x.cbl", base + "0\n"), ("x.cbl", base + "12345\n\n"),
+                 ("x.cbl", "\x1a"), ("x.cbl", "AB\n"), ("x.cbl", "  .\n"), ("x.cbl", "EJECT\n"),
+                 ("c.cpy", "01 CUST-REC.\n   05 CUST-ID PIC 9(5).\n01 X.\n"),
+                 ("c.cpy", "       01  REC.\n?")]
+        ctx = mp.get_context("spawn")
+        for name, src in cases:
+            p = ctx.Process(target=_cobol_extract_in_child, args=(name, src))
+            p.start()
+            p.join(20)
+            hung = p.is_alive()
+            if hung:
+                p.kill()
+            self.assertFalse(hung, f"cuelgue con {name}: {src[-12:]!r}")
+            self.assertEqual(p.exitcode, 0, f"excepción con {name}: {src[-12:]!r}")
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_audit_comments_literals_sections_and_programs(self):
+        # Hallazgos de la auditoría de M15d-4, cada uno con su caso.
+        from memorygraf.extractors import ts_generic
+        head = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. P.\n"
+
+        def ex(src, name="p.cbl"):
+            nodes, edges, raws, out, _b = ts_generic.extract(name, "p", src)
+            return ({n.name: (n.span_start, n.span_end) for n in nodes if n.type == "symbol"},
+                    {(e.source.split("::")[1], e.target.split("::")[1]) for e in edges
+                     if e.type == "calls"}, raws, {(m, k) for _c, m, k in out})
+        # COPY y EXEC SQL dentro de un literal o de un comentario `*>`: ni import, ni
+        # referencia, ni código tragado; PERFORM/CALL de un DISPLAY tampoco (red léxica)
+        syms, calls, raws, out = ex(
+            head + "       PROCEDURE DIVISION.\n           ENTRY 'DLITCBL' USING PCB-1 *.\n"
+            "       A.\n           DISPLAY 'PLEASE COPY CUSTREC. NOW'\n"
+            "           DISPLAY \"PERFORM B THEN CALL 'OLDPGM'\"\n"
+            "           PERFORM C. *> EXEC SQL DELETE FROM OLD_AUDIT END-EXEC\n"
+            "       B.\n           GOBACK.\n       C.\n           GOBACK.\n")
+        self.assertEqual(raws, [])
+        self.assertEqual(out, set())
+        self.assertEqual(calls, {("P.A", "P.C")})
+        self.assertTrue({"P.A", "P.B", "P.C"} <= set(syms))
+        # párrafos homónimos en dos secciones: uno por sección, y PERFORM a la propia
+        syms, calls, _r, _o = ex(
+            head + "       PROCEDURE DIVISION.\n       S1 SECTION.\n       GO1.\n"
+            "           PERFORM CHK.\n       CHK.\n           EXIT.\n       S2 SECTION.\n"
+            "       GO2.\n           PERFORM CHK.\n       CHK.\n           EXIT.\n")
+        self.assertEqual(calls, {("P.GO1", "P.S1.CHK"), ("P.GO2", "P.S2.CHK")})
+        self.assertEqual((syms["P.S1.CHK"], syms["P.S2.CHK"]), ((7, 8), (12, 13)))
+        # PROGRAM-ID con literal: el nombre sin comillas
+        syms, _c, _r, _o = ex("       IDENTIFICATION DIVISION.\n       PROGRAM-ID. 'A-B'.\n"
+                              "       PROCEDURE DIVISION.\n       X.\n           GOBACK.\n")
+        self.assertIn("A-B.X", syms)
+        # formato libre: lo que pasa de la columna 65 del original no se pierde
+        long_line = "    PERFORM B-PARA" + " " * 60 + "CALL 'FARPGM'\n"
+        _s, calls, raws, out = ex(">>SOURCE FORMAT FREE\nIDENTIFICATION DIVISION.\nPROGRAM-ID. F.\n"
+                                  "PROCEDURE DIVISION.\nA-PARA.\n" + long_line + "    GOBACK.\n"
+                                  "B-PARA.\n    GOBACK.\n")
+        self.assertIn(("F.A-PARA", "F.B-PARA"), calls)
+        self.assertIn(("FARPGM", "program"), out)
+        # un copybook con BOM no pierde su primer registro
+        syms, *_ = ex("\ufeff       01  FIRST-REC.\n       01  SECOND-REC.\n", "c.cpy")
+        self.assertEqual(set(syms), {"FIRST-REC", "SECOND-REC"})
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_audit_calls_only_reach_top_level_programs(self):
+        # CALL 'X' externo: ni a la sección X de otro programa ni a un programa anidado X
+        # (no es visible fuera de su padre). Y con dos programas en un archivo, los COPY de
+        # la DATA DIVISION del segundo se quedan (sus 01 no se pierden).
+        self.write("A.cbl", "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. A.\n"
+                   "       PROCEDURE DIVISION.\n       M.\n           CALL 'X'\n"
+                   "           CALL 'INNER'\n           GOBACK.\n")
+        self.write("B.cbl", "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. B.\n"
+                   "       PROCEDURE DIVISION.\n       X SECTION.\n       P.\n           GOBACK.\n"
+                   "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. INNER.\n"
+                   "       PROCEDURE DIVISION.\n       Q.\n           GOBACK.\n"
+                   "       END PROGRAM INNER.\n       END PROGRAM B.\n")
+        self.write("C.cbl", "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. C1.\n"
+                   "       PROCEDURE DIVISION.\n       P1.\n           GOBACK.\n"
+                   "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. C2.\n"
+                   "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+                   "           COPY RECF.\n       01  WS-X PIC X.\n"
+                   "       PROCEDURE DIVISION.\n       P2.\n           GOBACK.\n")
+        self.write("RECF.cpy", "       01  REC-F PIC X.\n")
+        rows, syms = self._all()
+        self.assertEqual({r for r in rows if r[1].startswith("proj/A.cbl")}, set())
+        self.assertIn("C2.WS-X", syms)
+        from memorygraf.extractors import ts_generic       # el COPY de C2 sigue en su sitio
+        with open(os.path.join(self.proj, "C.cbl"), encoding="utf-8") as f:
+            self.assertIn("COPY RECF.", ts_generic._cobol_normalize(f.read())[0])
+        self.assertIn(("imports", "proj/C.cbl", "proj/RECF.cpy"), rows)
+
+    @unittest.skipUnless(_ts.available(), "requiere tree-sitter (extra 'parsers')")
+    def test_grammar_limits_are_worked_around(self):
+        # Construcciones reales (CardDemo) con las que la gramática pierde el resto del
+        # programa: `COPY ... REPLACING` en la PROCEDURE DIVISION, `NOT=` sin espacio y JCL
+        # con `EXEC PGM=` dentro de un literal. Y una cabecera que no entiende (`ENTRY`
+        # de DL/I): la red léxica recupera párrafos y PERFORM.
+        from memorygraf.extractors import ts_generic
+        head = "       IDENTIFICATION DIVISION.\n       PROGRAM-ID. P.\n"
+        cases = {
+            "copy": head + "       PROCEDURE DIVISION.\n       A.\n           COPY X REPLACING\n"
+                    "               ==:T:== BY ==WS==.\n           PERFORM B.\n       B.\n           GOBACK.\n",
+            "not=": head + "       PROCEDURE DIVISION.\n       A.\n           IF X NOT= Y\n"
+                    "              PERFORM B\n           END-IF.\n       B.\n           GOBACK.\n",
+            # JCL partido en varias líneas (como CORPT00C): la línea del EXEC no tiene comillas
+            "jcl": head + "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+                   "       01 J PIC X(80) VALUE\n         \"//STEP10\n         EXEC PGM=SORT\".\n"
+                   "       PROCEDURE DIVISION.\n       A.\n           PERFORM B.\n       B.\n           GOBACK.\n",
+            # `EXEC SQL` dentro de un literal de una línea
+            "literal": head + "       DATA DIVISION.\n       WORKING-STORAGE SECTION.\n"
+                       "       01 K PIC X(20) VALUE 'EXEC SQL X'.\n"
+                       "       PROCEDURE DIVISION.\n       A.\n           PERFORM B.\n       B.\n           GOBACK.\n",
+            "dli": head + "       PROCEDURE DIVISION.\n           ENTRY 'DLITCBL' USING PCB-1 PCB-2 *.\n"
+                   "       A.\n           PERFORM B.\n       B.\n           GOBACK.\n",
+        }
+        for label, src in cases.items():
+            nodes, edges, raws, _o, _b = ts_generic.extract("p.cbl", "p", src)
+            names = {n.name for n in nodes}
+            calls = {(e.source.split("::")[1], e.target.split("::")[1]) for e in edges if e.type == "calls"}
+            self.assertTrue({"P.A", "P.B"} <= names, label)
+            self.assertIn(("P.A", "P.B"), calls, label)
+            if label == "copy":
+                self.assertEqual(raws, ["copy:X"])
+
+
 class TestAuditM15(Base):
     """Regresiones de la auditoría de M15 (SQL léxico, Xcode, LSP). Cada test reproduce
     un fallo concreto: aristas falsas, símbolos perdidos o una excepción que tumbaba el sync."""

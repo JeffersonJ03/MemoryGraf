@@ -282,7 +282,7 @@ _CAPS = [
         "key": "parsers", "pkgs": ["tree-sitter>=0.23", "tree-sitter-language-pack>=0.9"],
         "detect": _has_parsers,
         "on": "símbolos/llamadas JS/TS exactos (tree-sitter)",
-        "off": "extracción JS/TS por regex aproximada",
+        "off": "extracción JS/TS por regex aproximada; el resto de lenguajes, solo nodo archivo",
         "after": "memorygraf sync   # reindexa JS/TS con el parser exacto",
     },
     {
@@ -605,9 +605,10 @@ def _render_lsp_langs(report: list, log=print) -> None:
     log("")
     log("  LSP por lenguaje del proyecto (MemoryGraf cubre LSP para Python, TS/JS, "
         "Go, Rust, C/C++, Java, C#, PHP y R):")
+    symbols = "indexado (símbolos)" if _has_parsers() else "solo archivo (sin el extra 'parsers')"
     for r in report:
         if not r["supported"]:
-            log(f"    [–] {r['lang']:<14} indexado (símbolos) · SIN capa LSP en MemoryGraf")
+            log(f"    [–] {r['lang']:<14} {symbols} · SIN capa LSP en MemoryGraf")
             continue
         mark = "✓" if r["ok"] else "✗"
         state = "servidor OK" if r["ok"] else "FALTA el language-server"

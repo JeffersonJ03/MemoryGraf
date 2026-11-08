@@ -1,0 +1,12 @@
+interface Node {
+  id: ID!
+}
+
+type User implements Node {
+  id: ID!
+  posts(filter: PostFilter): [Post!]!
+}
+
+input PostFilter {
+  published: Boolean
+}

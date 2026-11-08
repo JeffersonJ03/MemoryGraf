@@ -31,7 +31,7 @@ from typing import Tuple
 
 from ..model import Node, Edge, NODE_FILE, NODE_SYMBOL, EDGE_DEFINES, symbol_id, file_id
 
-EXTS = {"sql", "pks", "pkb", "pls", "plb", "prc", "fnc", "trg"}
+EXTS = {"sql", "ddl", "pks", "pkb", "pls", "plb", "prc", "fnc", "trg"}   # ddl: DB2/Oracle (M15d-4)
 
 # Tipos de objeto: refs (datos) y rutinas (código). Lo usa el indexer al resolver.
 REF_KINDS = {"table", "view", "sequence", "synonym"}

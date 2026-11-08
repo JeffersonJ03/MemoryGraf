@@ -1,0 +1,12 @@
+type Post implements Node {
+  id: ID!
+  author: User
+}
+
+extend type User {
+  favorite: Post
+}
+
+type Query {
+  me: User
+}
